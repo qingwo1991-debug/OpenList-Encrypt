@@ -5,9 +5,10 @@ import (
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rc4"
-	"encoding/hex"
 	"errors"
 	"io"
+	"path"
+	"strings"
 )
 
 // EncryptionType 加密类型
@@ -16,7 +17,14 @@ type EncryptionType string
 const (
 	EncTypeAESCTR EncryptionType = "aes-ctr"
 	EncTypeRC4    EncryptionType = "rc4md5"
+	EncTypeMix    EncryptionType = "mix"
 )
+
+// 缓存密码外部密钥
+var passwdOutwardCache = make(map[string]string)
+
+// CRC6 实例
+var crc6 = NewCRC6()
 
 // FlowEncryptor 流加密器接口
 type FlowEncryptor interface {
@@ -212,13 +220,49 @@ func (e *RC4MD5Encryptor) Decrypt(data []byte) ([]byte, error) {
 // NewFlowEncryptor 创建流加密器
 func NewFlowEncryptor(password string, encType EncryptionType, fileSize int64) (FlowEncryptor, error) {
 	switch encType {
-	case EncTypeAESCTR:
+	case EncTypeAESCTR, "aesctr":
 		return NewAESCTREncryptor(password, fileSize)
-	case EncTypeRC4:
+	case EncTypeRC4, "rc4":
 		return NewRC4MD5Encryptor(password, fileSize)
+	case EncTypeMix:
+		return NewMixEncryptor(password, fileSize)
 	default:
 		return nil, errors.New("unsupported encryption type: " + string(encType))
 	}
+}
+
+// GetPasswdOutward 获取外部密码（用于文件名加密）
+func GetPasswdOutward(password string, encType EncryptionType) string {
+	key := password + string(encType)
+	if cached, ok := passwdOutwardCache[key]; ok {
+		return cached
+	}
+
+	var passwdOutward string
+	switch encType {
+	case EncTypeMix:
+		enc, _ := NewMixEncryptor(password, 1)
+		if enc != nil {
+			passwdOutward = enc.GetPasswdOutward()
+		}
+	case EncTypeRC4, "rc4":
+		if len(password) != 32 {
+			passwdOutward = deriveKeyHex(password, "RC4", 16)
+		} else {
+			passwdOutward = password
+		}
+	case EncTypeAESCTR, "aesctr":
+		if len(password) != 32 {
+			passwdOutward = deriveKeyHex(password, "AES-CTR", 16)
+		} else {
+			passwdOutward = password
+		}
+	default:
+		passwdOutward = password
+	}
+
+	passwdOutwardCache[key] = passwdOutward
+	return passwdOutward
 }
 
 // EncryptReader 加密读取器
@@ -275,37 +319,84 @@ func (r *DecryptReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// EncryptFilename 加密文件名
-func EncryptFilename(password string, encType EncryptionType, filename string) (string, error) {
-	encryptor, err := NewFlowEncryptor(password, encType, int64(len(filename)))
-	if err != nil {
-		return "", err
-	}
-	
-	encrypted, err := encryptor.Encrypt([]byte(filename))
-	if err != nil {
-		return "", err
-	}
-	
-	return hex.EncodeToString(encrypted), nil
+// EncodeName 使用 MixBase64 编码文件名（兼容 alist-encrypt）
+func EncodeName(password string, encType EncryptionType, plainName string) string {
+	passwdOutward := GetPasswdOutward(password, encType)
+	mix64 := NewMixBase64(passwdOutward, "")
+	encodeName := mix64.Encode([]byte(plainName))
+	// 添加 CRC6 校验位
+	crc6Bit := crc6.Checksum([]byte(encodeName + passwdOutward))
+	crc6Check := GetSourceChar(int(crc6Bit))
+	return encodeName + string(crc6Check)
 }
 
-// DecryptFilename 解密文件名
+// DecodeName 使用 MixBase64 解码文件名（兼容 alist-encrypt）
+func DecodeName(password string, encType EncryptionType, encodedName string) string {
+	if len(encodedName) < 2 {
+		return ""
+	}
+	
+	crc6Check := encodedName[len(encodedName)-1]
+	passwdOutward := GetPasswdOutward(password, encType)
+	
+	// 验证 CRC6
+	subEncName := encodedName[:len(encodedName)-1]
+	crc6Bit := crc6.Checksum([]byte(subEncName + passwdOutward))
+	if GetSourceChar(int(crc6Bit)) != crc6Check {
+		return ""
+	}
+	
+	mix64 := NewMixBase64(passwdOutward, "")
+	decoded, err := mix64.Decode(subEncName)
+	if err != nil {
+		return ""
+	}
+	
+	return string(decoded)
+}
+
+// ConvertRealName 将显示名转换为真实加密名
+func ConvertRealName(password string, encType EncryptionType, pathText string) string {
+	fileName := path.Base(pathText)
+	
+	// 检查是否有 orig_ 前缀（表示原始未加密文件）
+	if strings.HasPrefix(fileName, "orig_") {
+		return strings.TrimPrefix(fileName, "orig_")
+	}
+	
+	// 编码文件名
+	ext := path.Ext(fileName)
+	nameWithoutExt := strings.TrimSuffix(fileName, ext)
+	encName := EncodeName(password, encType, nameWithoutExt)
+	return encName + ext
+}
+
+// ConvertShowName 将加密名转换为显示名
+func ConvertShowName(password string, encType EncryptionType, pathText string) string {
+	fileName := path.Base(pathText)
+	ext := path.Ext(fileName)
+	encName := strings.TrimSuffix(fileName, ext)
+	
+	// 尝试解码
+	showName := DecodeName(password, encType, encName)
+	if showName == "" {
+		// 解码失败，添加 orig_ 前缀表示原始文件
+		return "orig_" + fileName
+	}
+	
+	return showName + ext
+}
+
+// EncryptFilename 加密文件名（简单封装）
+func EncryptFilename(password string, encType EncryptionType, filename string) (string, error) {
+	return EncodeName(password, encType, filename), nil
+}
+
+// DecryptFilename 解密文件名（简单封装）
 func DecryptFilename(password string, encType EncryptionType, encryptedName string) (string, error) {
-	data, err := hex.DecodeString(encryptedName)
-	if err != nil {
-		return "", err
+	result := DecodeName(password, encType, encryptedName)
+	if result == "" {
+		return "", errors.New("failed to decrypt filename")
 	}
-	
-	encryptor, err := NewFlowEncryptor(password, encType, int64(len(data)))
-	if err != nil {
-		return "", err
-	}
-	
-	decrypted, err := encryptor.Decrypt(data)
-	if err != nil {
-		return "", err
-	}
-	
-	return string(decrypted), nil
+	return result, nil
 }

@@ -512,27 +512,45 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 解析响应并缓存文件信息
+	// 解析响应
 	var result map[string]interface{}
 	if err := json.Unmarshal(respBody, &result); err == nil {
-		if data, ok := result["data"].(map[string]interface{}); ok {
-			if content, ok := data["content"].([]interface{}); ok {
-				var reqData map[string]string
-				json.Unmarshal(body, &reqData)
-				dirPath := reqData["path"]
+		if code, ok := result["code"].(float64); ok && code == 200 {
+			if data, ok := result["data"].(map[string]interface{}); ok {
+				if content, ok := data["content"].([]interface{}); ok {
+					var reqData map[string]string
+					json.Unmarshal(body, &reqData)
+					dirPath := reqData["path"]
 
-				for _, item := range content {
-					if fileMap, ok := item.(map[string]interface{}); ok {
-						name, _ := fileMap["name"].(string)
-						size, _ := fileMap["size"].(float64)
-						filePath := path.Join(dirPath, name)
-						
-						p.fileCache.Store(filePath, &FileInfo{
-							Name: name,
-							Size: int64(size),
-							Path: filePath,
-						})
+					// 查找加密路径配置
+					encPath := p.findEncryptPath(dirPath)
+
+					for _, item := range content {
+						if fileMap, ok := item.(map[string]interface{}); ok {
+							name, _ := fileMap["name"].(string)
+							size, _ := fileMap["size"].(float64)
+							isDir, _ := fileMap["is_dir"].(bool)
+							filePath := path.Join(dirPath, name)
+							
+							// 缓存文件信息
+							p.fileCache.Store(filePath, &FileInfo{
+								Name:  name,
+								Size:  int64(size),
+								IsDir: isDir,
+								Path:  filePath,
+							})
+
+							// 如果需要加密文件名且不是目录
+							if encPath != nil && encPath.EncName && !isDir {
+								// 将加密的文件名转换为显示名
+								showName := ConvertShowName(encPath.Password, encPath.EncType, name)
+								fileMap["name"] = showName
+							}
+						}
 					}
+
+					result["data"] = data
+					respBody, _ = json.Marshal(result)
 				}
 			}
 		}
@@ -563,7 +581,21 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	filePath := reqData["path"]
+	originalPath := reqData["path"]
+	filePath := originalPath
+
+	// 检查是否需要转换文件名
+	encPath := p.findEncryptPath(filePath)
+	if encPath != nil && encPath.EncName {
+		// 尝试将显示名转换为真实加密名
+		fileName := path.Base(filePath)
+		if !strings.HasPrefix(fileName, "orig_") {
+			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			filePath = path.Join(path.Dir(filePath), realName)
+			reqData["path"] = filePath
+			body, _ = json.Marshal(reqData)
+		}
+	}
 
 	// 转发请求到 Alist
 	req, err := http.NewRequest("POST", p.getAlistURL()+"/api/fs/get", bytes.NewReader(body))
@@ -596,13 +628,20 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 检查是否需要修改响应
-	encPath := p.findEncryptPath(filePath)
 	if encPath != nil {
 		var result map[string]interface{}
 		if err := json.Unmarshal(respBody, &result); err == nil {
 			if data, ok := result["data"].(map[string]interface{}); ok {
 				rawURL, _ := data["raw_url"].(string)
 				size, _ := data["size"].(float64)
+
+				// 如果开启了文件名加密，将加密名转换为显示名
+				if encPath.EncName {
+					if name, ok := data["name"].(string); ok {
+						showName := ConvertShowName(encPath.Password, encPath.EncType, name)
+						data["name"] = showName
+					}
+				}
 
 				// 创建重定向缓存
 				key := generateRedirectKey()
@@ -617,7 +656,7 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 				scheme := "http"
 				host := r.Host
 				data["raw_url"] = fmt.Sprintf("%s://%s/redirect/%s?decode=1&lastUrl=%s",
-					scheme, host, key, url.QueryEscape(filePath))
+					scheme, host, key, url.QueryEscape(originalPath))
 
 				// 修改 provider 以支持直接播放
 				if provider, ok := data["provider"].(string); ok {
@@ -640,7 +679,8 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 
 // handleDownload 处理下载请求
 func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
-	filePath := r.URL.Path
+	originalPath := r.URL.Path
+	filePath := originalPath
 	
 	// 移除 /d/ 或 /p/ 前缀
 	if strings.HasPrefix(filePath, "/d/") {
@@ -650,17 +690,34 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	filePath = "/" + filePath
 
+	// 检查是否需要解密
+	encPath := p.findEncryptPath(filePath)
+	
+	// 构建实际请求的 URL 路径
+	actualURLPath := originalPath
+	
+	// 如果开启了文件名加密，转换为真实加密名
+	if encPath != nil && encPath.EncName {
+		fileName := path.Base(filePath)
+		if !strings.HasPrefix(fileName, "orig_") {
+			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			newFilePath := path.Join(path.Dir(filePath), realName)
+			if strings.HasPrefix(originalPath, "/d/") {
+				actualURLPath = "/d" + newFilePath
+			} else {
+				actualURLPath = "/p" + newFilePath
+			}
+		}
+	}
+
 	// 获取文件大小
 	var fileSize int64 = 0
 	if cached, ok := p.fileCache.Load(filePath); ok {
 		fileSize = cached.(*FileInfo).Size
 	}
 
-	// 检查是否需要解密
-	encPath := p.findEncryptPath(filePath)
-
 	// 创建到 Alist 的请求
-	req, err := http.NewRequest(r.Method, p.getAlistURL()+r.URL.Path, nil)
+	req, err := http.NewRequest(r.Method, p.getAlistURL()+actualURLPath, nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

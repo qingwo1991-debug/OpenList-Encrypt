@@ -550,6 +550,7 @@ const webUIHTML = `
                     <select id="path-enctype">
                         <option value="aes-ctr">AES-CTR（推荐）</option>
                         <option value="rc4md5">RC4-MD5</option>
+                        <option value="mix">Mix 混淆</option>
                     </select>
                 </div>
                 <div class="form-group">

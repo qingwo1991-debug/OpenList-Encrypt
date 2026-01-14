@@ -190,6 +190,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                       items: const [
                         DropdownMenuItem(value: 'aes-ctr', child: Text('AES-CTR (推荐)')),
                         DropdownMenuItem(value: 'rc4md5', child: Text('RC4-MD5')),
+                        DropdownMenuItem(value: 'mix', child: Text('Mix 混淆')),
                       ],
                       onChanged: (value) {
                         setDialogState(() => encType = value!);
@@ -292,6 +293,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                       items: const [
                         DropdownMenuItem(value: 'aes-ctr', child: Text('AES-CTR (推荐)')),
                         DropdownMenuItem(value: 'rc4md5', child: Text('RC4-MD5')),
+                        DropdownMenuItem(value: 'mix', child: Text('Mix 混淆')),
                       ],
                       onChanged: (value) {
                         setDialogState(() => encType = value!);

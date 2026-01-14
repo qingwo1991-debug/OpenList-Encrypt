@@ -100,11 +100,13 @@ go mod download || true
 # Add golang.org/x/mobile dependency for gomobile
 echo "Adding gomobile dependencies..."
 # 使用 go get 在模块内添加依赖
-go get golang.org/x/mobile@latest || true
-go get golang.org/x/mobile/bind@latest || true
+echo "Getting golang.org/x/mobile/bind..."
+go get golang.org/x/mobile/bind@latest
+echo "Getting golang.org/x/mobile/cmd/gomobile..."
+go get golang.org/x/mobile/cmd/gomobile@latest
 
 echo "Running go mod tidy..."
-go mod tidy || true
+go mod tidy
 
 echo "Initialization complete!"
 echo ""
