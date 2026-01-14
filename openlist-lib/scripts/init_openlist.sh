@@ -32,19 +32,21 @@ if [ -f ./src/go.mod ]; then
     # The openlistlib directory already exists in this repo
     go mod edit -replace github.com/djherbis/times@v1.6.0=github.com/jing332/times@latest
     
-    # Copy required internal packages from OpenList source
-    echo "Copying required internal packages..."
-    mkdir -p ./internal
-    cp -r ./src/internal/* ./internal/ 2>/dev/null || true
+    # Copy ALL required packages from OpenList source
+    echo "Copying required packages from OpenList source..."
     
-    mkdir -p ./pkg
-    cp -r ./src/pkg/* ./pkg/ 2>/dev/null || true
+    # 复制所有必需的目录
+    for dir in internal pkg cmd drivers server; do
+        if [ -d "./src/$dir" ]; then
+            echo "Copying $dir..."
+            mkdir -p "./$dir"
+            cp -r "./src/$dir"/* "./$dir/" 2>/dev/null || true
+        else
+            echo "Warning: $dir not found in source"
+        fi
+    done
     
-    # Also copy the cmd folder if needed for bootstrap
-    mkdir -p ./cmd
-    cp -r ./src/cmd/* ./cmd/ 2>/dev/null || true
-    
-    # Copy openlistlib from source if exists
+    # Copy openlistlib from source if exists, then merge our custom code
     if [ -d ./src/openlistlib ]; then
         echo "Found openlistlib in OpenList source, merging..."
         # Backup our custom openlistlib
@@ -52,14 +54,28 @@ if [ -f ./src/go.mod ]; then
             cp -r ./openlistlib ./openlistlib_custom
         fi
         # Copy source openlistlib
+        mkdir -p ./openlistlib
         cp -r ./src/openlistlib/* ./openlistlib/ 2>/dev/null || true
         # Restore custom files (our encrypt module, etc.)
         if [ -d ./openlistlib_custom ]; then
-            cp -r ./openlistlib_custom/encrypt ./openlistlib/ 2>/dev/null || true
-            cp ./openlistlib_custom/encrypt_server.go ./openlistlib/ 2>/dev/null || true
+            # 复制我们自定义的 encrypt 模块
+            if [ -d ./openlistlib_custom/encrypt ]; then
+                echo "Restoring custom encrypt module..."
+                cp -r ./openlistlib_custom/encrypt ./openlistlib/
+            fi
+            # 复制我们自定义的 encrypt_server.go
+            if [ -f ./openlistlib_custom/encrypt_server.go ]; then
+                echo "Restoring custom encrypt_server.go..."
+                cp ./openlistlib_custom/encrypt_server.go ./openlistlib/
+            fi
             rm -rf ./openlistlib_custom
         fi
     fi
+    
+    # 显示复制后的目录结构
+    echo ""
+    echo "Directory structure after copy:"
+    ls -la
     
     echo "OpenList source initialization completed"
     echo "go.mod location: $(pwd)/go.mod"
