@@ -82,7 +82,7 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
     override fun setEncryptAlistHost(host: String, port: Long, https: Boolean) {
         Log.d(TAG, "setEncryptAlistHost: host=$host, port=$port, https=$https")
         try {
-            Openlistlib.setEncryptAlistHost(host, port.toInt(), https)
+            Openlistlib.setEncryptAlistHost(host, port, https)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set alist host", e)
             throw e
@@ -92,7 +92,7 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
     override fun setEncryptProxyPort(port: Long) {
         Log.d(TAG, "setEncryptProxyPort: port=$port")
         try {
-            Openlistlib.setEncryptProxyPort(port.toInt())
+            Openlistlib.setEncryptProxyPort(port)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set proxy port", e)
             throw e
@@ -119,7 +119,7 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
     ) {
         Log.d(TAG, "updateEncryptPath: index=$index, path=$path")
         try {
-            Openlistlib.updateEncryptPathConfig(index.toInt(), path, password, encType, encName, enable)
+            Openlistlib.updateEncryptPathConfig(index, path, password, encType, encName, enable)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to update encrypt path", e)
             throw e
@@ -129,7 +129,7 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
     override fun removeEncryptPath(index: Long) {
         Log.d(TAG, "removeEncryptPath: index=$index")
         try {
-            Openlistlib.removeEncryptPathConfig(index.toInt())
+            Openlistlib.removeEncryptPathConfig(index)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to remove encrypt path", e)
             throw e
