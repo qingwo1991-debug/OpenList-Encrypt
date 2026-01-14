@@ -28,11 +28,11 @@ if [ -f ./src/go.mod ]; then
     cp ./src/go.mod ./go.mod
     cp ./src/go.sum ./go.sum 2>/dev/null || true
     
-    # Update module name and add replace directives
-    go mod edit -module github.com/OpenListTeam/OpenList/v4
+    # Keep module name as OpenList but add our openlistlib as local package
+    # The openlistlib directory already exists in this repo
     go mod edit -replace github.com/djherbis/times@v1.6.0=github.com/jing332/times@latest
     
-    # Copy required internal packages
+    # Copy required internal packages from OpenList source
     echo "Copying required internal packages..."
     mkdir -p ./internal
     cp -r ./src/internal/* ./internal/ 2>/dev/null || true
@@ -40,8 +40,16 @@ if [ -f ./src/go.mod ]; then
     mkdir -p ./pkg
     cp -r ./src/pkg/* ./pkg/ 2>/dev/null || true
     
+    # Also copy the cmd folder if needed for bootstrap
+    mkdir -p ./cmd
+    cp -r ./src/cmd/* ./cmd/ 2>/dev/null || true
+    
     echo "OpenList source initialization completed"
     echo "go.mod location: $(pwd)/go.mod"
+    
+    # Show the module name
+    echo "Module name:"
+    head -1 ./go.mod
 else
     echo "Error: go.mod not found in cloned source"
     exit 1
@@ -53,3 +61,6 @@ go mod download
 go mod tidy
 
 echo "Initialization complete!"
+echo ""
+echo "Directory structure:"
+ls -la

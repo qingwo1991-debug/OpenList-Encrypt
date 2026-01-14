@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/OpenListTeam/OpenList-Mobile/openlist-lib/openlistlib/encrypt"
+	"github.com/OpenListTeam/OpenList/v4/openlistlib/encrypt"
 	log "github.com/sirupsen/logrus"
 )
 

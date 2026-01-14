@@ -1,12 +1,8 @@
 package encrypt
 
 import (
-	"embed"
-	"encoding/json"
 	"html/template"
-	"net/http"
 	"strings"
-	"time"
 )
 
 // WebUI HTML 模板（嵌入式）
