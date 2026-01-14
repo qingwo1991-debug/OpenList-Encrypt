@@ -83,7 +83,8 @@ go mod download
 
 # Add golang.org/x/mobile dependency for gomobile
 echo "Adding gomobile dependencies..."
-go get golang.org/x/mobile/bind
+# 使用 go mod edit 添加依赖，避免 go get 在某些环境下的问题
+go mod edit -require golang.org/x/mobile@latest || true
 
 go mod tidy
 

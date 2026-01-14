@@ -49,7 +49,6 @@ jobs:
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
-          go get golang.org/x/mobile/bind
           export PATH=$PATH:$(go env GOPATH)/bin
           gomobile init
 
@@ -104,7 +103,8 @@ jobs:
           # 确保依赖完整
           echo ""
           echo "Ensuring dependencies are complete..."
-          go get golang.org/x/mobile/bind
+          # 在模块内添加 mobile/bind 依赖
+          go mod edit -require golang.org/x/mobile@latest || true
           go mod tidy
           
           # 显示 Go 环境
