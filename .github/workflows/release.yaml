@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.2.9519653"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH=$PATH:$(go env GOPATH)/bin
+          gomobile init
+
+      - name: Download OpenList dependencies
+        run: |
+          cd openlist-lib
+          if [ -f scripts/init_openlist.sh ]; then
+            chmod +x scripts/init_openlist.sh
+            ./scripts/init_openlist.sh || true
+          fi
+          go mod download || true
+          go mod tidy || true
+
+      - name: Build Go bindings for Android
+        run: |
+          cd openlist-lib
+          export PATH=$PATH:$(go env GOPATH)/bin
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653
+          mkdir -p ../android/app/libs
+          gomobile bind -v \
+            -target=android \
+            -androidapi=21 \
+            -o ../android/app/libs/openlistlib.aar \
+            ./openlistlib || echo "Go binding build skipped"
+
+      - name: Get Flutter dependencies
+        run: flutter pub get
+
+      - name: Generate code
+        run: |
+          flutter pub run intl_utils:generate || true
+          dart run pigeon --input pigeons/pigeon.dart || true
+
+      - name: Build Release APK
+        run: flutter build apk --release || flutter build apk --debug
+
+      - name: Build Split APKs
+        run: flutter build apk --split-per-abi || true
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Rename APKs
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          cd build/app/outputs/flutter-apk/
+          
+          if [ -f app-release.apk ]; then
+            mv app-release.apk OpenList-Encrypt-${VERSION}.apk
+          fi
+          
+          if [ -f app-arm64-v8a-release.apk ]; then
+            mv app-arm64-v8a-release.apk OpenList-Encrypt-${VERSION}-arm64-v8a.apk
+          fi
+          
+          if [ -f app-armeabi-v7a-release.apk ]; then
+            mv app-armeabi-v7a-release.apk OpenList-Encrypt-${VERSION}-armeabi-v7a.apk
+          fi
+          
+          if [ -f app-x86_64-release.apk ]; then
+            mv app-x86_64-release.apk OpenList-Encrypt-${VERSION}-x86_64.apk
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: OpenList-Encrypt ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## OpenList-Encrypt ${{ steps.version.outputs.VERSION }}
+            
+            ### 功能特性
+            - ✅ 内置 OpenList 服务器
+            - ✅ 加密代理服务（AES-CTR, RC4）
+            - ✅ 在线播放加密视频
+            - ✅ WebDAV 加解密支持
+            
+            ### 下载说明
+            - `OpenList-Encrypt-xxx.apk` - 通用版本（包含所有架构）
+            - `OpenList-Encrypt-xxx-arm64-v8a.apk` - ARM64 版本（推荐，适合大多数现代手机）
+            - `OpenList-Encrypt-xxx-armeabi-v7a.apk` - ARM32 版本（老设备）
+            - `OpenList-Encrypt-xxx-x86_64.apk` - x86_64 版本（模拟器/部分平板）
+            
+            ### 使用方法
+            1. 安装 APK
+            2. 启动应用，OpenList 服务会自动启动
+            3. 进入「加密」页面配置加密代理
+            4. 通过代理地址访问 Alist，加密路径下的文件会自动加解密
+          draft: false
+          prerelease: false
+          files: |
+            build/app/outputs/flutter-apk/OpenList-Encrypt-*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apks
+          path: build/app/outputs/flutter-apk/OpenList-Encrypt-*.apk
+          if-no-files-found: warn

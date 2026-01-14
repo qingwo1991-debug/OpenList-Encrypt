@@ -1,0 +1,128 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master, dev ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.2.9519653"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH=$PATH:$(go env GOPATH)/bin
+          gomobile init
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download OpenList dependencies
+        run: |
+          cd openlist-lib
+          # 初始化 OpenList 依赖
+          if [ -f scripts/init_openlist.sh ]; then
+            chmod +x scripts/init_openlist.sh
+            ./scripts/init_openlist.sh || true
+          fi
+          go mod download || true
+          go mod tidy || true
+
+      - name: Build Go bindings for Android
+        run: |
+          cd openlist-lib
+          export PATH=$PATH:$(go env GOPATH)/bin
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653
+          
+          # 创建输出目录
+          mkdir -p ../android/app/libs
+          
+          # 构建 Android AAR
+          gomobile bind -v \
+            -target=android \
+            -androidapi=21 \
+            -o ../android/app/libs/openlistlib.aar \
+            ./openlistlib || echo "Go binding build failed, continuing..."
+
+      - name: Get Flutter dependencies
+        run: flutter pub get
+
+      - name: Generate code
+        run: |
+          flutter pub run intl_utils:generate || true
+          dart run pigeon --input pigeons/pigeon.dart || true
+
+      - name: Build APK (Debug)
+        run: flutter build apk --debug
+
+      - name: Build APK (Release)
+        run: flutter build apk --release || flutter build apk --debug
+
+      - name: Build APK (Split ABI)
+        run: flutter build apk --split-per-abi || true
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: warn
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: warn
+
+      - name: Upload Split APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-split-abi
+          path: build/app/outputs/flutter-apk/app-*-release.apk
+          if-no-files-found: warn

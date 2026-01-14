@@ -1,0 +1,280 @@
+package openlistlib
+
+import (
+	"errors"
+	"sync"
+
+	"github.com/OpenListTeam/OpenList-Mobile/openlist-lib/openlistlib/encrypt"
+	log "github.com/sirupsen/logrus"
+)
+
+// EncryptProxyManager 加密代理管理器
+type EncryptProxyManager struct {
+	configManager *encrypt.ConfigManager
+	proxyServer   *encrypt.ProxyServer
+	mutex         sync.Mutex
+	initialized   bool
+}
+
+var (
+	encryptManager *EncryptProxyManager
+	encryptOnce    sync.Once
+)
+
+// GetEncryptManager 获取加密管理器单例
+func GetEncryptManager() *EncryptProxyManager {
+	encryptOnce.Do(func() {
+		encryptManager = &EncryptProxyManager{}
+	})
+	return encryptManager
+}
+
+// Initialize 初始化加密代理管理器
+func (m *EncryptProxyManager) Initialize(configPath string) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.initialized {
+		return nil
+	}
+
+	// 创建配置管理器
+	m.configManager = encrypt.NewConfigManager(configPath)
+	if err := m.configManager.Load(); err != nil {
+		log.Warnf("Failed to load encrypt config, using default: %v", err)
+	}
+
+	m.initialized = true
+	log.Info("Encrypt proxy manager initialized")
+	return nil
+}
+
+// StartProxy 启动加密代理服务器
+func (m *EncryptProxyManager) StartProxy() error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if !m.initialized {
+		return errors.New("encrypt manager not initialized")
+	}
+
+	if m.proxyServer != nil && m.proxyServer.IsRunning() {
+		return errors.New("proxy server is already running")
+	}
+
+	config := m.configManager.GetConfig()
+	server, err := encrypt.NewProxyServer(config)
+	if err != nil {
+		return err
+	}
+
+	if err := server.Start(); err != nil {
+		return err
+	}
+
+	m.proxyServer = server
+	log.Info("Encrypt proxy server started")
+	return nil
+}
+
+// StopProxy 停止加密代理服务器
+func (m *EncryptProxyManager) StopProxy() error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.proxyServer == nil {
+		return nil
+	}
+
+	if err := m.proxyServer.Stop(); err != nil {
+		return err
+	}
+
+	m.proxyServer = nil
+	log.Info("Encrypt proxy server stopped")
+	return nil
+}
+
+// IsProxyRunning 检查代理服务器是否运行中
+func (m *EncryptProxyManager) IsProxyRunning() bool {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.proxyServer == nil {
+		return false
+	}
+	return m.proxyServer.IsRunning()
+}
+
+// RestartProxy 重启代理服务器
+func (m *EncryptProxyManager) RestartProxy() error {
+	if err := m.StopProxy(); err != nil {
+		log.Warnf("Error stopping proxy: %v", err)
+	}
+	return m.StartProxy()
+}
+
+// GetConfig 获取配置
+func (m *EncryptProxyManager) GetConfig() *encrypt.ProxyConfig {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return nil
+	}
+	return m.configManager.GetConfig()
+}
+
+// SetAlistHost 设置 Alist 主机
+func (m *EncryptProxyManager) SetAlistHost(host string, port int, https bool) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	return m.configManager.SetAlistHost(host, port, https)
+}
+
+// SetProxyPort 设置代理端口
+func (m *EncryptProxyManager) SetProxyPort(port int) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	return m.configManager.SetProxyPort(port)
+}
+
+// AddEncryptPath 添加加密路径
+func (m *EncryptProxyManager) AddEncryptPath(path, password string, encType string, encName bool) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	return m.configManager.AddEncryptPath(path, password, encrypt.EncryptionType(encType), encName)
+}
+
+// UpdateEncryptPath 更新加密路径
+func (m *EncryptProxyManager) UpdateEncryptPath(index int, path, password string, encType string, encName, enable bool) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	return m.configManager.UpdateEncryptPath(index, path, password, encrypt.EncryptionType(encType), encName, enable)
+}
+
+// RemoveEncryptPath 删除加密路径
+func (m *EncryptProxyManager) RemoveEncryptPath(index int) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	return m.configManager.RemoveEncryptPath(index)
+}
+
+// GetEncryptPaths 获取加密路径列表
+func (m *EncryptProxyManager) GetEncryptPaths() []*encrypt.EncryptPath {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return nil
+	}
+	return m.configManager.GetEncryptPaths()
+}
+
+// VerifyAdminPassword 验证管理密码
+func (m *EncryptProxyManager) VerifyAdminPassword(password string) bool {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return false
+	}
+	return m.configManager.VerifyAdminPassword(password)
+}
+
+// SetAdminPassword 设置管理密码
+func (m *EncryptProxyManager) SetAdminPassword(password string) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	return m.configManager.SetAdminPassword(password)
+}
+
+// === 以下是为 gomobile 导出的函数 ===
+
+// InitEncryptProxy 初始化加密代理（供 gomobile 调用）
+func InitEncryptProxy(configPath string) error {
+	return GetEncryptManager().Initialize(configPath)
+}
+
+// StartEncryptProxy 启动加密代理（供 gomobile 调用）
+func StartEncryptProxy() error {
+	return GetEncryptManager().StartProxy()
+}
+
+// StopEncryptProxy 停止加密代理（供 gomobile 调用）
+func StopEncryptProxy() error {
+	return GetEncryptManager().StopProxy()
+}
+
+// IsEncryptProxyRunning 检查加密代理是否运行中（供 gomobile 调用）
+func IsEncryptProxyRunning() bool {
+	return GetEncryptManager().IsProxyRunning()
+}
+
+// RestartEncryptProxy 重启加密代理（供 gomobile 调用）
+func RestartEncryptProxy() error {
+	return GetEncryptManager().RestartProxy()
+}
+
+// GetEncryptProxyPort 获取代理端口（供 gomobile 调用）
+func GetEncryptProxyPort() int {
+	config := GetEncryptManager().GetConfig()
+	if config == nil {
+		return 5344
+	}
+	return config.ProxyPort
+}
+
+// SetEncryptAlistHost 设置 Alist 主机（供 gomobile 调用）
+func SetEncryptAlistHost(host string, port int, https bool) error {
+	return GetEncryptManager().SetAlistHost(host, port, https)
+}
+
+// SetEncryptProxyPort 设置代理端口（供 gomobile 调用）
+func SetEncryptProxyPort(port int) error {
+	return GetEncryptManager().SetProxyPort(port)
+}
+
+// AddEncryptPathConfig 添加加密路径配置（供 gomobile 调用）
+func AddEncryptPathConfig(path, password, encType string, encName bool) error {
+	return GetEncryptManager().AddEncryptPath(path, password, encType, encName)
+}
+
+// RemoveEncryptPathConfig 删除加密路径配置（供 gomobile 调用）
+func RemoveEncryptPathConfig(index int) error {
+	return GetEncryptManager().RemoveEncryptPath(index)
+}
+
+// VerifyEncryptAdminPassword 验证管理密码（供 gomobile 调用）
+func VerifyEncryptAdminPassword(password string) bool {
+	return GetEncryptManager().VerifyAdminPassword(password)
+}
+
+// SetEncryptAdminPassword 设置管理密码（供 gomobile 调用）
+func SetEncryptAdminPassword(password string) error {
+	return GetEncryptManager().SetAdminPassword(password)
+}
