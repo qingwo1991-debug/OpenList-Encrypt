@@ -667,25 +667,25 @@ const webUIHTML = `
             container.style.display = 'block';
             emptyState.style.display = 'none';
             
-            container.innerHTML = encryptPaths.map((path, index) => `
-                <div class="path-item">
-                    <div class="path-info">
-                        <div class="path-name">${escapeHtml(path.path)}</div>
-                        <div class="path-meta">
-                            ${path.encType.toUpperCase()} | 
-                            ${path.encName ? '加密文件名' : '不加密文件名'}
-                        </div>
-                    </div>
-                    <div class="path-actions">
-                        <label class="toggle-switch">
-                            <input type="checkbox" ${path.enable ? 'checked' : ''} onchange="togglePath(${index}, this.checked)">
-                            <span class="toggle-slider"></span>
-                        </label>
-                        <button class="btn btn-secondary" onclick="editPath(${index})">编辑</button>
-                        <button class="btn btn-danger" onclick="deletePath(${index})">删除</button>
-                    </div>
-                </div>
-            `).join('');
+            container.innerHTML = encryptPaths.map((path, index) =>
+                '<div class="path-item">' +
+                    '<div class="path-info">' +
+                        '<div class="path-name">' + escapeHtml(path.path) + '</div>' +
+                        '<div class="path-meta">' +
+                            path.encType.toUpperCase() + ' | ' +
+                            (path.encName ? '加密文件名' : '不加密文件名') +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="path-actions">' +
+                        '<label class="toggle-switch">' +
+                            '<input type="checkbox" ' + (path.enable ? 'checked' : '') + ' onchange="togglePath(' + index + ', this.checked)">' +
+                            '<span class="toggle-slider"></span>' +
+                        '</label>' +
+                        '<button class="btn btn-secondary" onclick="editPath(' + index + ')">编辑</button>' +
+                        '<button class="btn btn-danger" onclick="deletePath(' + index + ')">删除</button>' +
+                    '</div>' +
+                '</div>'
+            ).join('');
         }
         
         // 显示添加路径模态框
