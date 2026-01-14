@@ -1,8 +1,8 @@
-import 'package:openlist_mobile/contant/native_bridge.dart';
-import 'package:openlist_mobile/generated_api.dart';
-import 'package:openlist_mobile/pages/settings/preference_widgets.dart';
-import 'package:openlist_mobile/pages/settings/troubleshooting_page.dart';
-import 'package:openlist_mobile/utils/language_controller.dart';
+import 'package:openlist_encrypt/contant/native_bridge.dart';
+import 'package:openlist_encrypt/generated_api.dart';
+import 'package:openlist_encrypt/pages/settings/preference_widgets.dart';
+import 'package:openlist_encrypt/pages/settings/troubleshooting_page.dart';
+import 'package:openlist_encrypt/utils/language_controller.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';

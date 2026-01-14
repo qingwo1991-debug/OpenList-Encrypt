@@ -1,4 +1,4 @@
-import 'package:openlist_mobile/generated_api.dart';
+import 'package:openlist_encrypt/generated_api.dart';
 
 class NativeBridge {
   static NativeCommon common = NativeCommon();

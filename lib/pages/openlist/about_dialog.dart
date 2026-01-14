@@ -1,6 +1,6 @@
 import 'dart:ffi';
 
-import 'package:openlist_mobile/contant/native_bridge.dart';
+import 'package:openlist_encrypt/contant/native_bridge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/svg.dart';

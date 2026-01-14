@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-import 'package:openlist_mobile/utils/language_manager.dart';
-import 'package:openlist_mobile/generated/l10n.dart';
+import 'package:openlist_encrypt/utils/language_manager.dart';
+import 'package:openlist_encrypt/generated/l10n.dart';
 
 class LanguageController extends GetxController {
   static LanguageController get to => Get.find();

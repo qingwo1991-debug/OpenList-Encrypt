@@ -1,4 +1,4 @@
-import 'package:openlist_mobile/pages/openlist/log_level_view.dart';
+import 'package:openlist_encrypt/pages/openlist/log_level_view.dart';
 import 'package:flutter/material.dart';
 
 class Log {
