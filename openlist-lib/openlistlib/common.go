@@ -1,6 +1,10 @@
 package openlistlib
 
-import "net"
+import (
+	"net"
+
+	_ "golang.org/x/mobile/bind"
+)
 
 func GetOutboundIP() (net.IP, error) {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
