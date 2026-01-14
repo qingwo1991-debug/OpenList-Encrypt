@@ -35,8 +35,8 @@ if [ -f ./src/go.mod ]; then
     # Copy ALL required packages from OpenList source
     echo "Copying required packages from OpenList source..."
     
-    # 复制所有必需的目录
-    for dir in internal pkg cmd drivers server; do
+    # 复制所有必需的目录（包括 public）
+    for dir in internal pkg cmd drivers server public; do
         if [ -d "./src/$dir" ]; then
             echo "Copying $dir..."
             mkdir -p "./$dir"
@@ -95,14 +95,16 @@ fi
 
 # Download dependencies
 echo "Downloading Go dependencies..."
-go mod download
+go mod download || true
 
 # Add golang.org/x/mobile dependency for gomobile
 echo "Adding gomobile dependencies..."
-# 使用 go mod edit 添加依赖，避免 go get 在某些环境下的问题
-go mod edit -require golang.org/x/mobile@latest || true
+# 使用 go get 在模块内添加依赖
+go get golang.org/x/mobile@latest || true
+go get golang.org/x/mobile/bind@latest || true
 
-go mod tidy
+echo "Running go mod tidy..."
+go mod tidy || true
 
 echo "Initialization complete!"
 echo ""

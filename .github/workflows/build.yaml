@@ -100,12 +100,10 @@ jobs:
           echo "openlistlib/encrypt directory contents:"
           ls -la ./openlistlib/encrypt/ || echo "encrypt directory not found"
           
-          # 确保依赖完整
+          # 确保依赖完整（init_openlist.sh 应该已经处理了，但再检查一次）
           echo ""
-          echo "Ensuring dependencies are complete..."
-          # 在模块内添加 mobile/bind 依赖
-          go mod edit -require golang.org/x/mobile@latest || true
-          go mod tidy
+          echo "Checking dependencies..."
+          go mod tidy || true
           
           # 显示 Go 环境
           echo ""
