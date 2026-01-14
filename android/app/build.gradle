@@ -1,10 +1,10 @@
 plugins {
     id "com.android.application"
-    id "kotlin-android"
+    id "org.jetbrains.kotlin.android"
     id "kotlin-parcelize"
     id "kotlin-kapt"
     id "dev.flutter.flutter-gradle-plugin"
-    id "kotlinx-serialization"
+    id "org.jetbrains.kotlin.plugin.serialization" version "1.9.22"
 }
 
 def pro = new Properties()
