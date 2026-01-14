@@ -84,7 +84,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
       // );
       
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(S.current.saveSuccess)),
+        SnackBar(content: Text(S.current.saved)),
       );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
