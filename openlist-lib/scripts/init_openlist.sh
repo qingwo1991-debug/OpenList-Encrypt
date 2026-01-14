@@ -44,12 +44,34 @@ if [ -f ./src/go.mod ]; then
     mkdir -p ./cmd
     cp -r ./src/cmd/* ./cmd/ 2>/dev/null || true
     
+    # Copy openlistlib from source if exists
+    if [ -d ./src/openlistlib ]; then
+        echo "Found openlistlib in OpenList source, merging..."
+        # Backup our custom openlistlib
+        if [ -d ./openlistlib ]; then
+            cp -r ./openlistlib ./openlistlib_custom
+        fi
+        # Copy source openlistlib
+        cp -r ./src/openlistlib/* ./openlistlib/ 2>/dev/null || true
+        # Restore custom files (our encrypt module, etc.)
+        if [ -d ./openlistlib_custom ]; then
+            cp -r ./openlistlib_custom/encrypt ./openlistlib/ 2>/dev/null || true
+            cp ./openlistlib_custom/encrypt_server.go ./openlistlib/ 2>/dev/null || true
+            rm -rf ./openlistlib_custom
+        fi
+    fi
+    
     echo "OpenList source initialization completed"
     echo "go.mod location: $(pwd)/go.mod"
     
     # Show the module name
     echo "Module name:"
     head -1 ./go.mod
+    
+    # Show openlistlib structure
+    echo ""
+    echo "openlistlib structure:"
+    ls -la ./openlistlib/ 2>/dev/null || echo "openlistlib not found"
 else
     echo "Error: go.mod not found in cloned source"
     exit 1
@@ -58,6 +80,11 @@ fi
 # Download dependencies
 echo "Downloading Go dependencies..."
 go mod download
+
+# Add golang.org/x/mobile dependency for gomobile
+echo "Adding gomobile dependencies..."
+go get golang.org/x/mobile/bind
+
 go mod tidy
 
 echo "Initialization complete!"

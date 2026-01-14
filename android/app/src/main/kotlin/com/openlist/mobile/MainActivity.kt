@@ -10,6 +10,7 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.openlist.mobile.bridge.AndroidBridge
 import com.openlist.mobile.bridge.AppConfigBridge
 import com.openlist.mobile.bridge.CommonBridge
+import com.openlist.mobile.bridge.EncryptProxyBridge
 import com.openlist.mobile.bridge.ServiceBridge
 import com.openlist.mobile.model.ShortCuts
 import com.openlist.mobile.model.openlist.Logger
@@ -50,6 +51,7 @@ class MainActivity : FlutterActivity() {
         GeneratedApi.AppConfig.setUp(binaryMessage, AppConfigBridge)
         GeneratedApi.Android.setUp(binaryMessage, AndroidBridge(this))
         GeneratedApi.NativeCommon.setUp(binaryMessage, CommonBridge(this))
+        GeneratedApi.EncryptProxy.setUp(binaryMessage, EncryptProxyBridge(this))
         mEvent = GeneratedApi.Event(binaryMessage)
 
         // 设置服务桥接

@@ -1,6 +1,7 @@
 package openlistlib
 
 import (
+	"encoding/json"
 	"errors"
 	"sync"
 
@@ -277,4 +278,87 @@ func VerifyEncryptAdminPassword(password string) bool {
 // SetEncryptAdminPassword 设置管理密码（供 gomobile 调用）
 func SetEncryptAdminPassword(password string) error {
 	return GetEncryptManager().SetAdminPassword(password)
+}
+
+// GetEncryptPathsJson 获取加密路径列表 JSON（供 gomobile 调用）
+func GetEncryptPathsJson() string {
+	paths := GetEncryptManager().GetEncryptPaths()
+	if paths == nil {
+		return "[]"
+	}
+
+	type PathInfo struct {
+		Path    string `json:"path"`
+		EncType string `json:"encType"`
+		EncName bool   `json:"encName"`
+		Enable  bool   `json:"enable"`
+	}
+
+	infos := make([]PathInfo, len(paths))
+	for i, p := range paths {
+		infos[i] = PathInfo{
+			Path:    p.Path,
+			EncType: string(p.EncType),
+			EncName: p.EncName,
+			Enable:  p.Enable,
+		}
+	}
+
+	data, err := json.Marshal(infos)
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
+}
+
+// GetEncryptConfigJson 获取完整配置 JSON（供 gomobile 调用）
+func GetEncryptConfigJson() string {
+	config := GetEncryptManager().GetConfig()
+	if config == nil {
+		return "{}"
+	}
+
+	type PathInfo struct {
+		Path    string `json:"path"`
+		EncType string `json:"encType"`
+		EncName bool   `json:"encName"`
+		Enable  bool   `json:"enable"`
+	}
+
+	type ConfigInfo struct {
+		AlistHost    string     `json:"alistHost"`
+		AlistPort    int        `json:"alistPort"`
+		AlistHttps   bool       `json:"alistHttps"`
+		ProxyPort    int        `json:"proxyPort"`
+		EncryptPaths []PathInfo `json:"encryptPaths"`
+	}
+
+	paths := make([]PathInfo, len(config.EncryptPaths))
+	for i, p := range config.EncryptPaths {
+		paths[i] = PathInfo{
+			Path:    p.Path,
+			EncType: string(p.EncType),
+			EncName: p.EncName,
+			Enable:  p.Enable,
+		}
+	}
+
+	info := ConfigInfo{
+		AlistHost:    config.AlistHost,
+		AlistPort:    config.AlistPort,
+		AlistHttps:   config.AlistHttps,
+		ProxyPort:    config.ProxyPort,
+		EncryptPaths: paths,
+	}
+
+	data, err := json.Marshal(info)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+// UpdateEncryptPathConfig 更新加密路径配置（供 gomobile 调用）
+func UpdateEncryptPathConfig(index int, path, password, encType string, encName, enable bool) error {
+	return GetEncryptManager().UpdateEncryptPath(index, path, password, encType, encName, enable)
 }

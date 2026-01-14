@@ -69,3 +69,52 @@ abstract class Event {
     String log,
   );
 }
+
+/// 加密代理管理接口
+@HostApi()
+abstract class EncryptProxy {
+  /// 初始化加密代理
+  void initEncryptProxy(String configPath);
+  
+  /// 启动加密代理
+  void startEncryptProxy();
+  
+  /// 停止加密代理
+  void stopEncryptProxy();
+  
+  /// 重启加密代理
+  void restartEncryptProxy();
+  
+  /// 检查加密代理是否运行中
+  bool isEncryptProxyRunning();
+  
+  /// 获取代理端口
+  int getEncryptProxyPort();
+  
+  /// 设置 Alist 主机
+  void setEncryptAlistHost(String host, int port, bool https);
+  
+  /// 设置代理端口
+  void setEncryptProxyPort(int port);
+  
+  /// 添加加密路径
+  void addEncryptPath(String path, String password, String encType, bool encName);
+  
+  /// 更新加密路径
+  void updateEncryptPath(int index, String path, String password, String encType, bool encName, bool enable);
+  
+  /// 删除加密路径
+  void removeEncryptPath(int index);
+  
+  /// 获取加密路径列表（JSON格式）
+  String getEncryptPathsJson();
+  
+  /// 获取完整配置（JSON格式）
+  String getEncryptConfigJson();
+  
+  /// 设置管理密码
+  void setEncryptAdminPassword(String password);
+  
+  /// 验证管理密码
+  bool verifyEncryptAdminPassword(String password);
+}

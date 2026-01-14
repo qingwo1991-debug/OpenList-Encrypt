@@ -49,6 +49,7 @@ jobs:
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
+          go get golang.org/x/mobile/bind
           export PATH=$PATH:$(go env GOPATH)/bin
           gomobile init
 
@@ -91,10 +92,34 @@ jobs:
           echo "go.mod contents:"
           cat go.mod
           
+          # 显示 openlistlib 目录内容
+          echo ""
+          echo "openlistlib directory contents:"
+          ls -la ./openlistlib/
+          
+          echo ""
+          echo "openlistlib/encrypt directory contents:"
+          ls -la ./openlistlib/encrypt/ || echo "encrypt directory not found"
+          
+          # 确保依赖完整
+          echo ""
+          echo "Ensuring dependencies are complete..."
+          go get golang.org/x/mobile/bind
+          go mod tidy
+          
+          # 显示 Go 环境
+          echo ""
+          echo "Go environment:"
+          go env GOPATH
+          go env GOROOT
+          which gomobile
+          which gobind
+          
           # 创建输出目录
           mkdir -p ../android/app/libs
           
           # 构建 Android AAR
+          echo ""
           echo "Building Android AAR..."
           gomobile bind -v \
             -target=android \
@@ -116,8 +141,20 @@ jobs:
 
       - name: Generate code
         run: |
+          # 生成国际化代码
           flutter pub run intl_utils:generate || true
-          dart run pigeon --input pigeons/pigeon.dart || true
+          
+          # 生成 Pigeon 桥接代码
+          echo "Generating Pigeon code..."
+          dart run pigeon \
+            --input pigeons/pigeon.dart \
+            --dart_out lib/generated_api.dart \
+            --java_out android/app/src/main/java/com/openlist/pigeon/GeneratedApi.java \
+            --java_package "com.openlist.pigeon"
+          
+          echo "Generated files:"
+          ls -la lib/generated_api.dart
+          ls -la android/app/src/main/java/com/openlist/pigeon/
 
       - name: Build APK (Debug)
         run: flutter build apk --debug

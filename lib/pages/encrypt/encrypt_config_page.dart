@@ -1,5 +1,5 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:get/get.dart';
 import '../../generated/l10n.dart';
 import '../../contant/native_bridge.dart';
 
@@ -27,43 +27,73 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   
   bool _isLoading = true;
   bool _proxyRunning = false;
+  bool _isInitialized = false;
 
   @override
   void initState() {
     super.initState();
-    _loadConfig();
-    _checkProxyStatus();
+    _initAndLoadConfig();
   }
 
-  Future<void> _loadConfig() async {
+  Future<void> _initAndLoadConfig() async {
     setState(() => _isLoading = true);
     try {
-      // TODO: 从原生端加载配置
-      // final config = await NativeBridge.encrypt.getConfig();
-      // 暂时使用默认值
-      setState(() {
-        _encryptPaths = [
-          EncryptPathConfig(
-            path: '/encrypt/*',
-            password: '',
-            encType: 'aes-ctr',
-            encName: false,
-            enable: true,
-          ),
-        ];
-      });
+      // 初始化加密代理
+      if (!_isInitialized) {
+        final dataDir = await NativeBridge.appConfig.getDataDir();
+        await NativeBridge.encryptProxy.initEncryptProxy('$dataDir/encrypt_config.json');
+        _isInitialized = true;
+      }
+      
+      await _loadConfig();
+      await _checkProxyStatus();
     } catch (e) {
-      debugPrint('Failed to load encrypt config: $e');
+      debugPrint('Failed to init encrypt proxy: $e');
+      // 如果初始化失败，使用默认值
+      setState(() {
+        _encryptPaths = [];
+      });
     } finally {
       setState(() => _isLoading = false);
     }
   }
 
+  Future<void> _loadConfig() async {
+    try {
+      final configJson = await NativeBridge.encryptProxy.getEncryptConfigJson();
+      debugPrint('Loaded config: $configJson');
+      
+      if (configJson.isNotEmpty && configJson != '{}') {
+        final config = json.decode(configJson);
+        
+        setState(() {
+          _alistHostController.text = config['alistHost'] ?? '127.0.0.1';
+          _alistPortController.text = (config['alistPort'] ?? 5244).toString();
+          _alistHttps = config['alistHttps'] ?? false;
+          _proxyPortController.text = (config['proxyPort'] ?? 5344).toString();
+          
+          // 解析加密路径列表
+          final paths = config['encryptPaths'] as List<dynamic>?;
+          if (paths != null) {
+            _encryptPaths = paths.map((p) => EncryptPathConfig(
+              path: p['path'] ?? '',
+              password: '', // 密码不会返回
+              encType: p['encType'] ?? 'aes-ctr',
+              encName: p['encName'] ?? false,
+              enable: p['enable'] ?? true,
+            )).toList();
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint('Failed to load encrypt config: $e');
+    }
+  }
+
   Future<void> _checkProxyStatus() async {
     try {
-      // TODO: 检查代理状态
-      // final running = await NativeBridge.encrypt.isProxyRunning();
-      setState(() => _proxyRunning = false);
+      final running = await NativeBridge.encryptProxy.isEncryptProxyRunning();
+      setState(() => _proxyRunning = running);
     } catch (e) {
       debugPrint('Failed to check proxy status: $e');
     }
@@ -73,40 +103,49 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     if (!_formKey.currentState!.validate()) return;
     
     try {
-      // TODO: 保存配置到原生端
-      // await NativeBridge.encrypt.setAlistHost(
-      //   _alistHostController.text,
-      //   int.parse(_alistPortController.text),
-      //   _alistHttps,
-      // );
-      // await NativeBridge.encrypt.setProxyPort(
-      //   int.parse(_proxyPortController.text),
-      // );
+      // 保存 Alist 主机配置
+      await NativeBridge.encryptProxy.setEncryptAlistHost(
+        _alistHostController.text,
+        int.parse(_alistPortController.text),
+        _alistHttps,
+      );
       
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(S.current.saved)),
+      // 保存代理端口
+      await NativeBridge.encryptProxy.setEncryptProxyPort(
+        int.parse(_proxyPortController.text),
       );
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(S.current.saved)),
+        );
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('保存失败: $e')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('保存失败: $e')),
+        );
+      }
     }
   }
 
   Future<void> _toggleProxy() async {
     try {
       if (_proxyRunning) {
-        // TODO: 停止代理
-        // await NativeBridge.encrypt.stopProxy();
+        await NativeBridge.encryptProxy.stopEncryptProxy();
       } else {
-        // TODO: 启动代理
-        // await NativeBridge.encrypt.startProxy();
+        await NativeBridge.encryptProxy.startEncryptProxy();
       }
-      setState(() => _proxyRunning = !_proxyRunning);
+      
+      // 延迟检查状态
+      await Future.delayed(const Duration(milliseconds: 500));
+      await _checkProxyStatus();
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('操作失败: $e')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('操作失败: $e')),
+        );
+      }
     }
   }
 
@@ -176,23 +215,33 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
             child: Text(S.current.cancel),
           ),
           FilledButton(
-            onPressed: () {
+            onPressed: () async {
               if (pathController.text.isEmpty || passwordController.text.isEmpty) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('请填写完整')),
                 );
                 return;
               }
-              setState(() {
-                _encryptPaths.add(EncryptPathConfig(
-                  path: pathController.text,
-                  password: passwordController.text,
-                  encType: encType,
-                  encName: encName,
-                  enable: true,
-                ));
-              });
-              Navigator.pop(context);
+              
+              try {
+                await NativeBridge.encryptProxy.addEncryptPath(
+                  pathController.text,
+                  passwordController.text,
+                  encType,
+                  encName,
+                );
+                
+                // 重新加载配置
+                await _loadConfig();
+                
+                if (mounted) Navigator.pop(context);
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('添加失败: $e')),
+                  );
+                }
+              }
             },
             child: Text(S.current.confirm),
           ),
@@ -204,7 +253,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   void _editPath(int index) {
     final config = _encryptPaths[index];
     final pathController = TextEditingController(text: config.path);
-    final passwordController = TextEditingController(text: config.password);
+    final passwordController = TextEditingController();
     String encType = config.encType;
     bool encName = config.encName;
     bool enable = config.enable;
@@ -228,7 +277,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                 controller: passwordController,
                 obscureText: true,
                 decoration: const InputDecoration(
-                  labelText: '密码',
+                  labelText: '密码（留空保持不变）',
                 ),
               ),
               const SizedBox(height: 16),
@@ -271,9 +320,18 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
         ),
         actions: [
           TextButton(
-            onPressed: () {
-              setState(() => _encryptPaths.removeAt(index));
-              Navigator.pop(context);
+            onPressed: () async {
+              try {
+                await NativeBridge.encryptProxy.removeEncryptPath(index);
+                await _loadConfig();
+                if (mounted) Navigator.pop(context);
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('删除失败: $e')),
+                  );
+                }
+              }
             },
             style: TextButton.styleFrom(foregroundColor: Colors.red),
             child: const Text('删除'),
@@ -283,17 +341,27 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
             child: Text(S.current.cancel),
           ),
           FilledButton(
-            onPressed: () {
-              setState(() {
-                _encryptPaths[index] = EncryptPathConfig(
-                  path: pathController.text,
-                  password: passwordController.text,
-                  encType: encType,
-                  encName: encName,
-                  enable: enable,
+            onPressed: () async {
+              try {
+                // 如果密码为空，使用原密码（这里需要后端支持）
+                await NativeBridge.encryptProxy.updateEncryptPath(
+                  index,
+                  pathController.text,
+                  passwordController.text,
+                  encType,
+                  encName,
+                  enable,
                 );
-              });
-              Navigator.pop(context);
+                
+                await _loadConfig();
+                if (mounted) Navigator.pop(context);
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('更新失败: $e')),
+                  );
+                }
+              }
             },
             child: Text(S.current.confirm),
           ),
@@ -317,8 +385,14 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
         title: const Text('加密代理配置'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _initAndLoadConfig,
+            tooltip: '刷新',
+          ),
+          IconButton(
             icon: const Icon(Icons.save),
             onPressed: _saveConfig,
+            tooltip: '保存',
           ),
         ],
       ),
@@ -521,16 +595,24 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                               ),
                               trailing: Switch(
                                 value: config.enable,
-                                onChanged: (value) {
-                                  setState(() {
-                                    _encryptPaths[index] = EncryptPathConfig(
-                                      path: config.path,
-                                      password: config.password,
-                                      encType: config.encType,
-                                      encName: config.encName,
-                                      enable: value,
+                                onChanged: (value) async {
+                                  try {
+                                    await NativeBridge.encryptProxy.updateEncryptPath(
+                                      index,
+                                      config.path,
+                                      '', // 密码保持不变
+                                      config.encType,
+                                      config.encName,
+                                      value,
                                     );
-                                  });
+                                    await _loadConfig();
+                                  } catch (e) {
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(content: Text('更新失败: $e')),
+                                      );
+                                    }
+                                  }
                                 },
                               ),
                               onTap: () => _editPath(index),
