@@ -68,10 +68,8 @@ jobs:
           # 初始化 OpenList 依赖
           if [ -f scripts/init_openlist.sh ]; then
             chmod +x scripts/init_openlist.sh
-            ./scripts/init_openlist.sh || true
+            ./scripts/init_openlist.sh
           fi
-          go mod download || true
-          go mod tidy || true
 
       - name: Build Go bindings for Android
         run: |
@@ -79,15 +77,39 @@ jobs:
           export PATH=$PATH:$(go env GOPATH)/bin
           export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653
           
+          # 显示当前目录结构
+          echo "Current directory: $(pwd)"
+          echo "Directory contents:"
+          ls -la
+          
+          # 检查 go.mod 是否存在
+          if [ ! -f go.mod ]; then
+            echo "Error: go.mod not found!"
+            exit 1
+          fi
+          
+          echo "go.mod contents:"
+          cat go.mod
+          
           # 创建输出目录
           mkdir -p ../android/app/libs
           
           # 构建 Android AAR
+          echo "Building Android AAR..."
           gomobile bind -v \
             -target=android \
             -androidapi=21 \
             -o ../android/app/libs/openlistlib.aar \
-            ./openlistlib || echo "Go binding build failed, continuing..."
+            ./openlistlib
+          
+          # 验证 AAR 是否生成
+          if [ -f ../android/app/libs/openlistlib.aar ]; then
+            echo "AAR file created successfully!"
+            ls -la ../android/app/libs/
+          else
+            echo "Error: AAR file was not created!"
+            exit 1
+          fi
 
       - name: Get Flutter dependencies
         run: flutter pub get

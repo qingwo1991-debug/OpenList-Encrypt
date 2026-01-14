@@ -1,10 +1,21 @@
 #!/bin/bash
 
+# Get the script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OPENLIST_LIB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+echo "Working in: $OPENLIST_LIB_DIR"
+
 GIT_REPO="https://github.com/OpenListTeam/OpenList.git"
 TAG_NAME=$(git -c 'versionsort.suffix=-' ls-remote --exit-code --refs --sort='version:refname' --tags $GIT_REPO | tail -n 1 | cut -d'/' -f3)
 
 echo "OpenList - ${TAG_NAME}"
+
+cd "$OPENLIST_LIB_DIR"
+
+# Clean up any previous source
 rm -rf ./src
+
 unset GIT_WORK_TREE
 git clone --branch "$TAG_NAME" https://github.com/OpenListTeam/OpenList.git ./src
 rm -rf ./src/.git
@@ -12,23 +23,33 @@ rm -rf ./src/.git
 echo "Checking cloned source structure:"
 ls -la ./src/
 
-# Move the entire OpenList source to the parent directory
-echo "Moving OpenList source files..."
-mv -f ./src/* ../
-rm -rf ./src
-
-echo "Checking moved files in parent directory:"
-ls -la ../
-
-# Check if we have the main go.mod in the right place
-if [ -f ../go.mod ]; then
-    echo "Found go.mod in parent directory"
-    cd ../
+# Copy go.mod and go.sum from OpenList source
+if [ -f ./src/go.mod ]; then
+    cp ./src/go.mod ./go.mod
+    cp ./src/go.sum ./go.sum 2>/dev/null || true
+    
+    # Update module name and add replace directives
+    go mod edit -module github.com/OpenListTeam/OpenList/v4
     go mod edit -replace github.com/djherbis/times@v1.6.0=github.com/jing332/times@latest
+    
+    # Copy required internal packages
+    echo "Copying required internal packages..."
+    mkdir -p ./internal
+    cp -r ./src/internal/* ./internal/ 2>/dev/null || true
+    
+    mkdir -p ./pkg
+    cp -r ./src/pkg/* ./pkg/ 2>/dev/null || true
+    
     echo "OpenList source initialization completed"
+    echo "go.mod location: $(pwd)/go.mod"
 else
-    echo "Error: go.mod not found after moving files"
-    echo "Contents of parent directory:"
-    ls -la ../
+    echo "Error: go.mod not found in cloned source"
     exit 1
 fi
+
+# Download dependencies
+echo "Downloading Go dependencies..."
+go mod download
+go mod tidy
+
+echo "Initialization complete!"
