@@ -724,7 +724,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
       // 尝试打开文件管理器并定位到文件
       await openFileManager(
         androidConfig: AndroidConfig(
-          folderType: AndroidFolderType.download,
+          folderType: FolderType.download,
         ),
         iosConfig: IosConfig(
           subFolderPath: directoryPath,
