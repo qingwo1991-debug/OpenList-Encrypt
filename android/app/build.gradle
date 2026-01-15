@@ -111,9 +111,10 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            if (pro["KEY_PATH"] != null && pro["KEY_PASSWORD"] != null && 
+            // 使用 debug 签名以便在没有密钥的情况下也能生成可安装的 Release 包
+            signingConfig signingConfigs.debug
+            
+            if (pro["KEY_PATH"] != null && pro["KEY_PASSWORD"] != null &&
                 pro["ALIAS_NAME"] != null && pro["ALIAS_PASSWORD"] != null) {
                 signingConfig signingConfigs.release
             }
@@ -143,7 +144,7 @@ androidComponents {
                     }
                 }
             }
-            output.outputFileName.set("OpenList-Mobile-${versionName}${abi}.apk")
+            // output.outputFileName.set("OpenList-Mobile-${versionName}${abi}.apk")
         }
     }
 }
