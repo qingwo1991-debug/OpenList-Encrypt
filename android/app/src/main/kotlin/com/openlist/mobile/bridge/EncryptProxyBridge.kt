@@ -72,7 +72,7 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
     
     override fun getEncryptProxyPort(): Long {
         return try {
-            Openlistlib.getEncryptProxyPort().toLong()
+            Openlistlib.getEncryptProxyPort()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get encrypt proxy port", e)
             5344L

@@ -242,22 +242,22 @@ func RestartEncryptProxy() error {
 }
 
 // GetEncryptProxyPort 获取代理端口（供 gomobile 调用）
-func GetEncryptProxyPort() int {
+func GetEncryptProxyPort() int64 {
 	config := GetEncryptManager().GetConfig()
 	if config == nil {
 		return 5344
 	}
-	return config.ProxyPort
+	return int64(config.ProxyPort)
 }
 
 // SetEncryptAlistHost 设置 Alist 主机（供 gomobile 调用）
-func SetEncryptAlistHost(host string, port int, https bool) error {
-	return GetEncryptManager().SetAlistHost(host, port, https)
+func SetEncryptAlistHost(host string, port int64, https bool) error {
+	return GetEncryptManager().SetAlistHost(host, int(port), https)
 }
 
 // SetEncryptProxyPort 设置代理端口（供 gomobile 调用）
-func SetEncryptProxyPort(port int) error {
-	return GetEncryptManager().SetProxyPort(port)
+func SetEncryptProxyPort(port int64) error {
+	return GetEncryptManager().SetProxyPort(int(port))
 }
 
 // AddEncryptPathConfig 添加加密路径配置（供 gomobile 调用）
@@ -266,8 +266,8 @@ func AddEncryptPathConfig(path, password, encType string, encName bool) error {
 }
 
 // RemoveEncryptPathConfig 删除加密路径配置（供 gomobile 调用）
-func RemoveEncryptPathConfig(index int) error {
-	return GetEncryptManager().RemoveEncryptPath(index)
+func RemoveEncryptPathConfig(index int64) error {
+	return GetEncryptManager().RemoveEncryptPath(int(index))
 }
 
 // VerifyEncryptAdminPassword 验证管理密码（供 gomobile 调用）
@@ -359,6 +359,6 @@ func GetEncryptConfigJson() string {
 }
 
 // UpdateEncryptPathConfig 更新加密路径配置（供 gomobile 调用）
-func UpdateEncryptPathConfig(index int, path, password, encType string, encName, enable bool) error {
-	return GetEncryptManager().UpdateEncryptPath(index, path, password, encType, encName, enable)
+func UpdateEncryptPathConfig(index int64, path, password, encType string, encName, enable bool) error {
+	return GetEncryptManager().UpdateEncryptPath(int(index), path, password, encType, encName, enable)
 }

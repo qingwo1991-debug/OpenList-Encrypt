@@ -1,7 +1,6 @@
 package encrypt
 
 import (
-	"crypto/md5"
 	"crypto/sha256"
 )
 
@@ -24,12 +23,8 @@ func NewMixEncryptor(password string, fileSize int64) (*MixEncryptor, error) {
 		fileSize: fileSize,
 	}
 
-	// 创建对外密码
-	if len(password) != 32 {
-		e.passwdOutward = deriveKeyHex(password, "MIX", 16)
-	} else {
-		e.passwdOutward = password
-	}
+	// 使用统一的 GetPasswdOutward逻辑 (PBKDF2)
+	e.passwdOutward = GetPasswdOutward(password, EncTypeMix)
 
 	// 创建编码表
 	hash := sha256.Sum256([]byte(e.passwdOutward))
@@ -62,27 +57,6 @@ func NewMixEncryptor(password string, fileSize int64) (*MixEncryptor, error) {
 	e.decode = decode
 
 	return e, nil
-}
-
-// deriveKeyHex 从密码派生密钥并返回十六进制字符串
-func deriveKeyHex(password, salt string, length int) string {
-	result := make([]byte, 0, length*2)
-	data := []byte(password + salt)
-
-	iterations := 1000
-	for i := 0; i < iterations && len(result) < length*2; i++ {
-		hash := md5.Sum(data)
-		for _, b := range hash[:] {
-			if len(result) >= length*2 {
-				break
-			}
-			result = append(result, "0123456789abcdef"[b>>4])
-			result = append(result, "0123456789abcdef"[b&0x0f])
-		}
-		data = append(hash[:], []byte(password+salt)...)
-	}
-
-	return string(result[:length*2])
 }
 
 // SetPosition 设置流位置

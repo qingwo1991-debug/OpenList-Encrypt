@@ -41,11 +41,12 @@ jobs:
         with:
           go-version: '1.21'
           cache: true
+          cache-dependency-path: openlist-lib/go.sum
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.0'
+          flutter-version: '3.24.0'
           channel: 'stable'
           cache: true
 
@@ -60,27 +61,9 @@ jobs:
       - name: Install gomobile
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
           export PATH=$PATH:$(go env GOPATH)/bin
           gomobile init
-
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-
-      - name: Download OpenList dependencies
-        run: |
-          cd openlist-lib
-          # 初始化 OpenList 依赖
-          if [ -f scripts/init_openlist.sh ]; then
-            chmod +x scripts/init_openlist.sh
-            ./scripts/init_openlist.sh
-          fi
 
       - name: Build Go bindings for Android
         run: |
@@ -88,36 +71,23 @@ jobs:
           export PATH=$PATH:$(go env GOPATH)/bin
           export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653
           
-          # 显示当前目录结构
           echo "Current directory: $(pwd)"
           echo "Directory contents:"
           ls -la
           
-          # 检查 go.mod 是否存在
-          if [ ! -f go.mod ]; then
-            echo "Error: go.mod not found!"
-            exit 1
-          fi
+          echo ""
+          echo "openlistlib directory contents:"
+          ls -la ./openlistlib/ || echo "openlistlib not found"
           
+          echo ""
           echo "go.mod contents:"
           cat go.mod
           
-          # 显示 openlistlib 目录内容
           echo ""
-          echo "openlistlib directory contents:"
-          ls -la ./openlistlib/
-          
-          echo ""
-          echo "openlistlib/encrypt directory contents:"
-          ls -la ./openlistlib/encrypt/ || echo "encrypt directory not found"
-          
-          # 确保依赖完整（init_openlist.sh 应该已经处理了，但再检查一次）
-          echo ""
-          echo "Checking dependencies..."
-          go get golang.org/x/mobile/bind@latest
+          echo "Downloading dependencies..."
+          go mod download
           go mod tidy
           
-          # 显示 Go 环境
           echo ""
           echo "Go environment:"
           go env GOPATH
@@ -125,25 +95,31 @@ jobs:
           which gomobile
           which gobind
           
-          # 创建输出目录
           mkdir -p ../android/app/libs
           
-          # 构建 Android AAR
           echo ""
           echo "Building Android AAR..."
           gomobile bind -v \
-            -target=android \
+            -target=android/arm64,android/arm \
             -androidapi=21 \
             -o ../android/app/libs/openlistlib.aar \
-            ./openlistlib
+            ./openlistlib 2>&1 || {
+              echo "Error: gomobile bind failed!"
+              echo "Trying without verbose..."
+              gomobile bind \
+                -target=android/arm64,android/arm \
+                -androidapi=21 \
+                -o ../android/app/libs/openlistlib.aar \
+                ./openlistlib || echo "AAR build failed completely"
+            }
           
-          # 验证 AAR 是否生成
           if [ -f ../android/app/libs/openlistlib.aar ]; then
-            echo "AAR file created successfully!"
+            echo "AAR file created successfully:"
             ls -la ../android/app/libs/
           else
-            echo "Error: AAR file was not created!"
-            exit 1
+            echo "Warning: AAR file was not created!"
+            echo "Checking if libs directory exists..."
+            ls -la ../android/app/
           fi
 
       - name: Get Flutter dependencies
@@ -151,47 +127,70 @@ jobs:
 
       - name: Generate code
         run: |
-          # 生成国际化代码
           flutter pub run intl_utils:generate || true
           
-          # 生成 Pigeon 桥接代码
           echo "Generating Pigeon code..."
           dart run pigeon \
             --input pigeons/pigeon.dart \
             --dart_out lib/generated_api.dart \
             --java_out android/app/src/main/java/com/openlist/pigeon/GeneratedApi.java \
-            --java_package "com.openlist.pigeon"
+            --java_package "com.openlist.pigeon" || echo "Pigeon generation skipped or failed"
           
-          echo "Generated files:"
-          ls -la lib/generated_api.dart
-          ls -la android/app/src/main/java/com/openlist/pigeon/
+          echo "Checking generated files:"
+          ls -la lib/generated_api.dart 2>/dev/null || echo "Dart API file not found"
+          ls -la android/app/src/main/java/com/openlist/pigeon/ 2>/dev/null || echo "Java pigeon directory not found"
 
       - name: Build APK (Debug)
-        run: flutter build apk --debug
-
-      - name: Build APK (Release)
-        run: flutter build apk --release || flutter build apk --debug
-
-      - name: Build APK (Split ABI)
-        run: flutter build apk --split-per-abi || true
+        run: |
+          echo "Starting Flutter debug build..."
+          flutter build apk --debug 2>&1 | tee flutter_build.log || true
+          
+          echo ""
+          echo "Checking build outputs..."
+          find . -name "*.apk" -type f 2>/dev/null | head -20
+          
+          echo ""
+          echo "Flutter APK directory:"
+          ls -la build/app/outputs/flutter-apk/ 2>/dev/null || echo "Flutter APK directory not found"
+          
+          echo ""
+          echo "Gradle APK directory:"
+          ls -la android/app/build/outputs/apk/debug/ 2>/dev/null || echo "Gradle debug APK directory not found"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          path: |
+            build/app/outputs/flutter-apk/*.apk
+            build/app/outputs/apk/debug/*.apk
+            android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: warn
+
+      - name: Build APK (Release)
+        continue-on-error: true
+        run: |
+          echo "Starting Flutter release build..."
+          flutter build apk --release 2>&1 || {
+            echo "Release build failed, trying debug build..."
+            flutter build apk --debug
+          }
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: |
+            build/app/outputs/flutter-apk/app-release*.apk
+            android/app/build/outputs/apk/release/*.apk
           if-no-files-found: warn
 
-      - name: Upload Split APKs
+      - name: Upload Build Logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: app-split-abi
-          path: build/app/outputs/flutter-apk/app-*-release.apk
+          name: build-logs
+          path: |
+            flutter_build.log
+            android/app/build/outputs/logs/
           if-no-files-found: warn

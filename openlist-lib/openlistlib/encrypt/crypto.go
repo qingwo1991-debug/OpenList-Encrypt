@@ -4,11 +4,16 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
-	"crypto/rc4"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"path"
+	"strconv"
 	"strings"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
 // EncryptionType 加密类型
@@ -41,69 +46,118 @@ type FlowEncryptor interface {
 // AESCTREncryptor AES-CTR 加密器
 type AESCTREncryptor struct {
 	key      []byte
-	nonce    []byte
+	iv       []byte
+	sourceIv []byte
 	position int64
-	fileSize int64
+	cipher   cipher.Stream
 }
 
-// NewAESCTREncryptor 创建 AES-CTR 加密器
-func NewAESCTREncryptor(password string, fileSize int64) (*AESCTREncryptor, error) {
-	// 从密码派生密钥和 nonce
-	key := deriveKey(password, 32)    // AES-256
-	nonce := deriveKey(password+"nonce", 16) // CTR nonce
+// NewAESCTREncryptor 创建 AES-CTR 加密器 (Node.js compatible)
+func NewAESCTREncryptor(password, passwdOutward string, fileSize int64) (*AESCTREncryptor, error) {
+	sizeSalt := strconv.FormatInt(fileSize, 10)
+	passwdSalt := passwdOutward + sizeSalt
 
-	return &AESCTREncryptor{
-		key:      key,
-		nonce:    nonce,
-		position: 0,
-		fileSize: fileSize,
-	}, nil
-}
+	// create file aes-ctr key: md5(passwdSalt)
+	hash := md5.Sum([]byte(passwdSalt))
+	key := hash[:]
 
-// deriveKey 从密码派生密钥
-func deriveKey(password string, length int) []byte {
-	result := make([]byte, 0, length)
-	data := []byte(password)
-	
-	for len(result) < length {
-		hash := md5.Sum(data)
-		result = append(result, hash[:]...)
-		data = append(hash[:], []byte(password)...)
-	}
-	
-	return result[:length]
-}
+	// iv: md5(sizeSalt)
+	hashIv := md5.Sum([]byte(sizeSalt))
+	iv := hashIv[:]
+	sourceIv := make([]byte, len(iv))
+	copy(sourceIv, iv)
 
-// createStream 创建 AES-CTR 流
-func (e *AESCTREncryptor) createStream() (cipher.Stream, error) {
-	block, err := aes.NewCipher(e.key)
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
+	stream := cipher.NewCTR(block, iv)
 
-	// 计算基于位置的 IV
-	iv := e.calculateIV()
-	
-	return cipher.NewCTR(block, iv), nil
+	return &AESCTREncryptor{
+		key:      key,
+		iv:       iv,
+		sourceIv: sourceIv,
+		position: 0,
+		cipher:   stream,
+	}, nil
 }
 
-// calculateIV 计算基于位置的 IV
-func (e *AESCTREncryptor) calculateIV() []byte {
-	iv := make([]byte, 16)
-	copy(iv, e.nonce)
+// incrementIV 增加 IV
+func (e *AESCTREncryptor) incrementIV(increment int64) {
+	// copy sourceIv to iv
+	iv := make([]byte, len(e.sourceIv))
+	copy(iv, e.sourceIv)
+	e.iv = iv
+
+	// logic from Node.js incrementIV
+	// Node.js uses 4 uint32 big endian
+	// increment is passed as number (int in Go)
+	// Node.js:
+	// const MAX_UINT32 = 0xffffffff
+	// const incrementBig = ~~(increment / MAX_UINT32)
+	// const incrementLittle = (increment % MAX_UINT32) - incrementBig
+	// Careful with negative values? increment should be positive.
+
+	// Since Go int64 is large enough, we can implement simpler addition on 128-bit integer if we treat it as such.
+	// But to matching exactly Node.js behavior (overflow/wrapping):
+	// Node.js splits into 4 uint32s.
+
+	// Be careful: Javascript numbers are doubles. MAX_UINT32 is 4294967295.
+	// increment is int64.
+	// 4294967295 matches math.MaxUint32.
+
+	// Go implementation:
+	// Treat IV as 128 bit integer (big endian). Add increment.
+	// Or follow Node.js 4 chunks logic.
+
+	// Let's implement generic 128-bit counter increment.
+	// Since AES-CTR is just counter mode, we add increment to the counter.
+	// IV is 16 bytes.
+	// Treat as BigEndian uint128.
 	
-	// 将位置编码到 IV 中（用于随机访问）
-	blockNum := e.position / 16
-	for i := 15; i >= 8; i-- {
-		iv[i] ^= byte(blockNum & 0xff)
-		blockNum >>= 8
+	// We can use math/big or just loop.
+	carry := increment
+	for i := 15; i >= 0; i-- {
+		val := int64(e.iv[i]) + (carry & 0xFF)
+		e.iv[i] = byte(val)
+		carry = (carry >> 8) + (val >> 8)
 	}
+	// Note: Node.js implementation "incrementIV" does weird things with splitting 4 chunks.
+	// "const incrementBig = ~~(increment / MAX_UINT32)"
+	// "const incrementLittle = (increment % MAX_UINT32) - incrementBig"
+	// Wait, (increment % MAX) - incrementBig ?? That seems wrong in JS logic unless incrementBig is small?
+	// Actually (increment % MAX_UINT32) is the lower 32 bits.
+	// If increment < MAX_UINT32, incrementBig is 0. incrementLittle = increment.
+	// It seems Node.js implementation tries to handle > 32 bit increments.
 	
-	return iv
+	// Given standard CTR mode, we just add the offset (in blocks) to the IV.
+	// My loop implementation above does standard addition.
+	// Let's stick with standard addition which AES-CTR expects.
 }
 
 // SetPosition 设置流位置
 func (e *AESCTREncryptor) SetPosition(position int64) error {
+	increment := position / 16
+	e.incrementIV(increment)
+
+	block, err := aes.NewCipher(e.key)
+	if err != nil {
+		return err
+	}
+	e.cipher = cipher.NewCTR(block, e.iv)
+
+	offset := int(position % 16)
+	if offset > 0 {
+		skip := make([]byte, offset)
+		e.Encrypt(skip) // consumes keystream, output ignored
+	}
+
+	e.position = position // e.Encrypt updates this? No, e.Encrypt updates internal state?
+	// e.Encrypt updates e.position if I modify it to do so.
+	// Node.js doesn't seem to track position in property, but "this.encrypt" updates "this.cipher".
+	// In Go, Encrypt calls XORKeyStream.
+	// "e.Encrypt(skip)" below will update stream state.
+	
 	e.position = position
 	return nil
 }
@@ -115,115 +169,56 @@ func (e *AESCTREncryptor) GetPosition() int64 {
 
 // Encrypt 加密数据
 func (e *AESCTREncryptor) Encrypt(data []byte) ([]byte, error) {
-	stream, err := e.createStream()
-	if err != nil {
-		return nil, err
-	}
-
-	// 处理块内偏移
-	offset := int(e.position % 16)
-	if offset > 0 {
-		// 需要跳过一些字节来对齐
-		skip := make([]byte, offset)
-		stream.XORKeyStream(skip, skip)
-	}
-
 	encrypted := make([]byte, len(data))
-	stream.XORKeyStream(encrypted, data)
-	
+	e.cipher.XORKeyStream(encrypted, data)
 	e.position += int64(len(data))
 	return encrypted, nil
 }
 
-// Decrypt 解密数据（AES-CTR 加解密是对称的）
+// Decrypt 解密数据
 func (e *AESCTREncryptor) Decrypt(data []byte) ([]byte, error) {
 	return e.Encrypt(data)
 }
 
-// RC4MD5Encryptor RC4-MD5 加密器
+// RC4MD5Encryptor RC4-MD5 加密器 (Wrapper for CustomRC4)
 type RC4MD5Encryptor struct {
-	password string
-	position int64
-	fileSize int64
-	cipher   *rc4.Cipher
+	customRC4 *CustomRC4
 }
 
 // NewRC4MD5Encryptor 创建 RC4-MD5 加密器
-func NewRC4MD5Encryptor(password string, fileSize int64) (*RC4MD5Encryptor, error) {
-	enc := &RC4MD5Encryptor{
-		password: password,
-		position: 0,
-		fileSize: fileSize,
-	}
-	
-	if err := enc.initCipher(); err != nil {
-		return nil, err
-	}
-	
-	return enc, nil
+func NewRC4MD5Encryptor(password, passwdOutward string, fileSize int64) (*RC4MD5Encryptor, error) {
+	sizeSalt := strconv.FormatInt(fileSize, 10)
+	cRC4 := NewCustomRC4(password, sizeSalt, passwdOutward)
+	return &RC4MD5Encryptor{customRC4: cRC4}, nil
 }
 
-// initCipher 初始化 RC4 密码器
-func (e *RC4MD5Encryptor) initCipher() error {
-	// 使用密码的 MD5 作为 RC4 密钥
-	hash := md5.Sum([]byte(e.password))
-	
-	cipher, err := rc4.NewCipher(hash[:])
-	if err != nil {
-		return err
-	}
-	
-	e.cipher = cipher
-	return nil
-}
-
-// SetPosition 设置流位置
 func (e *RC4MD5Encryptor) SetPosition(position int64) error {
-	// RC4 需要重新初始化并跳过指定字节
-	if err := e.initCipher(); err != nil {
-		return err
-	}
-	
-	// 跳过 position 个字节
-	if position > 0 {
-		skip := make([]byte, position)
-		e.cipher.XORKeyStream(skip, skip)
-	}
-	
-	e.position = position
+	e.customRC4.SetPosition(position)
 	return nil
 }
 
-// GetPosition 获取当前位置
 func (e *RC4MD5Encryptor) GetPosition() int64 {
-	return e.position
+	return e.customRC4.position
 }
 
-// Encrypt 加密数据
 func (e *RC4MD5Encryptor) Encrypt(data []byte) ([]byte, error) {
-	if e.cipher == nil {
-		return nil, errors.New("cipher not initialized")
-	}
-	
-	encrypted := make([]byte, len(data))
-	e.cipher.XORKeyStream(encrypted, data)
-	
-	e.position += int64(len(data))
-	return encrypted, nil
+	dst := make([]byte, len(data))
+	e.customRC4.XORKeyStream(dst, data)
+	return dst, nil
 }
 
-// Decrypt 解密数据（RC4 加解密是对称的）
 func (e *RC4MD5Encryptor) Decrypt(data []byte) ([]byte, error) {
 	return e.Encrypt(data)
 }
 
 // NewFlowEncryptor 创建流加密器
 func NewFlowEncryptor(password string, encType EncryptionType, fileSize int64) (FlowEncryptor, error) {
+	passwdOutward := GetPasswdOutward(password, encType)
 	switch encType {
 	case EncTypeAESCTR, "aesctr":
-		return NewAESCTREncryptor(password, fileSize)
+		return NewAESCTREncryptor(password, passwdOutward, fileSize)
 	case EncTypeRC4, "rc4":
-		return NewRC4MD5Encryptor(password, fileSize)
+		return NewRC4MD5Encryptor(password, passwdOutward, fileSize)
 	case EncTypeMix:
 		return NewMixEncryptor(password, fileSize)
 	default:
@@ -239,31 +234,36 @@ func GetPasswdOutward(password string, encType EncryptionType) string {
 	}
 
 	var passwdOutward string
+	
+	// Logic from Node.js (mixEnc.js, aesCTR.js, rc4Md5.js)
+	// If password length != 32, use PBKDF2.
+	// Salt depends on encryption type.
+	
+	salt := ""
 	switch encType {
 	case EncTypeMix:
-		enc, _ := NewMixEncryptor(password, 1)
-		if enc != nil {
-			passwdOutward = enc.GetPasswdOutward()
-		}
-	case EncTypeRC4, "rc4":
-		if len(password) != 32 {
-			passwdOutward = deriveKeyHex(password, "RC4", 16)
-		} else {
-			passwdOutward = password
-		}
+		salt = "MIX"
 	case EncTypeAESCTR, "aesctr":
-		if len(password) != 32 {
-			passwdOutward = deriveKeyHex(password, "AES-CTR", 16)
-		} else {
-			passwdOutward = password
-		}
+		salt = "AES-CTR"
+	case EncTypeRC4, "rc4":
+		salt = "RC4"
 	default:
+		// Unknown type, assume password is raw? Or MIX default?
+		salt = "MIX"
+	}
+
+	if len(password) != 32 {
+		dk := pbkdf2.Key([]byte(password), []byte(salt), 1000, 16, sha256.New)
+		passwdOutward = hex.EncodeToString(dk)
+	} else {
 		passwdOutward = password
 	}
 
 	passwdOutwardCache[key] = passwdOutward
 	return passwdOutward
 }
+
+// deriveKeyHex is removed as it's no longer used, replaced by PBKDF2 logic inline or verify.
 
 // EncryptReader 加密读取器
 type EncryptReader struct {
@@ -349,6 +349,7 @@ func DecodeName(password string, encType EncryptionType, encodedName string) str
 	mix64 := NewMixBase64(passwdOutward, "")
 	decoded, err := mix64.Decode(subEncName)
 	if err != nil {
+		fmt.Printf("Decode error: %v\n", err)
 		return ""
 	}
 	

@@ -28,12 +28,23 @@ def baseVersion = openlistVersion.startsWith('v') ? openlistVersion.substring(1)
 
 // Use provided version if available, otherwise generate with timestamp
 def version = providedVersion ?: (baseVersion + "." + releaseTime())
-def gitCommits = Integer.parseInt('git rev-list HEAD --count'.execute().text.trim())
+
+// 获取 git commit 数量，如果失败则使用默认值
+def gitCommits = 1
+try {
+    def result = 'git rev-list HEAD --count'.execute().text.trim()
+    if (result && !result.isEmpty()) {
+        gitCommits = Integer.parseInt(result)
+    }
+} catch (Exception e) {
+    println "Warning: Could not get git commit count: ${e.message}"
+    gitCommits = 1
+}
 
 android {
     namespace "com.openlist.mobile"
     compileSdk = 35
-    ndkVersion = "27.0.12077973"
+    ndkVersion = "25.2.9519653"  // 与 CI 中安装的版本保持一致
 
     signingConfigs {
         release {
