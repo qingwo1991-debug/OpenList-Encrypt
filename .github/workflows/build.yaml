@@ -159,14 +159,32 @@ jobs:
           echo "Gradle APK directory:"
           ls -la android/app/build/outputs/apk/debug/ 2>/dev/null || echo "Gradle debug APK directory not found"
 
-      - name: Upload Debug APK
+      - name: Upload Debug APK (All)
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: |
-            build/app/outputs/flutter-apk/*.apk
-            build/app/outputs/apk/debug/*.apk
-            android/app/build/outputs/apk/debug/*.apk
+          name: app-debug-all
+          path: build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: warn
+
+      - name: Upload Debug APK (ARM64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-arm64
+          path: build/app/outputs/flutter-apk/*arm64-v8a-debug.apk
+          if-no-files-found: warn
+
+      - name: Upload Debug APK (ARMv7)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-armeabi-v7a
+          path: build/app/outputs/flutter-apk/*armeabi-v7a-debug.apk
+          if-no-files-found: warn
+
+      - name: Upload Debug APK (x86_64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-x86_64
+          path: build/app/outputs/flutter-apk/*x86_64-debug.apk
           if-no-files-found: warn
 
       - name: Build APK (Release)
