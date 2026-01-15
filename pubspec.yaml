@@ -51,7 +51,7 @@ dependencies:
   path_provider: ^2.1.2
   open_filex: ^4.3.4
   flutter_local_notifications: ^19.3.1
-  open_file_manager: ^2.0.1
+  open_file_manager: ^1.0.0
   shared_preferences: ^2.3.2
   flutter_highlight: ^0.7.0
 
