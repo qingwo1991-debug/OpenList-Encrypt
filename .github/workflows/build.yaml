@@ -102,6 +102,7 @@ jobs:
           gomobile bind -v \
             -target=android/arm64,android/arm \
             -androidapi=21 \
+            -ldflags="-s -w" \
             -o ../android/app/libs/openlistlib.aar \
             ./openlistlib 2>&1 || {
               echo "Error: gomobile bind failed!"
@@ -109,6 +110,7 @@ jobs:
               gomobile bind \
                 -target=android/arm64,android/arm \
                 -androidapi=21 \
+                -ldflags="-s -w" \
                 -o ../android/app/libs/openlistlib.aar \
                 ./openlistlib || echo "AAR build failed completely"
             }
