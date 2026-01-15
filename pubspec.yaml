@@ -45,7 +45,7 @@ dependencies:
   permission_handler: ^12.0.1
   lazy_load_indexed_stack: ^1.1.0
   animations: ^2.0.11
-  file_picker: ^10.2.0
+  file_picker: ^8.0.0
   fade_indexed_stack: ^0.2.2
   dio: ^5.4.0
   path_provider: ^2.1.2
