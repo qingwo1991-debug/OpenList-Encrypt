@@ -36,6 +36,22 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16'
+
+      - name: Build WebUI
+        run: |
+          npm install -g pnpm@7.9.0
+          cd enc-webui
+          pnpm install
+          npm run build
+          mkdir -p ../openlist-lib/public/dist
+          cp -r dist/* ../openlist-lib/public/dist/
+          echo "WebUI built and copied to public/dist"
+          ls -la ../openlist-lib/public/dist/
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
