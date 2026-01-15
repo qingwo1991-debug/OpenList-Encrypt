@@ -414,7 +414,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
                   _getFileIcon(filename),
                   size: 32,
                   color: Theme.of(context).primaryColor,
-                ),
+                  ),
                 title: Text(
                   filename,
                   maxLines: 1,
@@ -750,11 +750,10 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
       try {
         await openFileManager(
           androidConfig: AndroidConfig(
-            folderType: AndroidFolderType.other,
-            folderPath: _downloadPath!,
+            folderType: FolderType.download,
           ),
           iosConfig: IosConfig(
-            folderPath: _downloadPath!,
+            subFolderPath: _downloadPath!,
           ),
         );
         Get.showSnackbar(GetSnackBar(
