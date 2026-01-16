@@ -196,7 +196,7 @@ func (p *ProxyServer) getAlistURL() string {
 
 // findEncryptPath 查找匹配的加密路径配置
 func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
-	log.Debugf("Checking encryption path for: %s", filePath)
+	log.Infof("Checking encryption path for: %s", filePath)
 
 	// 尝试 URL 解码，以防路径被编码
 	decodedPath, err := url.QueryUnescape(filePath)
