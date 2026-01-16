@@ -45,10 +45,24 @@ jobs:
         run: |
           # 1. Download Alist Web (Original Frontend)
           echo "Downloading Alist Web..."
+          # Clean up placeholder files but keep the directory
+          rm -rf ../openlist-lib/public/dist/*
+          
           curl -L https://github.com/alist-org/alist-web/releases/latest/download/dist.tar.gz -o dist.tar.gz
-          mkdir -p ../openlist-lib/public/dist
-          tar -xzf dist.tar.gz -C ../openlist-lib/public/dist
-          rm dist.tar.gz
+          
+          # Extract to temp dir to handle potential nested 'dist' folder
+          mkdir -p temp_dist
+          tar -xzf dist.tar.gz -C temp_dist
+          
+          if [ -d "temp_dist/dist" ]; then
+            echo "Found nested dist folder, moving contents..."
+            cp -r temp_dist/dist/* ../openlist-lib/public/dist/
+          else
+            echo "Moving contents from root..."
+            cp -r temp_dist/* ../openlist-lib/public/dist/
+          fi
+          
+          rm -rf temp_dist dist.tar.gz
           echo "Alist Web installed to public/dist"
           ls -la ../openlist-lib/public/dist
 
