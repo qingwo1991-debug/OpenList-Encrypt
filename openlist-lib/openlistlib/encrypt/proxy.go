@@ -246,81 +246,14 @@ func (p *ProxyServer) handleRestart(w http.ResponseWriter, r *http.Request) {
 
 // handleRoot 处理根路径
 func (p *ProxyServer) handleRoot(w http.ResponseWriter, r *http.Request) {
-	// 根路径显示选择页面
-	if r.URL.Path == "/" {
-		html := `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OpenList-Encrypt</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            margin: 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }
-        .container {
-            text-align: center;
-            color: white;
-        }
-        h1 {
-            font-size: 3em;
-            margin-bottom: 20px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
-        }
-        .buttons {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
-        .btn {
-            display: inline-block;
-            padding: 20px 40px;
-            font-size: 1.2em;
-            text-decoration: none;
-            color: white;
-            background: rgba(255,255,255,0.2);
-            border-radius: 12px;
-            backdrop-filter: blur(10px);
-            transition: all 0.3s;
-        }
-        .btn:hover {
-            background: rgba(255,255,255,0.3);
-            transform: translateY(-3px);
-        }
-        .btn-primary { background: #28a745; }
-        .btn-secondary { background: #17a2b8; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🔐 OpenList-Encrypt</h1>
-        <p style="margin-bottom: 30px;">选择要访问的页面</p>
-        <div class="buttons">
-            <a href="/public/index.html" class="btn btn-primary">📊 管理后台</a>
-            <a href="/@manage" class="btn btn-secondary">📁 Alist 文件管理</a>
-        </div>
-    </div>
-</body>
-</html>`
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(html))
-		return
-	}
-
-	// 其他路径代理到 Alist
+	log.Debugf("Handling root request: %s", r.URL.Path)
+	// 直接代理到 Alist，不显示中间导航页
 	p.handleProxy(w, r)
 }
 
 // handleStatic 处理静态文件和管理页面
 func (p *ProxyServer) handleStatic(w http.ResponseWriter, r *http.Request) {
+	log.Debugf("Handling static request: %s", r.URL.Path)
 	// 映射路径 /public/xxx -> dist/enc/xxx
 	urlPath := r.URL.Path
 	if !strings.HasPrefix(urlPath, "/public/") {
@@ -346,6 +279,7 @@ func (p *ProxyServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 			f, err = public.Public.Open(path.Join("dist", "enc", "index.html"))
 		}
 		if err != nil {
+			log.Warnf("Static file not found: %s", fsPath)
 			http.NotFound(w, r)
 			return
 		}
@@ -355,6 +289,7 @@ func (p *ProxyServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 	// 获取文件信息
 	stat, err := f.Stat()
 	if err != nil {
+		log.Errorf("Failed to stat file %s: %v", fsPath, err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
@@ -927,8 +862,11 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		targetURL += "?" + r.URL.RawQuery
 	}
 
+	log.Debugf("Proxying %s %s to %s", r.Method, r.URL.Path, targetURL)
+
 	req, err := http.NewRequest(r.Method, targetURL, r.Body)
 	if err != nil {
+		log.Errorf("Failed to create request: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -944,10 +882,13 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
+		log.Errorf("Proxy request failed: %v", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+
+	log.Debugf("Proxy response status: %d", resp.StatusCode)
 
 	// 复制响应头
 	for key, values := range resp.Header {
