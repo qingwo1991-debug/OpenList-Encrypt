@@ -171,27 +171,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                 ),
               ),
               const SizedBox(height: 16),
-              StatefulBuilder(
-                builder: (context, setState) {
-                  bool obscureText = true;
-                  return TextField(
-                    controller: passwordController,
-                    obscureText: obscureText,
-                    decoration: InputDecoration(
-                      labelText: '密码',
-                      suffixIcon: IconButton(
-                        icon: Icon(
-                          obscureText ? Icons.visibility : Icons.visibility_off,
-                        ),
-                        onPressed: () {
-                          setState(() {
-                            obscureText = !obscureText;
-                          });
-                        },
-                      ),
-                    ),
-                  );
-                },
+              _PasswordInput(
+                controller: passwordController,
+                labelText: '密码',
               ),
               const SizedBox(height: 16),
               StatefulBuilder(
@@ -289,27 +271,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                 ),
               ),
               const SizedBox(height: 16),
-              StatefulBuilder(
-                builder: (context, setState) {
-                  bool obscureText = true;
-                  return TextField(
-                    controller: passwordController,
-                    obscureText: obscureText,
-                    decoration: InputDecoration(
-                      labelText: '密码（留空保持不变）',
-                      suffixIcon: IconButton(
-                        icon: Icon(
-                          obscureText ? Icons.visibility : Icons.visibility_off,
-                        ),
-                        onPressed: () {
-                          setState(() {
-                            obscureText = !obscureText;
-                          });
-                        },
-                      ),
-                    ),
-                  );
-                },
+              _PasswordInput(
+                controller: passwordController,
+                labelText: '密码（留空保持不变）',
               ),
               const SizedBox(height: 16),
               StatefulBuilder(
@@ -706,4 +670,42 @@ class EncryptPathConfig {
     required this.encName,
     required this.enable,
   });
+}
+
+class _PasswordInput extends StatefulWidget {
+  final TextEditingController controller;
+  final String labelText;
+
+  const _PasswordInput({
+    required this.controller,
+    required this.labelText,
+  });
+
+  @override
+  State<_PasswordInput> createState() => _PasswordInputState();
+}
+
+class _PasswordInputState extends State<_PasswordInput> {
+  bool _obscureText = true;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: widget.controller,
+      obscureText: _obscureText,
+      decoration: InputDecoration(
+        labelText: widget.labelText,
+        suffixIcon: IconButton(
+          icon: Icon(
+            _obscureText ? Icons.visibility : Icons.visibility_off,
+          ),
+          onPressed: () {
+            setState(() {
+              _obscureText = !_obscureText;
+            });
+          },
+        ),
+      ),
+    );
+  }
 }
