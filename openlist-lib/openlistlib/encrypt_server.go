@@ -137,6 +137,14 @@ func (m *EncryptProxyManager) GetConfig() *encrypt.ProxyConfig {
 	return m.configManager.GetConfig()
 }
 
+// updateProxyServerConfig 更新代理服务器配置（内部方法）
+func (m *EncryptProxyManager) updateProxyServerConfig() {
+	if m.proxyServer != nil && m.proxyServer.IsRunning() {
+		config := m.configManager.GetConfig()
+		m.proxyServer.UpdateConfig(config)
+	}
+}
+
 // SetAlistHost 设置 Alist 主机
 func (m *EncryptProxyManager) SetAlistHost(host string, port int, https bool) error {
 	m.mutex.Lock()
@@ -145,7 +153,11 @@ func (m *EncryptProxyManager) SetAlistHost(host string, port int, https bool) er
 	if m.configManager == nil {
 		return errors.New("config manager not initialized")
 	}
-	return m.configManager.SetAlistHost(host, port, https)
+	err := m.configManager.SetAlistHost(host, port, https)
+	if err == nil {
+		m.updateProxyServerConfig()
+	}
+	return err
 }
 
 // SetProxyPort 设置代理端口
@@ -156,7 +168,11 @@ func (m *EncryptProxyManager) SetProxyPort(port int) error {
 	if m.configManager == nil {
 		return errors.New("config manager not initialized")
 	}
-	return m.configManager.SetProxyPort(port)
+	err := m.configManager.SetProxyPort(port)
+	if err == nil {
+		m.updateProxyServerConfig()
+	}
+	return err
 }
 
 // AddEncryptPath 添加加密路径
@@ -167,7 +183,11 @@ func (m *EncryptProxyManager) AddEncryptPath(path, password string, encType stri
 	if m.configManager == nil {
 		return errors.New("config manager not initialized")
 	}
-	return m.configManager.AddEncryptPath(path, password, encrypt.EncryptionType(encType), encName)
+	err := m.configManager.AddEncryptPath(path, password, encrypt.EncryptionType(encType), encName)
+	if err == nil {
+		m.updateProxyServerConfig()
+	}
+	return err
 }
 
 // UpdateEncryptPath 更新加密路径
@@ -178,7 +198,11 @@ func (m *EncryptProxyManager) UpdateEncryptPath(index int, path, password string
 	if m.configManager == nil {
 		return errors.New("config manager not initialized")
 	}
-	return m.configManager.UpdateEncryptPath(index, path, password, encrypt.EncryptionType(encType), encName, enable)
+	err := m.configManager.UpdateEncryptPath(index, path, password, encrypt.EncryptionType(encType), encName, enable)
+	if err == nil {
+		m.updateProxyServerConfig()
+	}
+	return err
 }
 
 // RemoveEncryptPath 删除加密路径
@@ -189,7 +213,11 @@ func (m *EncryptProxyManager) RemoveEncryptPath(index int) error {
 	if m.configManager == nil {
 		return errors.New("config manager not initialized")
 	}
-	return m.configManager.RemoveEncryptPath(index)
+	err := m.configManager.RemoveEncryptPath(index)
+	if err == nil {
+		m.updateProxyServerConfig()
+	}
+	return err
 }
 
 // GetEncryptPaths 获取加密路径列表
@@ -222,7 +250,11 @@ func (m *EncryptProxyManager) SetAdminPassword(password string) error {
 	if m.configManager == nil {
 		return errors.New("config manager not initialized")
 	}
-	return m.configManager.SetAdminPassword(password)
+	err := m.configManager.SetAdminPassword(password)
+	if err == nil {
+		m.updateProxyServerConfig()
+	}
+	return err
 }
 
 // === 以下是为 gomobile 导出的函数 ===

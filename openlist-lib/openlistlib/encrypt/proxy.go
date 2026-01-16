@@ -192,6 +192,37 @@ func (p *ProxyServer) IsRunning() bool {
 	return p.running
 }
 
+// UpdateConfig 更新配置（热更新）
+func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	p.config = config
+
+	// Re-compile regex
+	for _, ep := range p.config.EncryptPaths {
+		if ep.Path != "" {
+			pattern := ep.Path
+			if strings.HasSuffix(pattern, "/*") {
+				base := strings.TrimSuffix(pattern, "/*")
+				pattern = "^" + regexp.QuoteMeta(base) + "(/.*)?$"
+			} else {
+				pattern = strings.ReplaceAll(pattern, "*", ".*")
+				pattern = strings.ReplaceAll(pattern, "?", ".")
+				if !strings.HasPrefix(pattern, "^") {
+					pattern = "^" + pattern
+				}
+			}
+			reg, err := regexp.Compile(pattern)
+			if err != nil {
+				log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
+				continue
+			}
+			ep.regex = reg
+		}
+	}
+}
+
 // getAlistURL 获取 Alist 服务 URL
 func (p *ProxyServer) getAlistURL() string {
 	protocol := "http"
