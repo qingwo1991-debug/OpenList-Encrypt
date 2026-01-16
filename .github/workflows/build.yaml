@@ -43,31 +43,15 @@ jobs:
 
       - name: Build and Setup WebUI
         run: |
-          # 1. Download Alist Web (Original Frontend)
-          echo "Downloading Alist Web (Official)..."
-          # Clean up placeholder files but keep the directory
-          rm -rf openlist-lib/public/dist/*
+          # 1. Initialize OpenList Frontend (using official script for better compatibility)
+          echo "Initializing OpenList Frontend..."
+          # The script expects to be run from scripts directory and handles moving dist to ../public/dist
+          cd openlist-lib/scripts
+          chmod +x init_web.sh
+          ./init_web.sh
+          cd ../..
           
-          # Use Alist official frontend (Standard Dist) which is compatible and reliably accessible
-          curl -L https://github.com/alist-org/alist-web/releases/latest/download/dist.tar.gz -o dist.tar.gz
-          
-          # Extract to temp dir to handle potential nested 'dist' folder
-          mkdir -p temp_dist
-          tar -xzf dist.tar.gz -C temp_dist
-          
-          # Ensure destination exists
-          mkdir -p openlist-lib/public/dist
-          
-          if [ -d "temp_dist/dist" ]; then
-            echo "Found nested dist folder, moving contents..."
-            cp -r temp_dist/dist/* openlist-lib/public/dist/
-          else
-            echo "Moving contents from root..."
-            cp -r temp_dist/* openlist-lib/public/dist/
-          fi
-          
-          rm -rf temp_dist dist.tar.gz
-          echo "Alist Web installed to public/dist"
+          echo "OpenList Web installed to public/dist:"
           ls -la openlist-lib/public/dist
 
           # 2. Build Encrypt WebUI (Our Frontend)
@@ -78,10 +62,14 @@ jobs:
           npm run build
           
           # 3. Move Encrypt WebUI to subdirectory to avoid conflict
+          # Note: openlist-lib/public/dist/enc will store our custom UI
           mkdir -p ../openlist-lib/public/dist/enc
           cp -r dist/* ../openlist-lib/public/dist/enc/
-          echo "Encrypt WebUI built and copied to public/dist/enc"
+          echo "Encrypt WebUI built and copied to public/dist/enc:"
           ls -la ../openlist-lib/public/dist/enc/
+
+          # Clean up node modules to save space
+          rm -rf node_modules
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -118,34 +106,11 @@ jobs:
           export PATH=$PATH:$(go env GOPATH)/bin
           export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653
           
-          echo "Current directory: $(pwd)"
-          echo "Directory contents:"
+          echo "Currently in openlist-lib. Checking struct:"
           ls -la
           
-          echo ""
-          echo "openlistlib directory contents:"
-          ls -la ./openlistlib/ || echo "openlistlib not found"
-          
-          echo ""
-          echo "go.mod contents:"
-          cat go.mod
-          
-          echo ""
-          echo "Downloading dependencies..."
-          go mod download
-          go mod tidy
-          
-          echo ""
-          echo "Go environment:"
-          go env GOPATH
-          go env GOROOT
-          which gomobile
-          which gobind
-          
-          mkdir -p ../android/app/libs
-          
-          echo ""
           echo "Building Android AAR..."
+          # Using -s -w to strip debug symbols and reduce size
           gomobile bind -v \
             -target=android/arm64,android/arm \
             -androidapi=21 \
@@ -153,22 +118,15 @@ jobs:
             -o ../android/app/libs/openlistlib.aar \
             ./openlistlib 2>&1 || {
               echo "Error: gomobile bind failed!"
-              echo "Trying without verbose..."
-              gomobile bind \
-                -target=android/arm64,android/arm \
-                -androidapi=21 \
-                -ldflags="-s -w" \
-                -o ../android/app/libs/openlistlib.aar \
-                ./openlistlib || echo "AAR build failed completely"
+              exit 1
             }
           
           if [ -f ../android/app/libs/openlistlib.aar ]; then
             echo "AAR file created successfully:"
             ls -la ../android/app/libs/
           else
-            echo "Warning: AAR file was not created!"
-            echo "Checking if libs directory exists..."
-            ls -la ../android/app/
+            echo "Error: AAR file was not created!"
+            exit 1
           fi
 
       - name: Get Flutter dependencies
@@ -184,27 +142,15 @@ jobs:
             --dart_out lib/generated_api.dart \
             --java_out android/app/src/main/java/com/openlist/pigeon/GeneratedApi.java \
             --java_package "com.openlist.pigeon" || echo "Pigeon generation skipped or failed"
-          
-          echo "Checking generated files:"
-          ls -la lib/generated_api.dart 2>/dev/null || echo "Dart API file not found"
-          ls -la android/app/src/main/java/com/openlist/pigeon/ 2>/dev/null || echo "Java pigeon directory not found"
 
       - name: Build APK (Debug)
         run: |
           echo "Starting Flutter debug build..."
-          flutter build apk --debug 2>&1 | tee flutter_build.log || true
+          # Ignore exit code because flutter might report error on split apks not found
+          flutter build apk --debug 2>&1 | tee flutter_build_debug.log || true
           
-          echo ""
-          echo "Checking build outputs..."
-          find . -name "*.apk" -type f 2>/dev/null | head -20
-          
-          echo ""
-          echo "Flutter APK directory:"
-          ls -la build/app/outputs/flutter-apk/ 2>/dev/null || echo "Flutter APK directory not found"
-          
-          echo ""
-          echo "Gradle APK directory:"
-          ls -la android/app/build/outputs/apk/debug/ 2>/dev/null || echo "Gradle debug APK directory not found"
+          echo "Checking debug build outputs:"
+          find build/app/outputs/flutter-apk -name "*.apk"
 
       - name: Upload Debug APK (All)
         uses: actions/upload-artifact@v4
@@ -235,21 +181,40 @@ jobs:
           if-no-files-found: warn
 
       - name: Build APK (Release)
-        continue-on-error: true
         run: |
           echo "Starting Flutter release build..."
-          flutter build apk --release 2>&1 || {
-            echo "Release build failed, trying debug build..."
-            flutter build apk --debug
-          }
+          # Ignore exit code because flutter might report error on split apks not found
+          flutter build apk --release 2>&1 | tee flutter_build_release.log || true
+          
+          echo "Checking release build outputs:"
+          find build/app/outputs/flutter-apk -name "*.apk"
 
-      - name: Upload Release APK
+      - name: Upload Release APK (All)
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: |
-            build/app/outputs/flutter-apk/app-release*.apk
-            android/app/build/outputs/apk/release/*.apk
+          name: app-release-all
+          path: build/app/outputs/flutter-apk/*release.apk
+          if-no-files-found: warn
+
+      - name: Upload Release APK (ARM64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-arm64
+          path: build/app/outputs/flutter-apk/*arm64-v8a-release.apk
+          if-no-files-found: warn
+
+      - name: Upload Release APK (ARMv7)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-armeabi-v7a
+          path: build/app/outputs/flutter-apk/*armeabi-v7a-release.apk
+          if-no-files-found: warn
+
+      - name: Upload Release APK (x86_64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-x86_64
+          path: build/app/outputs/flutter-apk/*x86_64-release.apk
           if-no-files-found: warn
 
       - name: Upload Build Logs
@@ -258,6 +223,7 @@ jobs:
         with:
           name: build-logs
           path: |
-            flutter_build.log
+            flutter_build_debug.log
+            flutter_build_release.log
             android/app/build/outputs/logs/
           if-no-files-found: warn
