@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/url"
 	"path"
@@ -23,11 +22,11 @@ import (
 
 // EncryptPath 加密路径配置
 type EncryptPath struct {
-	Path     string         `json:"path"`      // 路径正则表达式
-	Password string         `json:"password"`  // 加密密码
-	EncType  EncryptionType `json:"encType"`   // 加密类型
-	EncName  bool           `json:"encName"`   // 是否加密文件名
-	Enable   bool           `json:"enable"`    // 是否启用
+	Path     string         `json:"path"`     // 路径正则表达式
+	Password string         `json:"password"` // 加密密码
+	EncType  EncryptionType `json:"encType"`  // 加密类型
+	EncName  bool           `json:"encName"`  // 是否加密文件名
+	Enable   bool           `json:"enable"`   // 是否启用
 	regex    *regexp.Regexp // 编译后的正则表达式
 }
 
@@ -88,7 +87,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 			if !strings.HasPrefix(pattern, "^") {
 				pattern = "^" + pattern
 			}
-			
+
 			regex, err := regexp.Compile(pattern)
 			if err != nil {
 				log.Warnf("Invalid path pattern: %s, error: %v", ep.Path, err)
@@ -121,10 +120,10 @@ func (p *ProxyServer) Start() error {
 	}
 
 	mux := http.NewServeMux()
-	
+
 	// 路由配置
 	mux.HandleFunc("/ping", p.handlePing)
-	mux.HandleFunc("/index", p.handleIndex)           // 管理页面快捷入口
+	mux.HandleFunc("/index", p.handleIndex) // 管理页面快捷入口
 	mux.HandleFunc("/public/", p.handleStatic)
 	mux.HandleFunc("/api/encrypt/config", p.handleConfig)
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
@@ -134,7 +133,7 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/d/", p.handleDownload)
 	mux.HandleFunc("/p/", p.handleDownload)
 	mux.HandleFunc("/dav/", p.handleWebDAV)
-	mux.HandleFunc("/", p.handleRoot)                 // 根路径处理
+	mux.HandleFunc("/", p.handleRoot) // 根路径处理
 
 	p.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", p.config.ProxyPort),
@@ -167,7 +166,7 @@ func (p *ProxyServer) Stop() error {
 	if p.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		
+
 		if err := p.server.Shutdown(ctx); err != nil {
 			log.Errorf("Error shutting down proxy server: %v", err)
 			return err
@@ -230,13 +229,13 @@ func (p *ProxyServer) handleRestart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"code":    200,
 		"message": "Service will restart",
 	})
-	
+
 	// 异步重启（给响应时间先返回）
 	go func() {
 		time.Sleep(500 * time.Millisecond)
@@ -315,7 +314,7 @@ func (p *ProxyServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(html))
 		return
 	}
-	
+
 	// 其他路径代理到 Alist
 	p.handleProxy(w, r)
 }
@@ -334,7 +333,7 @@ func (p *ProxyServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if relPath == "" || relPath == "index.html" {
 		relPath = "index.html"
 	}
-	
+
 	// 从 embed FS 读取文件 (public.Public 的根是 .)
 	// dist 是 public.Public 的子目录
 	// 我们将 enc-webui 放在 dist/enc 下
@@ -486,7 +485,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 
 		// 创建解密读取器
 		decryptReader := NewDecryptReader(resp.Body, encryptor)
-		
+
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, decryptReader)
 	} else {
@@ -558,7 +557,7 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 							size, _ := fileMap["size"].(float64)
 							isDir, _ := fileMap["is_dir"].(bool)
 							filePath := path.Join(dirPath, name)
-							
+
 							// 缓存文件信息
 							p.fileCache.Store(filePath, &FileInfo{
 								Name:  name,
@@ -708,7 +707,7 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	originalPath := r.URL.Path
 	filePath := originalPath
-	
+
 	// 移除 /d/ 或 /p/ 前缀
 	if strings.HasPrefix(filePath, "/d/") {
 		filePath = strings.TrimPrefix(filePath, "/d/")
@@ -719,10 +718,10 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	// 检查是否需要解密
 	encPath := p.findEncryptPath(filePath)
-	
+
 	// 构建实际请求的 URL 路径
 	actualURLPath := originalPath
-	
+
 	// 如果开启了文件名加密，转换为真实加密名
 	if encPath != nil && encPath.EncName {
 		fileName := path.Base(filePath)
@@ -823,7 +822,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "PUT" {
 		filePath := r.URL.Path
 		encPath := p.findEncryptPath(filePath)
-		
+
 		if encPath != nil {
 			contentLength := r.ContentLength
 			if contentLength > 0 {
@@ -879,7 +878,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		filePath := r.URL.Path
 		encPath := p.findEncryptPath(filePath)
-		
+
 		if encPath != nil {
 			// 尝试获取文件大小
 			var fileSize int64 = 0
@@ -964,7 +963,7 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(contentType, "text/html") {
 		body, _ := io.ReadAll(resp.Body)
 		html := string(body)
-		
+
 		// 注入版本标识
 		injection := `<body>
 <div style="position: fixed;z-index:10010; top:7px; margin-left: 50%">
