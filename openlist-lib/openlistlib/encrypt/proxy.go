@@ -131,6 +131,9 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/ping", p.handlePing)
 	mux.HandleFunc("/index", p.handleIndex) // 管理页面快捷入口
 	mux.HandleFunc("/public/", p.handleStatic)
+	mux.HandleFunc("/static/", p.handleStatic)
+	mux.HandleFunc("/favicon.ico", p.handleStatic)
+	mux.HandleFunc("/logo.png", p.handleStatic)
 	mux.HandleFunc("/api/encrypt/config", p.handleConfig)
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
 	mux.HandleFunc("/redirect/", p.handleRedirect)
@@ -319,15 +322,20 @@ func (p *ProxyServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 // handleStatic 处理静态文件和管理页面
 func (p *ProxyServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 	log.Debugf("Handling static request: %s", r.URL.Path)
-	// 映射路径 /public/xxx -> dist/enc/xxx
 	urlPath := r.URL.Path
-	if !strings.HasPrefix(urlPath, "/public/") {
+	var relPath string
+
+	if strings.HasPrefix(urlPath, "/public/") {
+		relPath = strings.TrimPrefix(urlPath, "/public/")
+	} else if strings.HasPrefix(urlPath, "/static/") {
+		relPath = strings.TrimPrefix(urlPath, "/")
+	} else if urlPath == "/favicon.ico" || urlPath == "/logo.png" {
+		relPath = strings.TrimPrefix(urlPath, "/")
+	} else {
 		http.NotFound(w, r)
 		return
 	}
 
-	// 移除 /public/ 前缀，加上 enc/ 前缀
-	relPath := strings.TrimPrefix(urlPath, "/public/")
 	if relPath == "" || relPath == "index.html" {
 		relPath = "index.html"
 	}
