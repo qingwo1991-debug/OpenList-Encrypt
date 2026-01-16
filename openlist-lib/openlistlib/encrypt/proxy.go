@@ -355,7 +355,7 @@ func (p *ProxyServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 	// 获取文件信息
 	stat, err := f.Stat()
 	if err != nil {
-		http.StatusInternalServerError(w, r)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
