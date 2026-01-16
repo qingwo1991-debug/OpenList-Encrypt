@@ -3,11 +3,22 @@ package openlistlib
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"sync"
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/encrypt"
 	log "github.com/sirupsen/logrus"
 )
+
+func init() {
+	// 将日志输出到标准错误，以便在 Android logcat 中查看（通常 tag 为 GoLog）
+	log.SetOutput(os.Stderr)
+	log.SetLevel(log.DebugLevel)
+	log.SetFormatter(&log.TextFormatter{
+		DisableColors: true,
+		FullTimestamp: true,
+	})
+}
 
 // EncryptProxyManager 加密代理管理器
 type EncryptProxyManager struct {

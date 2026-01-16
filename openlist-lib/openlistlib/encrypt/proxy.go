@@ -196,12 +196,27 @@ func (p *ProxyServer) getAlistURL() string {
 
 // findEncryptPath 查找匹配的加密路径配置
 func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
+	log.Debugf("Checking encryption path for: %s", filePath)
+
+	// 尝试 URL 解码，以防路径被编码
+	decodedPath, err := url.QueryUnescape(filePath)
+	if err != nil {
+		decodedPath = filePath
+	}
+
 	for _, ep := range p.config.EncryptPaths {
 		if !ep.Enable {
 			continue
 		}
-		if ep.regex != nil && ep.regex.MatchString(filePath) {
-			return ep
+		if ep.regex != nil {
+			if ep.regex.MatchString(filePath) {
+				log.Debugf("Matched rule (raw): %s", ep.Path)
+				return ep
+			}
+			if filePath != decodedPath && ep.regex.MatchString(decodedPath) {
+				log.Debugf("Matched rule (decoded): %s", ep.Path)
+				return ep
+			}
 		}
 	}
 	return nil
@@ -482,6 +497,8 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 					var reqData map[string]string
 					json.Unmarshal(body, &reqData)
 					dirPath := reqData["path"]
+
+					log.Debugf("Handling fs list for path: %s", dirPath)
 
 					// 查找加密路径配置
 					encPath := p.findEncryptPath(dirPath)
