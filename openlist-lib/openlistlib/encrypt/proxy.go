@@ -130,6 +130,8 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/redirect/", p.handleRedirect)
 	mux.HandleFunc("/api/fs/list", p.handleFsList)
 	mux.HandleFunc("/api/fs/get", p.handleFsGet)
+	// 处理网页端上传
+	mux.HandleFunc("/api/fs/put", p.handleFsPut)
 	mux.HandleFunc("/d/", p.handleDownload)
 	mux.HandleFunc("/p/", p.handleDownload)
 	mux.HandleFunc("/dav/", p.handleWebDAV)
