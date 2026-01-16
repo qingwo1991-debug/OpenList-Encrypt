@@ -322,21 +322,46 @@ func (p *ProxyServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 // handleStatic 处理静态文件和管理页面
 func (p *ProxyServer) handleStatic(w http.ResponseWriter, r *http.Request) {
-	// 管理页面入口
-	if r.URL.Path == "/public/index.html" || r.URL.Path == "/public/" {
-		html, err := RenderWebUI(p.config)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(html))
+	// 映射路径 /public/xxx -> dist/enc/xxx
+	urlPath := r.URL.Path
+	if !strings.HasPrefix(urlPath, "/public/") {
+		http.NotFound(w, r)
 		return
 	}
+
+	// 移除 /public/ 前缀，加上 enc/ 前缀
+	relPath := strings.TrimPrefix(urlPath, "/public/")
+	if relPath == "" || relPath == "index.html" {
+		relPath = "index.html"
+	}
 	
-	// 其他静态资源暂时返回 404
-	http.NotFound(w, r)
+	// 从 embed FS 读取文件 (public.Public 的根是 .)
+	// dist 是 public.Public 的子目录
+	// 我们将 enc-webui 放在 dist/enc 下
+	fsPath := path.Join("dist", "enc", relPath)
+
+	f, err := public.Public.Open(fsPath)
+	if err != nil {
+		// 如果找不到文件，且是 HTML 请求，返回 index.html (支持 history mode 路由)
+		if !strings.Contains(relPath, ".") {
+			f, err = public.Public.Open(path.Join("dist", "enc", "index.html"))
+		}
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	defer f.Close()
+
+	// 获取文件信息
+	stat, err := f.Stat()
+	if err != nil {
+		http.StatusInternalServerError(w, r)
+		return
+	}
+
+	// 使用 http.ServeContent 处理 Range 请求和 Content-Type
+	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f.(io.ReadSeeker))
 }
 
 // handleConfig 处理配置 API
