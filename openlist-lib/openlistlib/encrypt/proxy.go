@@ -82,10 +82,16 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		if ep.Path != "" {
 			// 转换简单通配符为正则表达式
 			pattern := ep.Path
-			pattern = strings.ReplaceAll(pattern, "*", ".*")
-			pattern = strings.ReplaceAll(pattern, "?", ".")
-			if !strings.HasPrefix(pattern, "^") {
-				pattern = "^" + pattern
+			// 特殊处理 /* 结尾，使其匹配目录本身和子文件
+			if strings.HasSuffix(pattern, "/*") {
+				base := strings.TrimSuffix(pattern, "/*")
+				pattern = "^" + regexp.QuoteMeta(base) + "(/.*)?$"
+			} else {
+				pattern = strings.ReplaceAll(pattern, "*", ".*")
+				pattern = strings.ReplaceAll(pattern, "?", ".")
+				if !strings.HasPrefix(pattern, "^") {
+					pattern = "^" + pattern
+				}
 			}
 
 			regex, err := regexp.Compile(pattern)
@@ -130,8 +136,7 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/redirect/", p.handleRedirect)
 	mux.HandleFunc("/api/fs/list", p.handleFsList)
 	mux.HandleFunc("/api/fs/get", p.handleFsGet)
-	// 处理网页端上传
-	mux.HandleFunc("/api/fs/put", p.handleFsPut)
+	mux.HandleFunc("/api/fs/put", p.handleFsPut) // 网页端上传
 	mux.HandleFunc("/d/", p.handleDownload)
 	mux.HandleFunc("/p/", p.handleDownload)
 	mux.HandleFunc("/dav/", p.handleWebDAV)
@@ -212,11 +217,11 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 		}
 		if ep.regex != nil {
 			if ep.regex.MatchString(filePath) {
-				log.Debugf("Matched rule (raw): %s", ep.Path)
+				log.Infof("Matched rule (raw): %s", ep.Path)
 				return ep
 			}
 			if filePath != decodedPath && ep.regex.MatchString(decodedPath) {
-				log.Debugf("Matched rule (decoded): %s", ep.Path)
+				log.Infof("Matched rule (decoded): %s", ep.Path)
 				return ep
 			}
 		}
@@ -448,6 +453,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 
 // handleFsList 处理文件列表
 func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
+	log.Infof("Proxy handling fs list request")
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -500,7 +506,7 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 					json.Unmarshal(body, &reqData)
 					dirPath := reqData["path"]
 
-					log.Debugf("Handling fs list for path: %s", dirPath)
+					log.Infof("Handling fs list for path: %s", dirPath)
 
 					// 查找加密路径配置
 					encPath := p.findEncryptPath(dirPath)
@@ -524,6 +530,9 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 							if encPath != nil && encPath.EncName && !isDir {
 								// 将加密的文件名转换为显示名
 								showName := ConvertShowName(encPath.Password, encPath.EncType, name)
+								if showName != name && !strings.HasPrefix(showName, "orig_") {
+									log.Infof("Decrypt filename: %s -> %s", name, showName)
+								}
 								fileMap["name"] = showName
 							}
 						}
@@ -544,6 +553,7 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 
 // handleFsGet 处理获取文件信息
 func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
+	log.Infof("Proxy handling fs get request")
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -655,6 +665,84 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
+}
+
+// handleFsPut 处理文件上传请求
+func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
+	log.Infof("Proxy handling fs put request")
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	targetURL := p.getAlistURL() + r.URL.Path
+	var body io.Reader = r.Body
+
+	// 获取上传路径
+	filePath := r.Header.Get("File-Path")
+	if filePath == "" {
+		// 尝试从 URL 参数获取 (有些客户端可能通过 URL 传参)
+		filePath = r.URL.Query().Get("path")
+	}
+
+	// URL 解码
+	decodedPath, err := url.QueryUnescape(filePath)
+	if err == nil {
+		filePath = decodedPath
+	}
+
+	log.Infof("Uploading file to path: %s", filePath)
+
+	// 检查是否需要加密
+	encPath := p.findEncryptPath(filePath)
+	if encPath != nil {
+		log.Infof("Encrypting upload for path: %s", filePath)
+		contentLength := r.ContentLength
+		if contentLength <= 0 {
+			contentLength = 0
+		}
+
+		encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, contentLength)
+		if err != nil {
+			log.Errorf("Failed to create encryptor: %v", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		body = NewEncryptReader(r.Body, encryptor)
+	}
+
+	req, err := http.NewRequest(r.Method, targetURL, body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 复制请求头
+	for key, values := range r.Header {
+		if key != "Host" {
+			for _, value := range values {
+				req.Header.Add(key, value)
+			}
+		}
+	}
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		log.Errorf("FsPut request failed: %v", err)
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 复制响应头
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 // handleDownload 处理下载请求
