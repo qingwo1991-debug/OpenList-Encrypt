@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"net/url"
 	"path"
@@ -323,11 +322,11 @@ func (r *DecryptReader) Read(p []byte) (int, error) {
 // EncodeName 使用 MixBase64 编码文件名（兼容 alist-encrypt）
 func EncodeName(password string, encType EncryptionType, plainName string) string {
 	passwdOutward := GetPasswdOutward(password, encType)
-	mix64 := NewMixBase64(passwdOutward, "")
-	encodeName := mix64.Encode([]byte(plainName))
+	mix64 := NewMixBase64(passwdOutward)
+	encodeName := mix64.Encode(plainName)
 	// 添加 CRC6 校验位
 	crc6Bit := crc6.Checksum([]byte(encodeName + passwdOutward))
-	crc6Check := GetSourceChar(int(crc6Bit))
+	crc6Check := MixBase64GetSourceChar(int(crc6Bit))
 	return encodeName + string(crc6Check)
 }
 
@@ -343,14 +342,14 @@ func DecodeName(password string, encType EncryptionType, encodedName string) str
 	// 验证 CRC6
 	subEncName := encodedName[:len(encodedName)-1]
 	crc6Bit := crc6.Checksum([]byte(subEncName + passwdOutward))
-	if GetSourceChar(int(crc6Bit)) != crc6Check {
+	if MixBase64GetSourceChar(int(crc6Bit)) != crc6Check {
 		return ""
 	}
 
-	mix64 := NewMixBase64(passwdOutward, "")
+	mix64 := NewMixBase64(passwdOutward)
 	decoded, err := mix64.Decode(subEncName)
 	if err != nil {
-		fmt.Printf("Decode error: %v\n", err)
+		// Log error if needed
 		return ""
 	}
 

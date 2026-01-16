@@ -1,34 +1,72 @@
 package encrypt
 
 import (
+	"bytes"
 	"crypto/sha256"
 )
 
 const base64Source = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~+"
 
-// MixBase64 自定义的 Base64 编码器
 type MixBase64 struct {
-	chars    []byte
-	mapChars map[byte]int
+	chars    []string
+	mapChars map[string]int
 }
 
-// NewMixBase64 创建 MixBase64 编码器
-func NewMixBase64(password string, salt string) *MixBase64 {
-	if salt == "" {
-		salt = "mix64"
-	}
-
-	var secret string
-	if len(password) == 64 {
-		secret = password
+func initKSA(passwd string) string {
+	var key []byte
+	if len(passwd) > 0 { // effectively matches 'string' check? JS code: if (typeof passwd === 'string')
+		hash := sha256.New()
+		hash.Write([]byte(passwd))
+		key = hash.Sum(nil)
 	} else {
-		secret = initKSA(password + salt)
+		key = []byte(passwd) // unreachable if type is string in Go usually
 	}
 
-	chars := []byte(secret)
-	mapChars := make(map[byte]int)
-	for i, c := range chars {
-		mapChars[c] = i
+	// S-box init
+	sbox := make([]int, len(base64Source))
+	for i := range sbox {
+		sbox[i] = i
+	}
+
+	// Fill K
+	K := make([]int, len(base64Source))
+	keyLen := len(key)
+	for i := range K {
+		K[i] = int(key[i%keyLen])
+	}
+
+	// Swap S-box
+	j := 0
+	sourceLen := len(base64Source)
+	for i := 0; i < sourceLen; i++ {
+		j = (j + sbox[i] + K[i]) % sourceLen
+		sbox[i], sbox[j] = sbox[j], sbox[i]
+	}
+
+	var secret bytes.Buffer
+	sourceKey := []rune(base64Source)
+	for _, idx := range sbox {
+		secret.WriteRune(sourceKey[idx])
+	}
+	return secret.String()
+}
+
+func NewMixBase64(passwd string) *MixBase64 {
+	salt := "mix64"
+	var secret string
+	if len(passwd) == 64 {
+		secret = passwd
+	} else {
+		secret = initKSA(passwd + salt)
+	}
+
+	chars := make([]string, len(secret))
+	mapChars := make(map[string]int)
+
+	for i, r := range secret {
+		s := string(r)
+		chars[i] = s
+		mapChars[s] = i
 	}
 
 	return &MixBase64{
@@ -37,127 +75,132 @@ func NewMixBase64(password string, salt string) *MixBase64 {
 	}
 }
 
-// initKSA 使用 SHA256 初始化 KSA
-func initKSA(passwd string) string {
-	key := sha256.Sum256([]byte(passwd))
+func (m *MixBase64) Encode(input string) string {
+	buffer := []byte(input) // utf-8 by default
+	var result bytes.Buffer
+	length := len(buffer)
 
-	K := make([]int, len(base64Source))
-	sbox := make([]int, len(base64Source))
-	sourceKey := []byte(base64Source)
+	chars := m.chars
 
-	// 初始化 sbox
-	for i := 0; i < len(base64Source); i++ {
-		sbox[i] = i
-	}
+	for i := 0; i < length; i += 3 {
+		// subarray
+		remain := length - i
+		if remain >= 3 {
+			bt0 := int(buffer[i])
+			bt1 := int(buffer[i+1])
+			bt2 := int(buffer[i+2])
 
-	// 用种子密钥对 K 表进行填充
-	for i := 0; i < len(base64Source); i++ {
-		K[i] = int(key[i%len(key)])
-	}
-
-	// 对 S 表进行置换
-	j := 0
-	for i := 0; i < len(base64Source); i++ {
-		j = (j + sbox[i] + K[i]) % len(base64Source)
-		sbox[i], sbox[j] = sbox[j], sbox[i]
-	}
-
-	secret := make([]byte, len(base64Source))
-	for i, v := range sbox {
-		secret[i] = sourceKey[v]
-	}
-
-	return string(secret)
-}
-
-// Encode 编码数据
-func (m *MixBase64) Encode(data []byte) string {
-	if len(data) == 0 {
-		return ""
-	}
-
-	result := make([]byte, 0, (len(data)*4+2)/3)
-
-	for i := 0; i < len(data); i += 3 {
-		if i+3 > len(data) {
-			// 处理末尾
-			remaining := len(data) - i
-			if remaining == 1 {
-				result = append(result, m.chars[data[i]>>2])
-				result = append(result, m.chars[(data[i]&3)<<4])
-				result = append(result, m.chars[64])
-				result = append(result, m.chars[64])
-			} else if remaining == 2 {
-				result = append(result, m.chars[data[i]>>2])
-				result = append(result, m.chars[((data[i]&3)<<4)|(data[i+1]>>4)])
-				result = append(result, m.chars[(data[i+1]&15)<<2])
-				result = append(result, m.chars[64])
-			}
+			result.WriteString(chars[bt0>>2])
+			result.WriteString(chars[((bt0&3)<<4)|(bt1>>4)])
+			result.WriteString(chars[((bt1&15)<<2)|(bt2>>6)])
+			result.WriteString(chars[bt2&63])
 		} else {
-			b0, b1, b2 := data[i], data[i+1], data[i+2]
-			result = append(result, m.chars[b0>>2])
-			result = append(result, m.chars[((b0&3)<<4)|(b1>>4)])
-			result = append(result, m.chars[((b1&15)<<2)|(b2>>6)])
-			result = append(result, m.chars[b2&63])
+			// padding logic
+			arr := buffer[i:]
+			if len(arr) == 1 {
+				v0 := int(arr[0])
+				result.WriteString(chars[v0>>2])
+				result.WriteString(chars[(v0&3)<<4])
+				result.WriteString(chars[64]) // 64 is index out of bounds?
+				// source length is 64 + 1? No.
+				// source length is 64.  indices 0-63.
+				// JS Code: chars[64] + chars[64]
+				// Wait, source = '...-~+' length is 26+26+10+3 = 65?
+				// A-Z (26) + a-z (26) + 0-9 (10) + -~+ (3) = 65 chars.
+				// Base64 uses 64 chars.
+				// mixBase64Source has 65 chars?
+				// JS: `const source = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~+'`
+				// Length: 26+26+10+3 = 65.
+				// standard base64: A-Z, a-z, 0-9, +, / (64 chars) + = (pad)
+				// This custom base64 uses 65 chars?
+				// JS: chars indexes go up to 63 in main loop (bt2 & 63).
+				// Padding used chars[64].
+				// So yes, it uses the 65th char as padding?
+				result.WriteString(chars[64])
+			} else if len(arr) == 2 {
+				v0 := int(arr[0])
+				v1 := int(arr[1])
+				result.WriteString(chars[v0>>2])
+				result.WriteString(chars[((v0&3)<<4)|(v1>>4)])
+				result.WriteString(chars[(v1&15)<<2])
+				result.WriteString(chars[64])
+			}
 		}
 	}
-
-	return string(result)
+	return result.String()
 }
 
-// Decode 解码数据
-func (m *MixBase64) Decode(encoded string) ([]byte, error) {
-	if len(encoded) == 0 {
-		return nil, nil
-	}
+func (m *MixBase64) Decode(base64Str string) ([]byte, error) {
+	chars := m.chars
 
-	// 计算输出大小
-	size := (len(encoded) / 4) * 3
-	padChar := m.chars[64]
+	// JS logic to calculate size
+	// let size = (base64Str.length / 4) * 3
+	size := (len(base64Str) / 4) * 3
 
-	// 检查填充
-	if len(encoded) >= 2 && encoded[len(encoded)-1] == padChar && encoded[len(encoded)-2] == padChar {
+	padChar := chars[64]
+	if len(base64Str) > 1 && base64Str[len(base64Str)-2:] == padChar+padChar {
 		size -= 2
-	} else if len(encoded) >= 1 && encoded[len(encoded)-1] == padChar {
+	} else if len(base64Str) > 0 && string(base64Str[len(base64Str)-1]) == padChar {
 		size -= 1
 	}
 
-	result := make([]byte, 0, size)
+	// buffer allocation
+	buffer := make([]byte, size)
+	j := 0
+	i := 0
 
-	for i := 0; i < len(encoded); i += 4 {
-		enc1 := m.mapChars[encoded[i]]
-		enc2 := m.mapChars[encoded[i+1]]
-		enc3 := m.mapChars[encoded[i+2]]
-		enc4 := m.mapChars[encoded[i+3]]
+	runes := []rune(base64Str)
+	length := len(runes)
 
-		result = append(result, byte((enc1<<2)|(enc2>>4)))
+	for i < length {
+		// Bounds check to avoid panic if invalid char
+		charStr := string(runes[i])
+		if _, ok := m.mapChars[charStr]; !ok {
+			i++
+			continue // Skip invalid chars or error? JS logic just access map chars[char]
+		}
+
+		enc1 := m.mapChars[string(runes[i])]
+		i++
+		// check bounds for subsequent chars
+		if i >= length {
+			break
+		}
+		enc2 := m.mapChars[string(runes[i])]
+		i++
+		if i >= length {
+			break
+		}
+		enc3 := m.mapChars[string(runes[i])]
+		i++
+		if i >= length {
+			break
+		}
+		enc4 := m.mapChars[string(runes[i])]
+		i++
+
+		// buffer.writeUInt8((enc1 << 2) | (enc2 >> 4), j++)
+		if j < size {
+			buffer[j] = byte((enc1 << 2) | (enc2 >> 4))
+			j++
+		}
+
 		if enc3 != 64 {
-			result = append(result, byte(((enc2&15)<<4)|(enc3>>2)))
+			if j < size {
+				buffer[j] = byte(((enc2 & 15) << 4) | (enc3 >> 2))
+				j++
+			}
 		}
 		if enc4 != 64 {
-			result = append(result, byte(((enc3&3)<<6)|enc4))
+			if j < size {
+				buffer[j] = byte(((enc3 & 3) << 6) | enc4)
+				j++
+			}
 		}
 	}
-
-	return result, nil
+	return buffer, nil
 }
 
-// GetSourceChar 获取源字符
-func GetSourceChar(index int) byte {
-	chars := []byte(base64Source)
-	if index >= 0 && index < len(chars) {
-		return chars[index]
-	}
-	return 0
-}
-
-// GetCheckBit 获取校验位
-func GetCheckBit(text string) byte {
-	data := []byte(text)
-	count := 0
-	for _, b := range data {
-		count += int(b)
-	}
-	count %= 64
-	return []byte(base64Source)[count]
+func MixBase64GetSourceChar(index int) byte {
+	return base64Source[index]
 }
