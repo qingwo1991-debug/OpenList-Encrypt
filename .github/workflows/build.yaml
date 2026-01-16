@@ -46,7 +46,8 @@ jobs:
           # 1. Download Alist Web (Original Frontend)
           echo "Downloading Alist Web..."
           # Clean up placeholder files but keep the directory
-          rm -rf ../openlist-lib/public/dist/*
+          # We are in repo root, so path is openlist-lib/...
+          rm -rf openlist-lib/public/dist/*
           
           curl -L https://github.com/alist-org/alist-web/releases/latest/download/dist.tar.gz -o dist.tar.gz
           
@@ -54,17 +55,20 @@ jobs:
           mkdir -p temp_dist
           tar -xzf dist.tar.gz -C temp_dist
           
+          # Ensure destination exists
+          mkdir -p openlist-lib/public/dist
+          
           if [ -d "temp_dist/dist" ]; then
             echo "Found nested dist folder, moving contents..."
-            cp -r temp_dist/dist/* ../openlist-lib/public/dist/
+            cp -r temp_dist/dist/* openlist-lib/public/dist/
           else
             echo "Moving contents from root..."
-            cp -r temp_dist/* ../openlist-lib/public/dist/
+            cp -r temp_dist/* openlist-lib/public/dist/
           fi
           
           rm -rf temp_dist dist.tar.gz
           echo "Alist Web installed to public/dist"
-          ls -la ../openlist-lib/public/dist
+          ls -la openlist-lib/public/dist
 
           # 2. Build Encrypt WebUI (Our Frontend)
           echo "Building Encrypt WebUI..."
