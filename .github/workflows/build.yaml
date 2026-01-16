@@ -41,16 +41,29 @@ jobs:
         with:
           node-version: '16'
 
-      - name: Build WebUI
+      - name: Build and Setup WebUI
         run: |
+          # 1. Download Alist Web (Original Frontend)
+          echo "Downloading Alist Web..."
+          curl -L https://github.com/alist-org/alist-web/releases/latest/download/dist.tar.gz -o dist.tar.gz
+          mkdir -p ../openlist-lib/public/dist
+          tar -xzf dist.tar.gz -C ../openlist-lib/public/dist
+          rm dist.tar.gz
+          echo "Alist Web installed to public/dist"
+          ls -la ../openlist-lib/public/dist
+
+          # 2. Build Encrypt WebUI (Our Frontend)
+          echo "Building Encrypt WebUI..."
           npm install -g pnpm@7.9.0
           cd enc-webui
           pnpm install
           npm run build
-          mkdir -p ../openlist-lib/public/dist
-          cp -r dist/* ../openlist-lib/public/dist/
-          echo "WebUI built and copied to public/dist"
-          ls -la ../openlist-lib/public/dist/
+          
+          # 3. Move Encrypt WebUI to subdirectory to avoid conflict
+          mkdir -p ../openlist-lib/public/dist/enc
+          cp -r dist/* ../openlist-lib/public/dist/enc/
+          echo "Encrypt WebUI built and copied to public/dist/enc"
+          ls -la ../openlist-lib/public/dist/enc/
 
       - name: Setup Go
         uses: actions/setup-go@v5
