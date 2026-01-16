@@ -20,11 +20,26 @@ type ConfigManager struct {
 // DefaultConfig 默认配置
 func DefaultConfig() *ProxyConfig {
 	return &ProxyConfig{
-		AlistHost:     "127.0.0.1",
-		AlistPort:     5244,
-		AlistHttps:    false,
-		ProxyPort:     5344,
-		EncryptPaths:  []*EncryptPath{},
+		AlistHost:  "127.0.0.1",
+		AlistPort:  5244,
+		AlistHttps: false,
+		ProxyPort:  5344,
+		EncryptPaths: []*EncryptPath{
+			{
+				Path:     "encrypt_folder/*",
+				Password: "123456",
+				EncType:  EncTypeAESCTR,
+				EncName:  false,
+				Enable:   true,
+			},
+			{
+				Path:     "movie_encrypt/*",
+				Password: "123456",
+				EncType:  EncTypeAESCTR,
+				EncName:  false,
+				Enable:   true,
+			},
+		},
 		AdminPassword: "123456",
 	}
 }

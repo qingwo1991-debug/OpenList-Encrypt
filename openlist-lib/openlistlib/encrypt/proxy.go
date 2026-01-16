@@ -194,13 +194,14 @@ func (p *ProxyServer) IsRunning() bool {
 
 // UpdateConfig 更新配置（热更新）
 func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
+	// Compile regex BEFORE locking to avoid blocking reads too long?
+	// Or just do it all under lock but ensure assignment is last.
 
-	p.config = config
+	log.Infof("Updating Proxy Config with %d paths", len(config.EncryptPaths))
 
-	// Re-compile regex
-	for _, ep := range p.config.EncryptPaths {
+	// Re-compile regex first
+	for _, ep := range config.EncryptPaths {
+		log.Infof("Compiling regex for path: %s", ep.Path)
 		if ep.Path != "" {
 			pattern := ep.Path
 			if strings.HasSuffix(pattern, "/*") {
@@ -221,6 +222,11 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 			ep.regex = reg
 		}
 	}
+
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	p.config = config
+	log.Infof("Proxy Config updated successfully")
 }
 
 // getAlistURL 获取 Alist 服务 URL
@@ -234,6 +240,9 @@ func (p *ProxyServer) getAlistURL() string {
 
 // findEncryptPath 查找匹配的加密路径配置
 func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+
 	log.Infof("Checking encryption path for: %s", filePath)
 
 	// 尝试 URL 解码，以防路径被编码
@@ -248,15 +257,18 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 		}
 		if ep.regex != nil {
 			if ep.regex.MatchString(filePath) {
-				log.Infof("Matched rule (raw): %s", ep.Path)
+				log.Infof("Matched rule (raw): %s for %s", ep.Path, filePath)
 				return ep
 			}
 			if filePath != decodedPath && ep.regex.MatchString(decodedPath) {
-				log.Infof("Matched rule (decoded): %s", ep.Path)
+				log.Infof("Matched rule (decoded): %s for %s", ep.Path, decodedPath)
 				return ep
 			}
+			// Debug failure
+			// log.Debugf("Rule %s did not match %s", ep.Path, decodedPath)
 		}
 	}
+	log.Infof("No encryption path matched for: %s (decoded: %s)", filePath, decodedPath)
 	return nil
 }
 
@@ -1043,7 +1055,7 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// 复制请求头
 	for key, values := range r.Header {
-		if key != "Host" {
+		if key != "Host" && key != "Accept-Encoding" {
 			for _, value := range values {
 				req.Header.Add(key, value)
 			}

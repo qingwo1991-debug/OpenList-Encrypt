@@ -104,7 +104,6 @@ class MyHomePage extends StatelessWidget {
             children: [
               WebScreen(key: webGlobalKey),
               const OpenListScreen(),
-              const EncryptConfigPage(), // 加密配置页面
               const DownloadManagerPage(),
               const SettingsScreen()
             ],
@@ -124,12 +123,6 @@ class MyHomePage extends StatelessWidget {
                       height: 32,
                     ),
                     label: S.current.appName,
-                  ),
-                  // 加密配置入口
-                  NavigationDestination(
-                    icon: const Icon(Icons.lock),
-                    selectedIcon: const Icon(Icons.lock_open),
-                    label: '加密',
                   ),
                   NavigationDestination(
                     icon: const Icon(Icons.arrow_downward),
@@ -175,6 +168,9 @@ class _MainController extends GetxController {
     if (webPage) {
       setPageIndex(MyHomePage.webPageIndex);
     }
+
+    // 自动启动服务
+    await ServiceManager.instance.startService();
 
     WidgetsBinding.instance.addPostFrameCallback((timeStamp) async {
       if (await NativeBridge.appConfig.isAutoCheckUpdateEnabled()) {
