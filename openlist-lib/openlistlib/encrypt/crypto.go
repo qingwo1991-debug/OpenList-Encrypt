@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -114,7 +115,7 @@ func (e *AESCTREncryptor) incrementIV(increment int64) {
 	// Since AES-CTR is just counter mode, we add increment to the counter.
 	// IV is 16 bytes.
 	// Treat as BigEndian uint128.
-	
+
 	// We can use math/big or just loop.
 	carry := increment
 	for i := 15; i >= 0; i-- {
@@ -129,7 +130,7 @@ func (e *AESCTREncryptor) incrementIV(increment int64) {
 	// Actually (increment % MAX_UINT32) is the lower 32 bits.
 	// If increment < MAX_UINT32, incrementBig is 0. incrementLittle = increment.
 	// It seems Node.js implementation tries to handle > 32 bit increments.
-	
+
 	// Given standard CTR mode, we just add the offset (in blocks) to the IV.
 	// My loop implementation above does standard addition.
 	// Let's stick with standard addition which AES-CTR expects.
@@ -157,7 +158,7 @@ func (e *AESCTREncryptor) SetPosition(position int64) error {
 	// Node.js doesn't seem to track position in property, but "this.encrypt" updates "this.cipher".
 	// In Go, Encrypt calls XORKeyStream.
 	// "e.Encrypt(skip)" below will update stream state.
-	
+
 	e.position = position
 	return nil
 }
@@ -234,11 +235,11 @@ func GetPasswdOutward(password string, encType EncryptionType) string {
 	}
 
 	var passwdOutward string
-	
+
 	// Logic from Node.js (mixEnc.js, aesCTR.js, rc4Md5.js)
 	// If password length != 32, use PBKDF2.
 	// Salt depends on encryption type.
-	
+
 	salt := ""
 	switch encType {
 	case EncTypeMix:
@@ -335,39 +336,45 @@ func DecodeName(password string, encType EncryptionType, encodedName string) str
 	if len(encodedName) < 2 {
 		return ""
 	}
-	
+
 	crc6Check := encodedName[len(encodedName)-1]
 	passwdOutward := GetPasswdOutward(password, encType)
-	
+
 	// 验证 CRC6
 	subEncName := encodedName[:len(encodedName)-1]
 	crc6Bit := crc6.Checksum([]byte(subEncName + passwdOutward))
 	if GetSourceChar(int(crc6Bit)) != crc6Check {
 		return ""
 	}
-	
+
 	mix64 := NewMixBase64(passwdOutward, "")
 	decoded, err := mix64.Decode(subEncName)
 	if err != nil {
 		fmt.Printf("Decode error: %v\n", err)
 		return ""
 	}
-	
+
 	return string(decoded)
 }
 
 // ConvertRealName 将显示名转换为真实加密名
 func ConvertRealName(password string, encType EncryptionType, pathText string) string {
 	fileName := path.Base(pathText)
-	
+
 	// 检查是否有 orig_ 前缀（表示原始未加密文件）
 	if strings.HasPrefix(fileName, "orig_") {
 		return strings.TrimPrefix(fileName, "orig_")
 	}
-	
+
 	// 编码文件名
 	ext := path.Ext(fileName)
 	nameWithoutExt := strings.TrimSuffix(fileName, ext)
+
+	// URL 解码
+	if decoded, err := url.PathUnescape(nameWithoutExt); err == nil {
+		nameWithoutExt = decoded
+	}
+
 	encName := EncodeName(password, encType, nameWithoutExt)
 	return encName + ext
 }
@@ -375,16 +382,21 @@ func ConvertRealName(password string, encType EncryptionType, pathText string) s
 // ConvertShowName 将加密名转换为显示名
 func ConvertShowName(password string, encType EncryptionType, pathText string) string {
 	fileName := path.Base(pathText)
+
+	// URL 解码
+	if decoded, err := url.PathUnescape(fileName); err == nil {
+		fileName = decoded
+	}
 	ext := path.Ext(fileName)
 	encName := strings.TrimSuffix(fileName, ext)
-	
+
 	// 尝试解码
 	showName := DecodeName(password, encType, encName)
 	if showName == "" {
 		// 解码失败，添加 orig_ 前缀表示原始文件
 		return "orig_" + fileName
 	}
-	
+
 	return showName + ext
 }
 

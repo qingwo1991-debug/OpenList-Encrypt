@@ -206,7 +206,7 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 	log.Infof("Checking encryption path for: %s", filePath)
 
 	// 尝试 URL 解码，以防路径被编码
-	decodedPath, err := url.QueryUnescape(filePath)
+	decodedPath, err := url.PathUnescape(filePath)
 	if err != nil {
 		decodedPath = filePath
 	}
@@ -686,7 +686,7 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// URL 解码
-	decodedPath, err := url.QueryUnescape(filePath)
+	decodedPath, err := url.PathUnescape(filePath)
 	if err == nil {
 		filePath = decodedPath
 	}
