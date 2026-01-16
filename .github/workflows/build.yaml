@@ -149,42 +149,7 @@ jobs:
             --java_out android/app/src/main/java/com/openlist/pigeon/GeneratedApi.java \
             --java_package "com.openlist.pigeon" || echo "Pigeon generation skipped or failed"
 
-      - name: Build APK (Debug)
-        run: |
-          echo "Starting Flutter debug build..."
-          # Ignore exit code because flutter might report error on split apks not found
-          flutter build apk --debug 2>&1 | tee flutter_build_debug.log || true
-          
-          echo "Checking debug build outputs:"
-          find build/app/outputs/flutter-apk -name "*.apk"
-
-      - name: Upload Debug APK (All)
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug-all
-          path: build/app/outputs/flutter-apk/*.apk
-          if-no-files-found: warn
-
-      - name: Upload Debug APK (ARM64)
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug-arm64
-          path: build/app/outputs/flutter-apk/*arm64-v8a-debug.apk
-          if-no-files-found: warn
-
-      - name: Upload Debug APK (ARMv7)
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug-armeabi-v7a
-          path: build/app/outputs/flutter-apk/*armeabi-v7a-debug.apk
-          if-no-files-found: warn
-
-      - name: Upload Debug APK (x86_64)
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug-x86_64
-          path: build/app/outputs/flutter-apk/*x86_64-debug.apk
-          if-no-files-found: warn
+      # Debug build skipped to save time
 
       - name: Build APK (Release)
         run: |
