@@ -349,7 +349,39 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// TODO: 验证管理密码并更新配置
+
+		p.mutex.Lock()
+		p.config.AlistHost = newConfig.AlistHost
+		p.config.AlistPort = newConfig.AlistPort
+		p.config.AlistHttps = newConfig.AlistHttps
+		p.config.ProxyPort = newConfig.ProxyPort
+		p.config.EncryptPaths = newConfig.EncryptPaths
+		p.config.AdminPassword = newConfig.AdminPassword
+
+		// Re-compile regex
+		for _, ep := range p.config.EncryptPaths {
+			if ep.Path != "" {
+				pattern := ep.Path
+				if strings.HasSuffix(pattern, "/*") {
+					base := strings.TrimSuffix(pattern, "/*")
+					pattern = "^" + regexp.QuoteMeta(base) + "(/.*)?$"
+				} else {
+					pattern = strings.ReplaceAll(pattern, "*", ".*")
+					pattern = strings.ReplaceAll(pattern, "?", ".")
+					if !strings.HasPrefix(pattern, "^") {
+						pattern = "^" + pattern
+					}
+				}
+				reg, err := regexp.Compile(pattern)
+				if err != nil {
+					log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
+					continue
+				}
+				ep.regex = reg
+			}
+		}
+		p.mutex.Unlock()
+
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code":    200,
 			"message": "Config updated",

@@ -171,12 +171,27 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                 ),
               ),
               const SizedBox(height: 16),
-              TextField(
-                controller: passwordController,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: '密码',
-                ),
+              StatefulBuilder(
+                builder: (context, setState) {
+                  bool obscureText = true;
+                  return TextField(
+                    controller: passwordController,
+                    obscureText: obscureText,
+                    decoration: InputDecoration(
+                      labelText: '密码',
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          obscureText ? Icons.visibility : Icons.visibility_off,
+                        ),
+                        onPressed: () {
+                          setState(() {
+                            obscureText = !obscureText;
+                          });
+                        },
+                      ),
+                    ),
+                  );
+                },
               ),
               const SizedBox(height: 16),
               StatefulBuilder(
@@ -274,12 +289,27 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                 ),
               ),
               const SizedBox(height: 16),
-              TextField(
-                controller: passwordController,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: '密码（留空保持不变）',
-                ),
+              StatefulBuilder(
+                builder: (context, setState) {
+                  bool obscureText = true;
+                  return TextField(
+                    controller: passwordController,
+                    obscureText: obscureText,
+                    decoration: InputDecoration(
+                      labelText: '密码（留空保持不变）',
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          obscureText ? Icons.visibility : Icons.visibility_off,
+                        ),
+                        onPressed: () {
+                          setState(() {
+                            obscureText = !obscureText;
+                          });
+                        },
+                      ),
+                    ),
+                  );
+                },
               ),
               const SizedBox(height: 16),
               StatefulBuilder(
