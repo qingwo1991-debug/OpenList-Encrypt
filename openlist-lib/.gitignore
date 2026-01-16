@@ -29,6 +29,7 @@ output/
 /lang/
 /daemon/
 /public/dist/*
-/!public/dist/README.md
+!/public/dist/enc/
+!/public/dist/README.md
 
 .VSCodeCounter
