@@ -44,12 +44,12 @@ jobs:
       - name: Build and Setup WebUI
         run: |
           # 1. Download Alist Web (Original Frontend)
-          echo "Downloading OpenList Frontend (Matched Version)..."
+          echo "Downloading Alist Web (Official)..."
           # Clean up placeholder files but keep the directory
           rm -rf openlist-lib/public/dist/*
           
-          # Use OpenListTeam frontend instead of official Alist web to ensure compatibility
-          curl -L https://github.com/OpenListTeam/OpenList-Frontend/releases/latest/download/dist.tar.gz -o dist.tar.gz
+          # Use Alist official frontend (Standard Dist) which is compatible and reliably accessible
+          curl -L https://github.com/alist-org/alist-web/releases/latest/download/dist.tar.gz -o dist.tar.gz
           
           # Extract to temp dir to handle potential nested 'dist' folder
           mkdir -p temp_dist
