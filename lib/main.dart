@@ -169,7 +169,16 @@ class _MainController extends GetxController {
       setPageIndex(MyHomePage.webPageIndex);
     }
 
-    // 自动启动服务
+    // 初始化并启动加密代理
+    try {
+      final dataDir = await NativeBridge.appConfig.getDataDir();
+      await NativeBridge.encryptProxy.initEncryptProxy('$dataDir/encrypt_config.json');
+      await NativeBridge.encryptProxy.startEncryptProxy();
+    } catch (e) {
+      debugPrint('Failed to start encrypt proxy: $e');
+    }
+
+    // 自动启动后台服务
     await ServiceManager.instance.startService();
 
     WidgetsBinding.instance.addPostFrameCallback((timeStamp) async {
