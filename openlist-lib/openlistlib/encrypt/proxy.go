@@ -269,8 +269,10 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 				log.Infof("Matched rule (decoded): %s for %s", ep.Path, decodedPath)
 				return ep
 			}
-			// Debug failure
-			// log.Debugf("Rule %s did not match %s", ep.Path, decodedPath)
+			// 更详细的 Debug 日志
+			log.Debugf("Rule %s (regex: %s) did not match %s or %s", ep.Path, ep.regex.String(), filePath, decodedPath)
+		} else {
+			log.Warnf("Rule %s has nil regex", ep.Path)
 		}
 	}
 	log.Infof("No encryption path matched for: %s (decoded: %s)", filePath, decodedPath)

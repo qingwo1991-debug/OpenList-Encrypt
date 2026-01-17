@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
@@ -155,24 +156,38 @@ func (m *ConfigManager) SetProxyPort(port int) error {
 }
 
 // AddEncryptPath 添加加密路径
-func (m *ConfigManager) AddEncryptPath(path, password string, encType EncryptionType, encName bool) error {
+func (m *ConfigManager) AddEncryptPath(pathVal, password string, encType EncryptionType, encName bool) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	// 检查是否已存在
-	for _, p := range m.config.EncryptPaths {
-		if p.Path == path {
-			return errors.New("path already exists")
+	// 支持逗号分隔的多个路径
+	paths := strings.Split(pathVal, ",")
+	for _, pStr := range paths {
+		rawPath := strings.TrimSpace(pStr)
+		if rawPath == "" {
+			continue
 		}
-	}
 
-	m.config.EncryptPaths = append(m.config.EncryptPaths, &EncryptPath{
-		Path:     path,
-		Password: password,
-		EncType:  encType,
-		EncName:  encName,
-		Enable:   true,
-	})
+		// 检查是否已存在
+		exists := false
+		for _, p := range m.config.EncryptPaths {
+			if p.Path == rawPath {
+				exists = true
+				break
+			}
+		}
+		if exists {
+			continue
+		}
+
+		m.config.EncryptPaths = append(m.config.EncryptPaths, &EncryptPath{
+			Path:     rawPath,
+			Password: password,
+			EncType:  encType,
+			EncName:  encName,
+			Enable:   true,
+		})
+	}
 
 	return m.saveConfigLocked()
 }
