@@ -145,6 +145,7 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/d/", p.handleDownload)
 	mux.HandleFunc("/p/", p.handleDownload)
 	mux.HandleFunc("/dav/", p.handleWebDAV)
+	mux.HandleFunc("/dav", p.handleWebDAV)
 	mux.HandleFunc("/", p.handleRoot) // 根路径处理
 
 	p.server = &http.Server{
@@ -1068,7 +1069,18 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	// 检查是否是上传请求
 	if r.Method == "PUT" {
 		filePath := r.URL.Path
-		encPath := p.findEncryptPath(filePath)
+		// 尝试去除 /dav 前缀匹配
+		matchPath := filePath
+		if strings.HasPrefix(matchPath, "/dav/") {
+			matchPath = strings.TrimPrefix(matchPath, "/dav")
+		} else if matchPath == "/dav" {
+			matchPath = "/"
+		}
+
+		encPath := p.findEncryptPath(matchPath)
+		if encPath == nil && matchPath != filePath {
+			encPath = p.findEncryptPath(filePath)
+		}
 
 		if encPath != nil {
 			contentLength := r.ContentLength
@@ -1124,7 +1136,18 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	// 检查是否是下载请求需要解密
 	if r.Method == "GET" {
 		filePath := r.URL.Path
-		encPath := p.findEncryptPath(filePath)
+		// 尝试去除 /dav 前缀匹配
+		matchPath := filePath
+		if strings.HasPrefix(matchPath, "/dav/") {
+			matchPath = strings.TrimPrefix(matchPath, "/dav")
+		} else if matchPath == "/dav" {
+			matchPath = "/"
+		}
+
+		encPath := p.findEncryptPath(matchPath)
+		if encPath == nil && matchPath != filePath {
+			encPath = p.findEncryptPath(filePath)
+		}
 
 		if encPath != nil {
 			// 尝试获取文件大小
