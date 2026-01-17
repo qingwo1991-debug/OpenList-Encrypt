@@ -1071,7 +1071,13 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 	// 2. 转换请求路径中的文件名 (Client明文 -> Server密文)
 	targetURLPath := r.URL.Path
-	if encPath != nil && encPath.EncName {
+	// 仅对特定方法进行文件名转换。PROPFIND (列目录) 不需要转换（因为目录名是明文），
+	// 且必须保持明文以供 Alist 识别。
+	// node.js 版只转换 GET, PUT, DELETE。我们也加上 COPY, MOVE, HEAD。
+	methodNeedConvert := r.Method == "GET" || r.Method == "PUT" || r.Method == "DELETE" ||
+		r.Method == "COPY" || r.Method == "MOVE" || r.Method == "HEAD" || r.Method == "POST"
+
+	if methodNeedConvert && encPath != nil && encPath.EncName {
 		fileName := path.Base(filePath)
 		if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
 			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
@@ -1083,7 +1089,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			// 特殊处理：如果是根路径的子文件，path.Dir可能返回 /dav，Join后是 /dav/xxx
 			// 如果是 /dav/foo.txt -> Dir: /dav -> Join: /dav/xxx.txt
 			targetURLPath = newPath
-			log.Debugf("Convert real name URL: %s -> %s", r.URL.Path, targetURLPath)
+			log.Debugf("Convert real name URL (%s): %s -> %s", r.Method, r.URL.Path, targetURLPath)
 		}
 	}
 
