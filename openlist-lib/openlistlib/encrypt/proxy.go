@@ -1178,10 +1178,71 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 备份 Body 以便可能的重试 (针对 PROPFIND)
+	var reqBodyBytes []byte
+	if r.Method == "PROPFIND" && r.Body != nil {
+		reqBodyBytes, _ = io.ReadAll(r.Body)
+		// 恢复原始 req 的 Body (如果之前读取过)
+		// 注意：这里的 r.Body 已经被 upstream passed to NewRequest.
+		// 我们需要确保 req.Body 是可读的。
+		// 在 NewRequest 时如果传入了 body io.Reader，它会被赋给 req.Body.
+		// 如果 body 之前是 r.Body (http.Request)，它可能只能读一次。
+		// 我们前面: if r.Body != nil { body = r.Body }
+		// 所以 req.Body 指向了 socket。如果读得动的话。
+		// 为了安全，我们最好在这里用 bytes 重建 req.Body
+		if len(reqBodyBytes) > 0 {
+			req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
+		}
+	}
+
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
+	}
+
+	// PROPFIND 404 重试机制 (因为我们不知道请求的是目录还是加密文件)
+	// 如果默认透传 (当作目录) 失败，尝试加密文件名再试 (当作文件)
+	if r.Method == "PROPFIND" && resp.StatusCode == 404 && encPath != nil && encPath.EncName {
+		// 关闭旧响应体
+		resp.Body.Close()
+
+		// 重新计算加密路径
+		fileName := path.Base(filePath)
+		if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
+			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			newPath := path.Join(path.Dir(filePath), realName)
+			if !strings.HasPrefix(newPath, "/") {
+				newPath = "/" + newPath
+			}
+			log.Debugf("PROPFIND 404 retry with encrypt path: %s -> %s", filePath, newPath)
+
+			retryTargetURL := p.getAlistURL() + newPath
+			if r.URL.RawQuery != "" {
+				retryTargetURL += "?" + r.URL.RawQuery
+			}
+
+			var retryBody io.Reader
+			if len(reqBodyBytes) > 0 {
+				retryBody = bytes.NewReader(reqBodyBytes)
+			}
+
+			retryReq, _ := http.NewRequest(r.Method, retryTargetURL, retryBody)
+			// Copy headers
+			for key, values := range r.Header {
+				if key != "Host" {
+					for _, value := range values {
+						retryReq.Header.Add(key, value)
+					}
+				}
+			}
+
+			resp, err = p.httpClient.Do(retryReq)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+		}
 	}
 	defer resp.Body.Close()
 
