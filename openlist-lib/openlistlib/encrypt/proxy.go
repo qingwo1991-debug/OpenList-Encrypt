@@ -1293,10 +1293,33 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 	// 6. 处理 GET 下载解密
 	if r.Method == "GET" && encPath != nil {
+		// 检查 Content-Type，避免解密错误页面或目录列表
+		contentType := resp.Header.Get("Content-Type")
+		if strings.Contains(contentType, "text/html") ||
+			strings.Contains(contentType, "application/json") ||
+			strings.Contains(contentType, "application/xml") {
+			w.WriteHeader(resp.StatusCode)
+			io.Copy(w, resp.Body)
+			return
+		}
+
 		// 尝试获取文件大小
 		var fileSize int64 = 0
-		if cl := resp.Header.Get("Content-Length"); cl != "" {
-			fileSize, _ = strconv.ParseInt(cl, 10, 64)
+		contentRange := resp.Header.Get("Content-Range")
+		if contentRange != "" {
+			// 格式: bytes start-end/total
+			parts := strings.Split(contentRange, "/")
+			if len(parts) == 2 {
+				if total, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+					fileSize = total
+				}
+			}
+		}
+
+		if fileSize == 0 {
+			if cl := resp.Header.Get("Content-Length"); cl != "" {
+				fileSize, _ = strconv.ParseInt(cl, 10, 64)
+			}
 		}
 
 		// 只有当服务端返回了内容，且知道大小，才解密
