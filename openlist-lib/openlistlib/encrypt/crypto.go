@@ -366,10 +366,24 @@ func ConvertRealName(password string, encType EncryptionType, pathText string) s
 	}
 
 	ext := path.Ext(fileName)
-	// 为了兼容 Node.js 逻辑，对完整文件名加密，而不是去后缀
+	// 为了兼容 Node.js 逻辑，对完整文件名加密
 	// 但仍需注意 URL 解码。这里先解码 fileName
 	if decoded, err := url.PathUnescape(fileName); err == nil {
 		fileName = decoded
+	}
+
+	// 防二次加密检查：如果已经是有效密文（例如列目录时未解密成功导致客户端发来密文），则不再加密
+	// 尝试去掉后缀后解码（因为加密后的文件名是 [Enc].ext）
+	// 注意：这里的 ext 来自 fileName。如果是 [Enc].ext，ext 就是 .ext。
+	// DecodeName(strings.TrimSuffix(fileName, ext))
+	// 但是要小心误判。我们可以二次验证：Encode(Decode(X)) == X
+	potentialCipher := strings.TrimSuffix(fileName, ext)
+	if decodedName := DecodeName(password, encType, potentialCipher); decodedName != "" {
+		// 再次加密验证，确保是真正的密文
+		// 注意：Node.js 逻辑 Encode 返回的是不带 ext 的部分
+		if EncodeName(password, encType, decodedName) == potentialCipher {
+			return fileName // 确实是密文，直接返回原名
+		}
 	}
 
 	encName := EncodeName(password, encType, fileName)
@@ -390,12 +404,13 @@ func ConvertShowName(password string, encType EncryptionType, pathText string) s
 	// 尝试解码
 	showName := DecodeName(password, encType, encName)
 	if showName == "" {
-		// 解码失败，添加 orig_ 前缀表示原始文件
-		return "orig_" + fileName
+		// 解码失败（可能是明文目录，或者损坏的密文）
+		// 直接返回原名，不加 orig_ 前缀，避免目录显示异常
+		// 只有当明确是有 orig_ 前缀的文件被请求时，ConvertRealName 才会处理它
+		return fileName
 	}
 
 	// Node.js 逻辑中，加密的是完整文件名（含后缀），且解密后不再附加后缀
-	// 避免双重后缀问题 (e.g. .mp4.mp4)
 	return showName
 }
 
