@@ -151,7 +151,7 @@ jobs:
 
       # Setup Release Signing Config if secrets available
       - name: Configure Keystore
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        if: secrets.KEYSTORE_BASE64 != ''
         run: |
           echo "Decoding keystore..."
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.jks
