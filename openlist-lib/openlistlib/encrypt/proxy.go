@@ -134,7 +134,9 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/static/", p.handleStatic)
 	mux.HandleFunc("/favicon.ico", p.handleStatic)
 	mux.HandleFunc("/logo.png", p.handleStatic)
-	mux.HandleFunc("/api/encrypt/config", p.handleConfig)
+	mux.HandleFunc("/enc-api/getAlistConfig", p.handleConfig)
+	mux.HandleFunc("/enc-api/saveAlistConfig", p.handleConfig)
+	mux.HandleFunc("/enc-api/getUserInfo", p.handleUserInfo)
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
 	mux.HandleFunc("/redirect/", p.handleRedirect)
 	mux.HandleFunc("/api/fs/list", p.handleFsList)
@@ -371,10 +373,22 @@ func (p *ProxyServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f.(io.ReadSeeker))
 }
 
+// handleUserInfo 处理用户信息请求
+func (p *ProxyServer) handleUserInfo(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"code": 200,
+		"data": map[string]interface{}{
+			"username": "admin",
+			"roleId":   "[13]",
+		},
+	})
+}
+
 // handleConfig 处理配置 API
 func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
+	// 根据路径判断是获取还是保存，或者通过 Method（但 getAlistConfig 用的是 POST）
+	if strings.Contains(r.URL.Path, "getAlistConfig") {
 		// 转换为前端期望的格式 (alist-encrypt 兼容)
 		passwdList := make([]map[string]interface{}, 0)
 		for _, ep := range p.config.EncryptPaths {
@@ -401,12 +415,15 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			"data": map[string]interface{}{
 				"alistHost":  p.config.AlistHost,
 				"alistPort":  p.config.AlistPort,
-				"https":      p.config.AlistHttps, // 前端字段名可能是 https
+				"https":      p.config.AlistHttps,
 				"proxyPort":  p.config.ProxyPort,
 				"passwdList": passwdList,
 			},
 		})
-	case http.MethodPost:
+		return
+	}
+
+	if strings.Contains(r.URL.Path, "saveAlistConfig") {
 		// 解析前端发来的配置
 		var reqData struct {
 			AlistHost  string `json:"alistHost"`
@@ -474,25 +491,6 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 			// 为每个路径创建 Entry
 			for _, pathStr := range paths {
-				// 获取原密码（如果前端没传密码，说明未修改。但我们没有持久化ID，这很麻烦）
-				// 暂时假设前端每次都传密码，或者我们如果为空就无法更新。
-				// alist-encrypt 前端逻辑：密码框是空的，placeholder 是 "12341234"。
-				// 如果用户没填，item.password 是空字符串。如果用户填了，就是新密码。
-				// 但我们没有旧密码的引用。这里是一个问题。
-				// 如果是新增，必须填。如果是修改，如果不填，密码丢失？
-				// Go 的实现需要密码。
-				// 为了简化，我们暂时要求必须填密码，或者看看前端是否传回旧密码（不太可能）。
-				// Node.js 版本是基于 ID 查找并更新的吗？config.js 里有 id。Go 没有。
-				// 这导致我们只能全量覆盖。如果前端传空密码，我们就保存空密码。
-				// 用户体验上，每次保存都需要重填密码，或者前端可能会回显密码（通常不会）。
-				// Node.js 的 handleConfig GET 返回 password 吗？
-				// Node.js 代码里：返回的 configData 包含 passwdList，其中 password 是明文！(除非没展示)
-				// Node.jsconfig.js 是直接读文件返回。所以前端能拿到密码！
-				// 这很不安全，但为了兼容性...
-				// Go 版本为了安全隐藏了密码。
-				// 如果前端拿到空密码，保存时回传空密码，导致密码被清空。
-				// 妥协方案：GET 时返回密码（因为这是本地服务，风险可控）。
-
 				pwd := item.Password
 
 				epa := &EncryptPath{
@@ -535,9 +533,10 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			"code":    200,
 			"message": "Config updated",
 		})
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
+
+	http.Error(w, "Method not allowed or Unknown action", http.StatusNotFound)
 }
 
 // handleRedirect 处理重定向下载
