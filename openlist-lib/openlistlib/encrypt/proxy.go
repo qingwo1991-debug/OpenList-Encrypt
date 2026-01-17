@@ -1055,8 +1055,39 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 // handleWebDAV 处理 WebDAV 请求
 func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
-	// 创建到 Alist 的请求
-	targetURL := p.getAlistURL() + r.URL.Path
+	// 1. 查找加密配置
+	filePath := r.URL.Path
+	matchPath := filePath
+	if strings.HasPrefix(matchPath, "/dav/") {
+		matchPath = strings.TrimPrefix(matchPath, "/dav")
+	} else if matchPath == "/dav" {
+		matchPath = "/"
+	}
+
+	encPath := p.findEncryptPath(matchPath)
+	if encPath == nil && matchPath != filePath {
+		encPath = p.findEncryptPath(filePath)
+	}
+
+	// 2. 转换请求路径中的文件名 (Client明文 -> Server密文)
+	targetURLPath := r.URL.Path
+	if encPath != nil && encPath.EncName {
+		fileName := path.Base(filePath)
+		if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
+			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			newPath := path.Join(path.Dir(filePath), realName)
+			// 确保路径以 / 开头
+			if !strings.HasPrefix(newPath, "/") {
+				newPath = "/" + newPath
+			}
+			// 特殊处理：如果是根路径的子文件，path.Dir可能返回 /dav，Join后是 /dav/xxx
+			// 如果是 /dav/foo.txt -> Dir: /dav -> Join: /dav/xxx.txt
+			targetURLPath = newPath
+			log.Debugf("Convert real name URL: %s -> %s", r.URL.Path, targetURLPath)
+		}
+	}
+
+	targetURL := p.getAlistURL() + targetURLPath
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}
@@ -1066,32 +1097,25 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		body = r.Body
 	}
 
-	// 检查是否是上传请求
-	if r.Method == "PUT" {
-		filePath := r.URL.Path
-		// 尝试去除 /dav 前缀匹配
-		matchPath := filePath
-		if strings.HasPrefix(matchPath, "/dav/") {
-			matchPath = strings.TrimPrefix(matchPath, "/dav")
-		} else if matchPath == "/dav" {
-			matchPath = "/"
-		}
-
-		encPath := p.findEncryptPath(matchPath)
-		if encPath == nil && matchPath != filePath {
-			encPath = p.findEncryptPath(filePath)
-		}
-
-		if encPath != nil {
-			contentLength := r.ContentLength
-			if contentLength > 0 {
-				encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, contentLength)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-				body = NewEncryptReader(r.Body, encryptor)
+	// 3. 处理 PUT 加密上传
+	if r.Method == "PUT" && encPath != nil {
+		contentLength := r.ContentLength
+		// 尝试从 header 获取长度 (兼容 chunked transfer)
+		if contentLength <= 0 {
+			if l := r.Header.Get("X-Expected-Entity-Length"); l != "" {
+				contentLength, _ = strconv.ParseInt(l, 10, 64)
 			}
+		}
+
+		if contentLength > 0 {
+			encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, contentLength)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			body = NewEncryptReader(r.Body, encryptor)
+		} else {
+			log.Warnf("PUT request encryption skipped: missing content length for %s", r.URL.Path)
 		}
 	}
 
@@ -1110,11 +1134,40 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 修正 Destination 头
-	if dest := r.Header.Get("Destination"); dest != "" {
-		parsedDest, err := url.Parse(dest)
+	// 4. 处理 Destination 头 (COPY/MOVE)
+	if (r.Method == "COPY" || r.Method == "MOVE") && r.Header.Get("Destination") != "" {
+		dest := r.Header.Get("Destination")
+		u, err := url.Parse(dest)
 		if err == nil {
-			newDest := p.getAlistURL() + parsedDest.Path
+			destPath := u.Path
+			// 同样尝试去前缀匹配配置
+			destMatchPath := destPath
+			if strings.HasPrefix(destMatchPath, "/dav/") {
+				destMatchPath = strings.TrimPrefix(destMatchPath, "/dav")
+			} else if destMatchPath == "/dav" {
+				destMatchPath = "/"
+			}
+			destEncPath := p.findEncryptPath(destMatchPath)
+			if destEncPath == nil && destMatchPath != destPath {
+				destEncPath = p.findEncryptPath(destPath)
+			}
+
+			// 如果目标路径需要加密文件名
+			if destEncPath != nil && destEncPath.EncName {
+				destName := path.Base(destPath)
+				if destName != "/" && destName != "." && !strings.HasPrefix(destName, "orig_") {
+					realDestName := ConvertRealName(destEncPath.Password, destEncPath.EncType, destPath)
+					newDestPath := path.Join(path.Dir(destPath), realDestName)
+					if !strings.HasPrefix(newDestPath, "/") {
+						newDestPath = "/" + newDestPath
+					}
+					destPath = newDestPath
+					log.Debugf("Convert real name Destination: %s -> %s", u.Path, destPath)
+				}
+			}
+
+			// 重组 Destination
+			newDest := p.getAlistURL() + destPath
 			req.Header.Set("Destination", newDest)
 		}
 	}
@@ -1126,6 +1179,111 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// 5. 处理 PROPFIND 响应 (文件名解密)
+	if r.Method == "PROPFIND" && encPath != nil && encPath.EncName {
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		xmlData := string(respBody)
+		// 简单替换：查找所有 <D:href> 和 <D:displayname>（包括特定 namespace 如 d:, D:, 无前缀等）
+		// 为了简化，我们假设 Alist 返回的标准格式。通常是 <D:href>。
+		// 正则匹配 href 标签内容
+		hrefRegex := regexp.MustCompile(`<([a-zA-Z0-9_]+:)?href>([^<]+)</([a-zA-Z0-9_]+:)?href>`)
+
+		xmlData = hrefRegex.ReplaceAllStringFunc(xmlData, func(match string) string {
+			// 提取内容
+			parts := hrefRegex.FindStringSubmatch(match)
+			if len(parts) < 3 {
+				return match
+			}
+			// fullTag := parts[0]
+			prefix1 := parts[1] // D:
+			content := parts[2] // /dav/xxx/file.ext
+			prefix2 := parts[3] // matching close prefix
+
+			// URL Decode content to get file path
+			decodedPath, err := url.PathUnescape(content)
+			if err != nil {
+				decodedPath = content
+			}
+
+			fileName := path.Base(decodedPath)
+			if fileName == "/" || fileName == "." || strings.HasPrefix(fileName, "orig_") {
+				return match
+			}
+
+			// 尝试解密文件名
+			showName := ConvertShowName(encPath.Password, encPath.EncType, fileName)
+
+			if showName != fileName && !strings.HasPrefix(showName, "orig_") {
+				// 获取路径部分，替换文件名
+				dir := path.Dir(decodedPath)
+				// 替换后的路径
+				newPath := path.Join(dir, showName)
+				// 重新编码
+				encodedNewPath := (&url.URL{Path: newPath}).EscapedPath() // 简单转义
+
+				// 替换 href 内容
+				newTag := fmt.Sprintf("<%shref>%s</%shref>", prefix1, encodedNewPath, prefix2)
+
+				// 同时也尝试替换 displayname (如果存在并且就是这个文件名)
+				// 这里只能对 href 里的内容做替换。displayname 如果在外部，需要另外处理。
+				// 但如果不处理 displayname，通常 WebDAV 客户端会优先使用 displayname 显示。
+				// 我们需要全局替换。
+
+				return newTag
+			}
+			return match
+		})
+
+		// 处理 displayname
+		displayNameRegex := regexp.MustCompile(`<([a-zA-Z0-9_]+:)?displayname>([^<]+)</([a-zA-Z0-9_]+:)?displayname>`)
+		xmlData = displayNameRegex.ReplaceAllStringFunc(xmlData, func(match string) string {
+			parts := displayNameRegex.FindStringSubmatch(match)
+			if len(parts) < 3 {
+				return match
+			}
+			prefix1 := parts[1]
+			name := parts[2]
+			prefix2 := parts[3]
+
+			// 如果 name 是 encrypt string
+			showName := ConvertShowName(encPath.Password, encPath.EncType, name)
+			if showName != name && !strings.HasPrefix(showName, "orig_") {
+				// 转义 XML 特殊字符? Alist 应该已经转义了。
+				// 如果 showName 包含 & < >，需要转义
+				showName = strings.ReplaceAll(showName, "&", "&amp;")
+				showName = strings.ReplaceAll(showName, "<", "&lt;")
+				showName = strings.ReplaceAll(showName, ">", "&gt;")
+				return fmt.Sprintf("<%sdisplayname>%s</%sdisplayname>", prefix1, showName, prefix2)
+			}
+			return match
+		})
+
+		// 对非标准 displayname，如果没有 displayname，某些客户端使用 href。
+		// 由于我们替换了 href，所以应该没问题。
+
+		// 更新 Content-Length
+		newBody := []byte(xmlData)
+		w.Header().Set("Content-Length", strconv.Itoa(len(newBody)))
+
+		// 复制响应头
+		for key, values := range resp.Header {
+			if key != "Content-Length" { // 跳过原来的长度
+				for _, value := range values {
+					w.Header().Add(key, value)
+				}
+			}
+		}
+
+		w.WriteHeader(resp.StatusCode)
+		w.Write(newBody)
+		return
+	}
+
 	// 复制响应头
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -1133,56 +1291,44 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 检查是否是下载请求需要解密
-	if r.Method == "GET" {
-		filePath := r.URL.Path
-		// 尝试去除 /dav 前缀匹配
-		matchPath := filePath
-		if strings.HasPrefix(matchPath, "/dav/") {
-			matchPath = strings.TrimPrefix(matchPath, "/dav")
-		} else if matchPath == "/dav" {
-			matchPath = "/"
+	// 6. 处理 GET 下载解密
+	if r.Method == "GET" && encPath != nil {
+		// 尝试获取文件大小
+		var fileSize int64 = 0
+		if cl := resp.Header.Get("Content-Length"); cl != "" {
+			fileSize, _ = strconv.ParseInt(cl, 10, 64)
 		}
 
-		encPath := p.findEncryptPath(matchPath)
-		if encPath == nil && matchPath != filePath {
-			encPath = p.findEncryptPath(filePath)
-		}
-
-		if encPath != nil {
-			// 尝试获取文件大小
-			var fileSize int64 = 0
-			if cl := resp.Header.Get("Content-Length"); cl != "" {
-				fileSize, _ = strconv.ParseInt(cl, 10, 64)
-			}
-
-			if fileSize > 0 {
-				var startPos int64 = 0
-				rangeHeader := r.Header.Get("Range")
-				if rangeHeader != "" {
-					if strings.HasPrefix(rangeHeader, "bytes=") {
-						rangeParts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
-						if len(rangeParts) >= 1 {
-							startPos, _ = strconv.ParseInt(rangeParts[0], 10, 64)
-						}
+		// 只有当服务端返回了内容，且知道大小，才解密
+		if fileSize > 0 {
+			var startPos int64 = 0
+			rangeHeader := r.Header.Get("Range")
+			if rangeHeader != "" {
+				if strings.HasPrefix(rangeHeader, "bytes=") {
+					rangeParts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
+					if len(rangeParts) >= 1 {
+						startPos, _ = strconv.ParseInt(rangeParts[0], 10, 64)
 					}
 				}
+			}
 
-				encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-
-				if startPos > 0 {
-					encryptor.SetPosition(startPos)
-				}
-
-				decryptReader := NewDecryptReader(resp.Body, encryptor)
+			encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
+			if err != nil {
+				// 无法创建解密器(如未知算法)，直接透传
+				log.Warnf("Failed to create encryptor for download: %v", err)
 				w.WriteHeader(resp.StatusCode)
-				io.Copy(w, decryptReader)
+				io.Copy(w, resp.Body)
 				return
 			}
+
+			if startPos > 0 {
+				encryptor.SetPosition(startPos)
+			}
+
+			decryptReader := NewDecryptReader(resp.Body, encryptor)
+			w.WriteHeader(resp.StatusCode)
+			io.Copy(w, decryptReader)
+			return
 		}
 	}
 
