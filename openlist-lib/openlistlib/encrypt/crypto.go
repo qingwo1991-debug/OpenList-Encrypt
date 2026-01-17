@@ -365,16 +365,14 @@ func ConvertRealName(password string, encType EncryptionType, pathText string) s
 		return strings.TrimPrefix(fileName, "orig_")
 	}
 
-	// 编码文件名
 	ext := path.Ext(fileName)
-	nameWithoutExt := strings.TrimSuffix(fileName, ext)
-
-	// URL 解码
-	if decoded, err := url.PathUnescape(nameWithoutExt); err == nil {
-		nameWithoutExt = decoded
+	// 为了兼容 Node.js 逻辑，对完整文件名加密，而不是去后缀
+	// 但仍需注意 URL 解码。这里先解码 fileName
+	if decoded, err := url.PathUnescape(fileName); err == nil {
+		fileName = decoded
 	}
 
-	encName := EncodeName(password, encType, nameWithoutExt)
+	encName := EncodeName(password, encType, fileName)
 	return encName + ext
 }
 
@@ -396,7 +394,9 @@ func ConvertShowName(password string, encType EncryptionType, pathText string) s
 		return "orig_" + fileName
 	}
 
-	return showName + ext
+	// Node.js 逻辑中，加密的是完整文件名（含后缀），且解密后不再附加后缀
+	// 避免双重后缀问题 (e.g. .mp4.mp4)
+	return showName
 }
 
 // EncryptFilename 加密文件名（简单封装）
