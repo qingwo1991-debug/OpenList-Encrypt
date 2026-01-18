@@ -1,22 +1,25 @@
-# OpenList-Encrypt
+# OpenEncrypt
 
 <div align="center">
   <img src="assets/openlist.svg" height="100px" alt="OpenList Encrypt Logo">
-  <h1>OpenList-Encrypt</h1>
-  <p>OpenList 移动端 + 加密代理功能</p>
+  <h1>OpenEncrypt (原 OpenList-Encrypt)</h1>
+  <p>OpenList 移动端 + 强大的透明加密代理</p>
 </div>
 
 ## 项目简介
 
-**OpenList-Encrypt** 是基于 [OpenList-Mobile](https://github.com/OpenListTeam/OpenList-Mobile) 和 [alist-encrypt](https://github.com/traceless/alist-encrypt) 的合并项目，在移动端实现了：
+**OpenEncrypt** (App名称) 是基于 [OpenList-Mobile](https://github.com/OpenListTeam/OpenList-Mobile) 的增强版本，集成了 [alist-encrypt](https://github.com/traceless/alist-encrypt) 的加密核心逻辑，专为移动端隐私安全打造。
 
-- ✅ 内置 OpenList 文件服务器
-- ✅ 内置加密代理服务
-- ✅ 支持 AES-CTR 和 RC4 加密算法
-- ✅ 在线播放加密视频
-- ✅ 查看加密图片和文件
-- ✅ WebDAV 加密上传/下载
-- ✅ 透明代理，自动加解密
+它不仅是一个文件服务器，更是一个强大的透明加密网关：
+
+- ✅ **独立App**: 包名已更改为 `com.openlist.mobile.encrypt`，可与原版 OpenList 共存。
+- ✅ **全能WebDAV**: 完美支持 WebDAV 协议，支持挂载到 Raidrive、Noklayer、Vidhub 等客户端。
+- ✅ **智能加密/解密**:
+  - **上传自动加密**: 通过 WebDAV 或网页上传到加密目录的文件会自动加密存储。
+  - **下载自动解密**: 访问加密文件时自动解密，支持视频流的 Range 请求（在线播放无压力）。
+  - **目录不加密**: 智能识别目录，保持目录名为明文，方便浏览；仅对文件进行加密混淆。
+- ✅ **文件名混淆**: 支持文件名加密（MixBase64），并在 WebDAV 列表浏览时自动还原为明文显示。
+- ✅ **多种算法**: 支持高效的 AES-CTR（推荐）和兼容性好的 RC4 算法。
 
 ## 功能特性
 
@@ -27,17 +30,19 @@
 - 支持 WebDAV 协议
 
 ### 2. 加密代理
-- 透明代理 Alist/OpenList 服务
-- 支持按路径配置加密
-- 支持 AES-CTR（推荐）和 RC4 算法
-- 可选加密文件名
-- 支持密码派生
+- **透明代理**: 无缝集成 Alist/OpenList 服务。
+- **路径匹配**: 支持按路径通配符配置加密策略（如 `/encrypt/*`）。
+- **文件名混淆**: 支持 `MixBase64` 文件名加密，保护隐私。目录名保持明文，避免混乱。
+- **防二次加密**: 智能检测机制，防止对已经是密文的文件重复加密。
+- **WebDAV 兼容**:
+    - 针对 `PROPFIND` 进行了深度优化，解决目录浏览 404 问题。
+    - 支持 `PUT` 上传时的 `Content-Length` 修正（支持 Chunked 传输）。
+    - 自动处理 `COPY` 和 `MOVE` 操作的目标路径加密。
 
 ### 3. 在线播放
-- 支持在线播放加密视频
-- 支持在线查看加密图片
-- 支持在线预览加密文档
-- 支持断点续传和范围请求
+- **流式解密**: 基于 AES-CTR 流式解密，无需下载完整文件即可播放。
+- **Range 支持**: 完美支持 HTTP Range 请求，拖动进度条秒加载。
+- **格式支持**: 支持视频、图片、文档在线预览。
 
 ## 技术架构
 
@@ -187,4 +192,6 @@ flutter build apk
 
 - OpenList 团队
 - alist-encrypt 作者
+- Google Gemini & Google
+- [Antigravity](https://github.com/Start-sys/Antigravity-Manager) & [Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager)
 - 所有贡献者
