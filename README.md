@@ -193,5 +193,6 @@ flutter build apk
 - OpenList 团队
 - alist-encrypt 作者
 - Google Gemini & Google
+- OpenList-Mobile 作者团队
 - [Antigravity](https://github.com/Start-sys/Antigravity-Manager) & [Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager)
 - 所有贡献者
