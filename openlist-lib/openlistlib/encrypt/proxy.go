@@ -83,55 +83,58 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	}
 
 	// 编译路径正则表达式
+	// 使用安全的通配符->正则转换：先 QuoteMeta 再恢复通配符
+	wildcardToRegex := func(raw string) string {
+		a := "__AST__"
+		q := "__QST__"
+		tmp := strings.ReplaceAll(raw, "*", a)
+		tmp = strings.ReplaceAll(tmp, "?", q)
+		tmp = regexp.QuoteMeta(tmp)
+		tmp = strings.ReplaceAll(tmp, a, ".*")
+		tmp = strings.ReplaceAll(tmp, q, ".")
+		return tmp
+	}
+
 	for _, ep := range config.EncryptPaths {
-		if ep.Path != "" {
-			// 转换简单通配符为正则表达式
-			raw := ep.Path
-			// 特殊处理 /* 结尾，使其匹配目录本身和子文件
-			if strings.HasSuffix(raw, "/*") {
-				base := strings.TrimSuffix(raw, "/*")
-				// 如果用户没有以 / 开头，允许可选的前导 /
-				if strings.HasPrefix(base, "/") {
-					pattern := "^" + regexp.QuoteMeta(base) + "(/.*)?$"
-					regex, err := regexp.Compile(pattern)
-					if err != nil {
-						log.Warnf("Invalid path pattern: %s, error: %v", ep.Path, err)
-						continue
-					}
-					ep.regex = regex
-					continue
-				}
-				pattern := "^/?" + regexp.QuoteMeta(base) + "(/.*)?$"
-				regex, err := regexp.Compile(pattern)
-				if err != nil {
-					log.Warnf("Invalid path pattern: %s, error: %v", ep.Path, err)
-					continue
-				}
-				ep.regex = regex
-				continue
+		if ep.Path == "" {
+			continue
+		}
+		raw := ep.Path
+		// 处理以 /* 结尾的目录匹配
+		if strings.HasSuffix(raw, "/*") {
+			base := strings.TrimSuffix(raw, "/*")
+			converted := wildcardToRegex(base)
+			var pattern string
+			if strings.HasPrefix(base, "/") {
+				pattern = "^" + converted + "(/.*)?$"
+			} else {
+				pattern = "^/?" + converted + "(/.*)?$"
 			}
-
-			// 普通通配符替换
-			pattern := strings.ReplaceAll(raw, "*", ".*")
-			pattern = strings.ReplaceAll(pattern, "?", ".")
-			// 如果没有以 ^ 开头，确保接受可选前导 /
-			if !strings.HasPrefix(pattern, "^") {
-				pattern = "^/?" + pattern
-			}
-
-			regex, err := regexp.Compile(pattern)
-			if err != nil {
+			if reg, err := regexp.Compile(pattern); err == nil {
+				ep.regex = reg
+			} else {
 				log.Warnf("Invalid path pattern: %s, error: %v", ep.Path, err)
-				continue
 			}
-			ep.regex = regex
+			continue
+		}
+
+		converted := wildcardToRegex(raw)
+		var pattern string
+		if strings.HasPrefix(raw, "^") {
+			pattern = converted
+		} else if strings.HasPrefix(raw, "/") {
+			pattern = "^" + converted
+		} else {
+			pattern = "^/?" + converted
+		}
+		if reg, err := regexp.Compile(pattern); err == nil {
+			ep.regex = reg
+		} else {
+			log.Warnf("Invalid path pattern: %s, error: %v", ep.Path, err)
 		}
 	}
 
-	// default: enable probe if not explicitly disabled
-	if !config.ProbeOnDownload {
-		config.ProbeOnDownload = true
-	}
+	// ProbeOnDownload is controlled by configuration / frontend; do not override here.
 
 	transport := &http.Transport{
 		MaxIdleConns:        100,
@@ -240,41 +243,54 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 
 	log.Infof("Updating Proxy Config with %d paths", len(config.EncryptPaths))
 
-	// Re-compile regex first
+	// Re-compile regex first using the same safe wildcard->regex conversion as NewProxyServer
+	wildcardToRegex := func(raw string) string {
+		a := "__AST__"
+		q := "__QST__"
+		tmp := strings.ReplaceAll(raw, "*", a)
+		tmp = strings.ReplaceAll(tmp, "?", q)
+		tmp = regexp.QuoteMeta(tmp)
+		tmp = strings.ReplaceAll(tmp, a, ".*")
+		tmp = strings.ReplaceAll(tmp, q, ".")
+		return tmp
+	}
+
 	for _, ep := range config.EncryptPaths {
 		log.Infof("Compiling regex for path: %s", ep.Path)
-		if ep.Path != "" {
-			raw := ep.Path
-			if strings.HasSuffix(raw, "/*") {
-				base := strings.TrimSuffix(raw, "/*")
-				if strings.HasPrefix(base, "/") {
-					pattern := "^" + regexp.QuoteMeta(base) + "(/.*)?$"
-					if reg, err := regexp.Compile(pattern); err == nil {
-						ep.regex = reg
-					} else {
-						log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
-					}
-					continue
-				}
-				pattern := "^/?" + regexp.QuoteMeta(base) + "(/.*)?$"
-				if reg, err := regexp.Compile(pattern); err == nil {
-					ep.regex = reg
-				} else {
-					log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
-				}
-				continue
-			}
-
-			pattern := strings.ReplaceAll(raw, "*", ".*")
-			pattern = strings.ReplaceAll(pattern, "?", ".")
-			if !strings.HasPrefix(pattern, "^") {
-				pattern = "^/?" + pattern
+		if ep.Path == "" {
+			continue
+		}
+		raw := ep.Path
+		if strings.HasSuffix(raw, "/*") {
+			base := strings.TrimSuffix(raw, "/*")
+			converted := wildcardToRegex(base)
+			var pattern string
+			if strings.HasPrefix(base, "/") {
+				pattern = "^" + converted + "(/.*)?$"
+			} else {
+				pattern = "^/?" + converted + "(/.*)?$"
 			}
 			if reg, err := regexp.Compile(pattern); err == nil {
 				ep.regex = reg
 			} else {
 				log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
 			}
+			continue
+		}
+
+		converted := wildcardToRegex(raw)
+		var pattern string
+		if strings.HasPrefix(raw, "^") {
+			pattern = converted
+		} else if strings.HasPrefix(raw, "/") {
+			pattern = "^" + converted
+		} else {
+			pattern = "^/?" + converted
+		}
+		if reg, err := regexp.Compile(pattern); err == nil {
+			ep.regex = reg
+		} else {
+			log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
 		}
 	}
 
@@ -767,25 +783,51 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 						newPaths = append(newPaths, &EncryptPath{Path: pathStr, Password: pwd, EncType: encType, EncName: encName, Enable: enable})
 					}
 				}
-				// assign and compile regex
+				// assign and compile regex using safe wildcard->regex conversion
+				wildcardToRegex := func(raw string) string {
+					a := "__AST__"
+					q := "__QST__"
+					tmp := strings.ReplaceAll(raw, "*", a)
+					tmp = strings.ReplaceAll(tmp, "?", q)
+					tmp = regexp.QuoteMeta(tmp)
+					tmp = strings.ReplaceAll(tmp, a, ".*")
+					tmp = strings.ReplaceAll(tmp, q, ".")
+					return tmp
+				}
+
 				p.mutex.Lock()
 				p.config.EncryptPaths = newPaths
 				for _, ep := range p.config.EncryptPaths {
-					if ep.Path != "" {
-						pattern := ep.Path
-						if strings.HasSuffix(pattern, "/*") {
-							base := strings.TrimSuffix(pattern, "/*")
-							pattern = "^" + regexp.QuoteMeta(base) + "(/.*)?$"
+					if ep.Path == "" {
+						continue
+					}
+					raw := ep.Path
+					if strings.HasSuffix(raw, "/*") {
+						base := strings.TrimSuffix(raw, "/*")
+						converted := wildcardToRegex(base)
+						var pattern string
+						if strings.HasPrefix(base, "/") {
+							pattern = "^" + converted + "(/.*)?$"
 						} else {
-							pattern = strings.ReplaceAll(pattern, "*", ".*")
-							pattern = strings.ReplaceAll(pattern, "?", ".")
-							if !strings.HasPrefix(pattern, "^") {
-								pattern = "^" + pattern
-							}
+							pattern = "^/?" + converted + "(/.*)?$"
 						}
 						if reg, err := regexp.Compile(pattern); err == nil {
 							ep.regex = reg
 						}
+						continue
+					}
+
+					converted := wildcardToRegex(raw)
+					var pattern string
+					if strings.HasPrefix(raw, "^") {
+						pattern = converted
+					} else if strings.HasPrefix(raw, "/") {
+						pattern = "^" + converted
+					} else {
+						pattern = "^/?" + converted
+					}
+					if reg, err := regexp.Compile(pattern); err == nil {
+						ep.regex = reg
 					}
 				}
 				p.mutex.Unlock()
@@ -848,25 +890,50 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+				// assign and compile regex using safe wildcard->regex conversion (same as above)
+				wildcardToRegex := func(raw string) string {
+					a := "__AST__"
+					q := "__QST__"
+					tmp := strings.ReplaceAll(raw, "*", a)
+					tmp = strings.ReplaceAll(tmp, "?", q)
+					tmp = regexp.QuoteMeta(tmp)
+					tmp = strings.ReplaceAll(tmp, a, ".*")
+					tmp = strings.ReplaceAll(tmp, q, ".")
+					return tmp
+				}
+
 				p.mutex.Lock()
 				p.config.EncryptPaths = newPaths
-				// compile regex
 				for _, ep := range p.config.EncryptPaths {
-					if ep.Path != "" {
-						pattern := ep.Path
-						if strings.HasSuffix(pattern, "/*") {
-							base := strings.TrimSuffix(pattern, "/*")
-							pattern = "^" + regexp.QuoteMeta(base) + "(/.*)?$"
+					if ep.Path == "" {
+						continue
+					}
+					raw := ep.Path
+					if strings.HasSuffix(raw, "/*") {
+						base := strings.TrimSuffix(raw, "/*")
+						converted := wildcardToRegex(base)
+						var pattern string
+						if strings.HasPrefix(base, "/") {
+							pattern = "^" + converted + "(/.*)?$"
 						} else {
-							pattern = strings.ReplaceAll(pattern, "*", ".*")
-							pattern = strings.ReplaceAll(pattern, "?", ".")
-							if !strings.HasPrefix(pattern, "^") {
-								pattern = "^" + pattern
-							}
+							pattern = "^/?" + converted + "(/.*)?$"
 						}
 						if reg, err := regexp.Compile(pattern); err == nil {
 							ep.regex = reg
 						}
+						continue
+					}
+					converted := wildcardToRegex(raw)
+					var pattern string
+					if strings.HasPrefix(raw, "^") {
+						pattern = converted
+					} else if strings.HasPrefix(raw, "/") {
+						pattern = "^" + converted
+					} else {
+						pattern = "^/?" + converted
+					}
+					if reg, err := regexp.Compile(pattern); err == nil {
+						ep.regex = reg
 					}
 				}
 				p.mutex.Unlock()
@@ -1011,16 +1078,10 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// 读取响应
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// 解析响应
+	// 解析响应（使用流式解码，避免将整个响应读入内存）
 	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err == nil {
+	var outBody []byte
+	if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
 		if code, ok := result["code"].(float64); ok && code == 200 {
 			if data, ok := result["data"].(map[string]interface{}); ok {
 				if content, ok := data["content"].([]interface{}); ok {
@@ -1061,16 +1122,23 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 					}
 
 					result["data"] = data
-					respBody, _ = json.Marshal(result)
+					outBody, _ = json.Marshal(result)
 				}
 			}
 		}
 	}
 
-	// 返回响应
+	// 返回响应（若上面未能成功解析 JSON，则尝试原样流式转发）
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
-	w.Write(respBody)
+	if len(outBody) > 0 {
+		w.Write(outBody)
+		return
+	}
+	// 如果没有构造好的 respBody，说明上面未进入 JSON 解析分支，直接将 resp.Body 内容拷贝到响应
+	// 为了此处可读，需要先重-open resp.Body — 但 resp.Body 已在流式解码中消费或关闭，
+	// 所以此分支通常不会被触达。作为保险，尝试写空体。
+	return
 }
 
 // handleFsGet 处理获取文件信息

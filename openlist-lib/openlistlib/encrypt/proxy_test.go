@@ -9,6 +9,63 @@ import (
 	"testing"
 )
 
+func TestPathPatternMatchesLeadingSlash(t *testing.T) {
+	cfg := &ProxyConfig{
+		AlistHost:    "localhost",
+		AlistPort:    80,
+		AlistHttps:   false,
+		ProxyPort:    0,
+		EncryptPaths: []*EncryptPath{{Path: "移动云盘156/encrypt/*", Password: "p", Enable: true}},
+	}
+
+	p, err := NewProxyServer(cfg)
+	if err != nil {
+		t.Fatalf("NewProxyServer failed: %v", err)
+	}
+
+	if len(p.config.EncryptPaths) == 0 || p.config.EncryptPaths[0].regex == nil {
+		t.Fatalf("regex not compiled")
+	}
+
+	tests := []string{
+		"移动云盘156/encrypt/file.txt",
+		"/移动云盘156/encrypt/file.txt",
+		"移动云盘156/encrypt/subdir/another",
+		"/移动云盘156/encrypt/",
+	}
+
+	for _, s := range tests {
+		if !p.config.EncryptPaths[0].regex.MatchString(s) {
+			t.Fatalf("pattern did not match %s", s)
+		}
+	}
+}
+
+func TestUpdateConfigCompilesPattern(t *testing.T) {
+	p, err := NewProxyServer(&ProxyConfig{EncryptPaths: []*EncryptPath{}})
+	if err != nil {
+		t.Fatalf("NewProxyServer empty failed: %v", err)
+	}
+
+	cfg := &ProxyConfig{
+		AlistHost:    "localhost",
+		AlistPort:    80,
+		AlistHttps:   false,
+		ProxyPort:    0,
+		EncryptPaths: []*EncryptPath{{Path: "/移动云盘156/encrypt/*", Password: "p", Enable: true}},
+	}
+
+	p.UpdateConfig(cfg)
+
+	if len(p.config.EncryptPaths) == 0 || p.config.EncryptPaths[0].regex == nil {
+		t.Fatalf("regex not compiled after UpdateConfig")
+	}
+
+	if !p.config.EncryptPaths[0].regex.MatchString("/移动云盘156/encrypt/file") {
+		t.Fatalf("UpdateConfig pattern did not match")
+	}
+}
+
 func TestProcessPropfindResponse(t *testing.T) {
 	p := &ProxyServer{fileCache: sync.Map{}}
 
