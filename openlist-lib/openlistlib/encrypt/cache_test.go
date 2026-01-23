@@ -164,11 +164,11 @@ func TestParallelDecrypt(t *testing.T) {
 
 	// 创建一些模拟的文件解密任务
 	encPath := config.EncryptPaths[0]
-	
+
 	// 先加密一些文件名
 	plainNames := []string{"movie1.mp4", "movie2.mp4", "video3.mkv"}
 	tasks := make([]fileDecryptTask, len(plainNames))
-	
+
 	for i, name := range plainNames {
 		encName := ConvertRealName(encPath.Password, encPath.EncType, "/encrypt/"+name)
 		tasks[i] = fileDecryptTask{

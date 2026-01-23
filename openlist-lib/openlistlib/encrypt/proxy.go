@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -87,6 +88,8 @@ type ProxyConfig struct {
 	AdminPassword string         `json:"adminPassword"` // 管理密码
 	// ProbeOnDownload: attempt HEAD or Range=0-0 to discover remote file size when missing
 	ProbeOnDownload bool `json:"probeOnDownload"`
+	// EnableH2C: 启用 H2C (HTTP/2 Cleartext) 连接到后端，需要后端 OpenList 也开启 enable_h2c
+	EnableH2C bool `json:"enableH2C"`
 }
 
 // ProxyServer 加密代理服务器
@@ -186,7 +189,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 
 	// ProbeOnDownload is controlled by configuration / frontend; do not override here.
 
-	// 创建 Transport，支持 HTTP/2
+	// 创建 Transport，支持 HTTP/2 over TLS
 	transport := &http.Transport{
 		MaxIdleConns:          200,               // 增加最大空闲连接
 		MaxIdleConnsPerHost:   50,                // 增加每主机空闲连接
@@ -194,22 +197,42 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		IdleConnTimeout:       120 * time.Second, // 延长空闲超时
 		DisableCompression:    true,              // 禁用压缩，减少 CPU 开销（视频流通常已压缩）
 		ResponseHeaderTimeout: 30 * time.Second,  // 响应头超时
-		ForceAttemptHTTP2:     true,              // 启用 HTTP/2
+		ForceAttemptHTTP2:     true,              // 启用 HTTP/2 (HTTPS)
 		TLSClientConfig:       &tls.Config{},
 	}
 
-	// 配置 HTTP/2 支持
+	// 配置 HTTP/2 over TLS 支持
 	if err := http2.ConfigureTransport(transport); err != nil {
 		log.Warnf("Failed to configure HTTP/2: %v, falling back to HTTP/1.1", err)
 	}
 
+	var httpClient, streamClient *http.Client
+
+	// 如果启用 H2C，创建支持 H2C 的客户端
+	if config.EnableH2C {
+		log.Info("H2C (HTTP/2 Cleartext) enabled for backend connections")
+		// H2C Transport - 用于明文 HTTP/2
+		h2cTransport := &http2.Transport{
+			AllowHTTP: true, // 允许明文 HTTP
+			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+				// 对于 H2C，我们实际上是做普通的 TCP 连接
+				var d net.Dialer
+				return d.DialContext(ctx, network, addr)
+			},
+		}
+		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: h2cTransport}
+		streamClient = &http.Client{Timeout: 0, Transport: h2cTransport}
+	} else {
+		// 标准 HTTP/1.1 或 HTTP/2 over TLS
+		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: transport}
+		streamClient = &http.Client{Timeout: 0, Transport: transport}
+	}
+
 	server := &ProxyServer{
-		config:     config,
-		transport:  transport,
-		httpClient: &http.Client{Timeout: 30 * time.Second, Transport: transport},
-		// streamClient is used for long-running download / webdav stream requests (no timeout)
-		// Reuse the same Transport to share connection pool.
-		streamClient: &http.Client{Timeout: 0, Transport: transport},
+		config:       config,
+		transport:    transport,
+		httpClient:   httpClient,
+		streamClient: streamClient,
 		cleanupDone:  make(chan struct{}),
 	}
 

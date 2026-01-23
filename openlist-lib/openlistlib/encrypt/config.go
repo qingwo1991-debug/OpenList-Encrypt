@@ -25,7 +25,8 @@ func DefaultConfig() *ProxyConfig {
 		AlistPort:       5244,
 		AlistHttps:      false,
 		ProxyPort:       5344,
-		ProbeOnDownload: true, // 默认开启，确保能正确获取文件大小以解密
+		ProbeOnDownload: true,  // 默认开启，确保能正确获取文件大小以解密
+		EnableH2C:       false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
 		EncryptPaths: []*EncryptPath{
 			{
 				Path:     "encrypt_folder/*",
