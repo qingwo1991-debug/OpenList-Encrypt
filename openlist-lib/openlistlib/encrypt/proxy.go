@@ -17,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/OpenListTeam/OpenList/v4/public"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -165,23 +164,24 @@ func (p *ProxyServer) Start() error {
 
 	// 路由配置
 	mux.HandleFunc("/ping", p.handlePing)
-	// 注意：不再提供加密代理的独立 WebUI（/ 或 /index）。
-	// 加解密相关配置统一由 App 前端（encrypt tab）通过 /enc-api/* 或 /api/encrypt/config 下发。
+	// 加密配置 API（供 App 前端的加密 tab 使用）
 	mux.HandleFunc("/enc-api/getAlistConfig", p.handleConfig)
 	mux.HandleFunc("/enc-api/saveAlistConfig", p.handleConfig)
 	mux.HandleFunc("/enc-api/getUserInfo", p.handleUserInfo)
-	// 兼容前端请求：统一的获取/保存配置接口
 	mux.HandleFunc("/api/encrypt/config", p.handleConfig)
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
+	// 文件操作相关
 	mux.HandleFunc("/redirect/", p.handleRedirect)
 	mux.HandleFunc("/api/fs/list", p.handleFsList)
 	mux.HandleFunc("/api/fs/get", p.handleFsGet)
-	mux.HandleFunc("/api/fs/put", p.handleFsPut) // 网页端上传
+	mux.HandleFunc("/api/fs/put", p.handleFsPut)
+	// 下载和 WebDAV
 	mux.HandleFunc("/d/", p.handleDownload)
 	mux.HandleFunc("/p/", p.handleDownload)
 	mux.HandleFunc("/dav/", p.handleWebDAV)
 	mux.HandleFunc("/dav", p.handleWebDAV)
-	// 不注册 "/"：让根路径默认 404，避免与 OpenList 管理页概念混淆
+	// 根路径：直接代理到 OpenList (Alist)
+	mux.HandleFunc("/", p.handleRoot)
 
 	p.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", p.config.ProxyPort),
@@ -534,11 +534,6 @@ func (p *ProxyServer) handlePing(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleIndex 管理页面快捷入口
-func (p *ProxyServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/public/index.html", http.StatusFound)
-}
-
 // handleRestart 处理重启请求
 func (p *ProxyServer) handleRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -563,83 +558,8 @@ func (p *ProxyServer) handleRestart(w http.ResponseWriter, r *http.Request) {
 // handleRoot 处理根路径
 func (p *ProxyServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 	log.Debugf("Handling root request: %s", r.URL.Path)
-	// 直接代理到 Alist，不显示中间导航页
+	// 直接代理到 OpenList (Alist)
 	p.handleProxy(w, r)
-}
-
-// handleStatic 处理静态文件和管理页面
-func (p *ProxyServer) handleStatic(w http.ResponseWriter, r *http.Request) {
-	log.Debugf("Handling static request: %s", r.URL.Path)
-	urlPath := r.URL.Path
-	var relPath string
-
-	if strings.HasPrefix(urlPath, "/public/") {
-		relPath = strings.TrimPrefix(urlPath, "/public/")
-	} else if strings.HasPrefix(urlPath, "/static/") {
-		relPath = strings.TrimPrefix(urlPath, "/")
-	} else if urlPath == "/favicon.ico" || urlPath == "/logo.png" {
-		relPath = strings.TrimPrefix(urlPath, "/")
-	} else {
-		http.NotFound(w, r)
-		return
-	}
-
-	if relPath == "" || relPath == "index.html" {
-		relPath = "index.html"
-	}
-
-	// 从 embed FS 读取文件 (public.Public 的根是 .)
-	// dist 是 public.Public 的子目录
-	// 我们将 enc-webui 放在 dist/enc 下
-	fsPath := path.Join("dist", "enc", relPath)
-
-	f, err := public.Public.Open(fsPath)
-	if err != nil {
-		// 如果找不到文件，且是 HTML 请求，返回 index.html (支持 history mode 路由)
-		if !strings.Contains(relPath, ".") {
-			f, err = public.Public.Open(path.Join("dist", "enc", "index.html"))
-		}
-		if err != nil {
-			log.Warnf("Static file not found: %s", fsPath)
-			http.NotFound(w, r)
-			return
-		}
-	}
-	defer f.Close()
-
-	// 获取文件信息
-	stat, err := f.Stat()
-	if err != nil {
-		log.Errorf("Failed to stat file %s: %v", fsPath, err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-
-	// 手动设置 Content-Type，防止 Android/Go 环境下无法识别导致 JS 无法执行
-	ext := path.Ext(relPath)
-	switch ext {
-	case ".html":
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	case ".css":
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-	case ".js":
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-	case ".json":
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	case ".png":
-		w.Header().Set("Content-Type", "image/png")
-	case ".jpg", ".jpeg":
-		w.Header().Set("Content-Type", "image/jpeg")
-	case ".gif":
-		w.Header().Set("Content-Type", "image/gif")
-	case ".svg":
-		w.Header().Set("Content-Type", "image/svg+xml")
-	case ".ico":
-		w.Header().Set("Content-Type", "image/x-icon")
-	}
-
-	// 使用 http.ServeContent 处理 Range 请求和 Content-Type
-	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f.(io.ReadSeeker))
 }
 
 // handleUserInfo 处理用户信息请求
@@ -1825,26 +1745,8 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(resp.StatusCode)
 
-	// 如果是 HTML 页面，注入版本信息
-	contentType := resp.Header.Get("Content-Type")
-	if strings.Contains(contentType, "text/html") {
-		body, _ := io.ReadAll(resp.Body)
-		html := string(body)
-
-		// 注入版本标识
-		injection := `<body>
-<div style="position: fixed;z-index:10010; top:7px; margin-left: 50%">
-  <a target="_blank" href="/public/index.html">
-    <div style="width:40px;height:40px;margin-left: -20px">
-      <span style="color:gray;font-size:11px">🔐 Enc</span>
-    </div>
-  </a>
-</div>`
-		html = strings.Replace(html, "<body>", injection, 1)
-		w.Write([]byte(html))
-	} else {
-		io.Copy(w, resp.Body)
-	}
+	// 直接复制响应体，不做 HTML 注入（加密配置已移至 App 前端）
+	io.Copy(w, resp.Body)
 }
 
 // generateRedirectKey 生成重定向 key

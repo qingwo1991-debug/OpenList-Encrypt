@@ -490,6 +490,16 @@ const webUIHTML = `
                         使用 HTTPS
                     </label>
                 </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="probe-download">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        探测远程文件大小（提高解密兼容性）
+                    </label>
+                    <div style="margin-top:8px; color:#666; font-size:0.9em;">开启后会在下载时尝试 HEAD 或请求首字节以获取文件总大小，减少解密失败的概率，可能增加少量请求延迟。</div>
+                </div>
                 <div class="btn-group">
                     <button type="submit" class="btn btn-primary">保存配置</button>
                 </div>
@@ -586,16 +596,35 @@ const webUIHTML = `
         
         // 加载配置
         async function loadConfig() {
-            try {
-                const response = await fetch('/api/encrypt/config');
-                const data = await response.json();
-                if (data.code === 200) {
-                    encryptPaths = data.data.encryptPaths || [];
-                    renderPaths();
+                try {
+                    const response = await fetch('/api/encrypt/config');
+                    const data = await response.json();
+                    if (data.code === 200) {
+                        // 兼容后端返回的 passwdList 格式，转换为前端使用的 encryptPaths
+                        if (data.data.passwdList) {
+                            encryptPaths = [];
+                            for (const item of data.data.passwdList) {
+                                const encPaths = item.encPath || [];
+                                let encType = item.encType || '';
+                                if (encType === 'aesctr') encType = 'aes-ctr';
+                                if (encType === 'rc4') encType = 'rc4md5';
+                                for (const p of encPaths) {
+                                    encryptPaths.push({ path: p, password: item.password, encType: encType || 'aes-ctr', encName: item.encName || false, enable: item.enable !== false });
+                                }
+                            }
+                        } else {
+                            encryptPaths = data.data.encryptPaths || [];
+                        }
+                        // 填充 Alist 配置
+                        if (data.data.alistHost) document.getElementById('alist-host').value = data.data.alistHost;
+                        if (data.data.alistPort) document.getElementById('alist-port').value = data.data.alistPort;
+                        if (data.data.https !== undefined) document.getElementById('alist-https').checked = data.data.https;
+                        if (data.data.probeOnDownload !== undefined) document.getElementById('probe-download').checked = data.data.probeOnDownload;
+                        renderPaths();
+                    }
+                } catch (error) {
+                    console.error('加载配置失败:', error);
                 }
-            } catch (error) {
-                console.error('加载配置失败:', error);
-            }
         }
         
         // 检查服务状态
@@ -630,7 +659,8 @@ const webUIHTML = `
             const host = document.getElementById('alist-host').value;
             const port = parseInt(document.getElementById('alist-port').value);
             const https = document.getElementById('alist-https').checked;
-            
+            const probe = document.getElementById('probe-download').checked;
+
             try {
                 const response = await fetch('/api/encrypt/config', {
                     method: 'POST',
@@ -638,10 +668,11 @@ const webUIHTML = `
                     body: JSON.stringify({
                         alistHost: host,
                         alistPort: port,
-                        alistHttps: https
+                        alistHttps: https,
+                        probeOnDownload: probe
                     })
                 });
-                
+
                 const data = await response.json();
                 if (data.code === 200) {
                     showToast('配置已保存', 'success');
