@@ -20,6 +20,29 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// 流式传输优化常量
+const (
+	// streamBufferSize 流传输缓冲区大小 (512KB)，优化大文件播放
+	streamBufferSize = 512 * 1024
+	// smallBufferSize 小文件/API响应缓冲区 (32KB)
+	smallBufferSize = 32 * 1024
+)
+
+// bufferPool 缓冲区池，避免频繁内存分配
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, streamBufferSize)
+		return &buf
+	},
+}
+
+// copyWithBuffer 使用缓冲区池进行高效复制
+func copyWithBuffer(dst io.Writer, src io.Reader) (int64, error) {
+	bufPtr := bufferPool.Get().(*[]byte)
+	defer bufferPool.Put(bufPtr)
+	return io.CopyBuffer(dst, src, *bufPtr)
+}
+
 // EncryptPath 加密路径配置
 type EncryptPath struct {
 	Path     string         `json:"path"`     // 路径正则表达式
@@ -136,9 +159,12 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	// ProbeOnDownload is controlled by configuration / frontend; do not override here.
 
 	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConns:          200,               // 增加最大空闲连接
+		MaxIdleConnsPerHost:   50,                // 增加每主机空闲连接
+		MaxConnsPerHost:       100,               // 限制每主机最大连接
+		IdleConnTimeout:       120 * time.Second, // 延长空闲超时
+		DisableCompression:    true,              // 禁用压缩，减少 CPU 开销（视频流通常已压缩）
+		ResponseHeaderTimeout: 30 * time.Second,  // 响应头超时
 	}
 
 	return &ProxyServer{
@@ -950,10 +976,10 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		decryptReader := NewDecryptReader(resp.Body, encryptor)
 
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, decryptReader)
+		copyWithBuffer(w, decryptReader)
 	} else {
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		copyWithBuffer(w, resp.Body)
 	}
 }
 
@@ -1249,7 +1275,7 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	copyWithBuffer(w, resp.Body)
 }
 
 // handleDownload 处理下载请求
@@ -1401,16 +1427,16 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 		decryptReader := NewDecryptReader(resp.Body, encryptor)
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, decryptReader)
+		copyWithBuffer(w, decryptReader)
 	} else if encPath != nil && fileSize == 0 {
 		// fileSize 为 0 时无法正确解密（因为 fileSize 参与密钥生成）
 		// 直接透传原始数据，让客户端知道这是加密的文件
 		log.Warnf("handleDownload: cannot decrypt, fileSize is 0 for encrypted path: %s. Passing through raw data.", filePath)
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		copyWithBuffer(w, resp.Body)
 	} else {
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		copyWithBuffer(w, resp.Body)
 	}
 }
 
@@ -1641,7 +1667,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			strings.Contains(contentType, "application/json") ||
 			strings.Contains(contentType, "application/xml") {
 			w.WriteHeader(resp.StatusCode)
-			io.Copy(w, resp.Body)
+			copyWithBuffer(w, resp.Body)
 			return
 		}
 
@@ -1682,7 +1708,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				// 无法创建解密器(如未知算法)，直接透传
 				log.Warnf("Failed to create encryptor for download: %v", err)
 				w.WriteHeader(resp.StatusCode)
-				io.Copy(w, resp.Body)
+				copyWithBuffer(w, resp.Body)
 				return
 			}
 
@@ -1692,13 +1718,13 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 			decryptReader := NewDecryptReader(resp.Body, encryptor)
 			w.WriteHeader(resp.StatusCode)
-			io.Copy(w, decryptReader)
+			copyWithBuffer(w, decryptReader)
 			return
 		}
 	}
 
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	copyWithBuffer(w, resp.Body)
 }
 
 // handleProxy 处理通用代理请求
@@ -1746,7 +1772,7 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	// 直接复制响应体，不做 HTML 注入（加密配置已移至 App 前端）
-	io.Copy(w, resp.Body)
+	copyWithBuffer(w, resp.Body)
 }
 
 // generateRedirectKey 生成重定向 key
