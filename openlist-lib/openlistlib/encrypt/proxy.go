@@ -3,6 +3,7 @@ package encrypt
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/http2"
 )
 
 // 流式传输优化常量
@@ -26,6 +28,16 @@ const (
 	streamBufferSize = 512 * 1024
 	// smallBufferSize 小文件/API响应缓冲区 (32KB)
 	smallBufferSize = 32 * 1024
+	// fileCacheTTL 文件信息缓存过期时间
+	fileCacheTTL = 10 * time.Minute
+	// fileCacheMaxSize 文件缓存最大条目数
+	fileCacheMaxSize = 10000
+	// redirectCacheTTL 重定向缓存过期时间
+	redirectCacheTTL = 5 * time.Minute
+	// parallelDecryptThreshold 并行解密文件名的阈值
+	parallelDecryptThreshold = 20
+	// maxParallelDecrypt 最大并行解密数
+	maxParallelDecrypt = 8
 )
 
 // bufferPool 缓冲区池，避免频繁内存分配
@@ -41,6 +53,18 @@ func copyWithBuffer(dst io.Writer, src io.Reader) (int64, error) {
 	bufPtr := bufferPool.Get().(*[]byte)
 	defer bufferPool.Put(bufPtr)
 	return io.CopyBuffer(dst, src, *bufPtr)
+}
+
+// CachedFileInfo 带过期时间的文件信息缓存
+type CachedFileInfo struct {
+	Info     *FileInfo
+	ExpireAt time.Time
+}
+
+// CachedRedirectInfo 带过期时间的重定向信息缓存
+type CachedRedirectInfo struct {
+	Info     *RedirectInfo
+	ExpireAt time.Time
 }
 
 // EncryptPath 加密路径配置
@@ -67,14 +91,18 @@ type ProxyConfig struct {
 
 // ProxyServer 加密代理服务器
 type ProxyServer struct {
-	config       *ProxyConfig
-	httpClient   *http.Client
-	streamClient *http.Client
-	transport    *http.Transport
-	server       *http.Server
-	running      bool
-	mutex        sync.RWMutex
-	fileCache    sync.Map // 文件信息缓存
+	config         *ProxyConfig
+	httpClient     *http.Client
+	streamClient   *http.Client
+	transport      *http.Transport
+	server         *http.Server
+	running        bool
+	mutex          sync.RWMutex
+	fileCache      sync.Map // 文件信息缓存 (path -> *CachedFileInfo)
+	fileCacheCount int64    // 缓存条目计数
+	redirectCache  sync.Map // 重定向缓存 (key -> *CachedRedirectInfo)
+	cleanupTicker  *time.Ticker
+	cleanupDone    chan struct{}
 }
 
 // FileInfo 文件信息
@@ -95,7 +123,7 @@ type RedirectInfo struct {
 }
 
 var (
-	redirectCache sync.Map // 重定向缓存
+// 保留全局 redirectCache 以兼容现有代码，但新代码使用 ProxyServer.redirectCache
 )
 
 // NewProxyServer 创建代理服务器
@@ -158,6 +186,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 
 	// ProbeOnDownload is controlled by configuration / frontend; do not override here.
 
+	// 创建 Transport，支持 HTTP/2
 	transport := &http.Transport{
 		MaxIdleConns:          200,               // 增加最大空闲连接
 		MaxIdleConnsPerHost:   50,                // 增加每主机空闲连接
@@ -165,16 +194,129 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		IdleConnTimeout:       120 * time.Second, // 延长空闲超时
 		DisableCompression:    true,              // 禁用压缩，减少 CPU 开销（视频流通常已压缩）
 		ResponseHeaderTimeout: 30 * time.Second,  // 响应头超时
+		ForceAttemptHTTP2:     true,              // 启用 HTTP/2
+		TLSClientConfig:       &tls.Config{},
 	}
 
-	return &ProxyServer{
+	// 配置 HTTP/2 支持
+	if err := http2.ConfigureTransport(transport); err != nil {
+		log.Warnf("Failed to configure HTTP/2: %v, falling back to HTTP/1.1", err)
+	}
+
+	server := &ProxyServer{
 		config:     config,
 		transport:  transport,
 		httpClient: &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		// streamClient is used for long-running download / webdav stream requests (no timeout)
 		// Reuse the same Transport to share connection pool.
 		streamClient: &http.Client{Timeout: 0, Transport: transport},
-	}, nil
+		cleanupDone:  make(chan struct{}),
+	}
+
+	// 启动缓存清理协程
+	server.startCacheCleanup()
+
+	return server, nil
+}
+
+// startCacheCleanup 启动定期缓存清理
+func (p *ProxyServer) startCacheCleanup() {
+	p.cleanupTicker = time.NewTicker(2 * time.Minute)
+	go func() {
+		for {
+			select {
+			case <-p.cleanupTicker.C:
+				p.cleanupExpiredCache()
+			case <-p.cleanupDone:
+				return
+			}
+		}
+	}()
+}
+
+// stopCacheCleanup 停止缓存清理
+func (p *ProxyServer) stopCacheCleanup() {
+	if p.cleanupTicker != nil {
+		p.cleanupTicker.Stop()
+	}
+	if p.cleanupDone != nil {
+		close(p.cleanupDone)
+	}
+}
+
+// cleanupExpiredCache 清理过期的缓存条目
+func (p *ProxyServer) cleanupExpiredCache() {
+	now := time.Now()
+	var deletedCount int64
+
+	// 清理文件缓存
+	p.fileCache.Range(func(key, value interface{}) bool {
+		if cached, ok := value.(*CachedFileInfo); ok {
+			if now.After(cached.ExpireAt) {
+				p.fileCache.Delete(key)
+				deletedCount++
+			}
+		}
+		return true
+	})
+
+	// 清理重定向缓存
+	p.redirectCache.Range(func(key, value interface{}) bool {
+		if cached, ok := value.(*CachedRedirectInfo); ok {
+			if now.After(cached.ExpireAt) {
+				p.redirectCache.Delete(key)
+			}
+		}
+		return true
+	})
+
+	if deletedCount > 0 {
+		log.Debugf("Cache cleanup: removed %d expired file entries", deletedCount)
+	}
+}
+
+// storeFileCache 存储文件信息到缓存（带 TTL）
+func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
+	p.fileCache.Store(path, &CachedFileInfo{
+		Info:     info,
+		ExpireAt: time.Now().Add(fileCacheTTL),
+	})
+}
+
+// loadFileCache 从缓存加载文件信息（检查 TTL）
+func (p *ProxyServer) loadFileCache(path string) (*FileInfo, bool) {
+	if value, ok := p.fileCache.Load(path); ok {
+		if cached, ok := value.(*CachedFileInfo); ok {
+			if time.Now().Before(cached.ExpireAt) {
+				return cached.Info, true
+			}
+			// 过期了，删除
+			p.fileCache.Delete(path)
+		}
+	}
+	return nil, false
+}
+
+// storeRedirectCache 存储重定向信息到缓存（带 TTL）
+func (p *ProxyServer) storeRedirectCache(key string, info *RedirectInfo) {
+	p.redirectCache.Store(key, &CachedRedirectInfo{
+		Info:     info,
+		ExpireAt: time.Now().Add(redirectCacheTTL),
+	})
+}
+
+// loadRedirectCache 从缓存加载重定向信息（检查 TTL）
+func (p *ProxyServer) loadRedirectCache(key string) (*RedirectInfo, bool) {
+	if value, ok := p.redirectCache.Load(key); ok {
+		if cached, ok := value.(*CachedRedirectInfo); ok {
+			if time.Now().Before(cached.ExpireAt) {
+				return cached.Info, true
+			}
+			// 过期了，删除
+			p.redirectCache.Delete(key)
+		}
+	}
+	return nil, false
 }
 
 // Start 启动代理服务器
@@ -236,6 +378,9 @@ func (p *ProxyServer) Stop() error {
 	if !p.running {
 		return nil
 	}
+
+	// 停止缓存清理协程
+	p.stopCacheCleanup()
 
 	if p.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -500,7 +645,8 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 						isDir = true
 						size = 0
 					}
-					p.fileCache.Store(curHref, &FileInfo{Name: name, Size: size, IsDir: isDir, Path: curHref})
+					// 使用带 TTL 的缓存
+					p.storeFileCache(curHref, &FileInfo{Name: name, Size: size, IsDir: isDir, Path: curHref})
 				}
 				inResponse = false
 			}
@@ -900,17 +1046,10 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 	key := parts[2]
 
-	// 从缓存获取重定向信息
-	value, ok := redirectCache.Load(key)
+	// 从缓存获取重定向信息（使用带 TTL 的缓存方法）
+	info, ok := p.loadRedirectCache(key)
 	if !ok {
 		http.Error(w, "Redirect key not found or expired", http.StatusNotFound)
-		return
-	}
-
-	info := value.(*RedirectInfo)
-	if time.Now().After(info.ExpireAt) {
-		redirectCache.Delete(key)
-		http.Error(w, "Redirect key expired", http.StatusNotFound)
 		return
 	}
 
@@ -1037,29 +1176,49 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 					// 查找加密路径配置
 					encPath := p.findEncryptPath(dirPath)
 
-					for _, item := range content {
+					// 收集需要解密的文件
+					var decryptTasks []fileDecryptTask
+
+					for i, item := range content {
 						if fileMap, ok := item.(map[string]interface{}); ok {
 							name, _ := fileMap["name"].(string)
 							size, _ := fileMap["size"].(float64)
 							isDir, _ := fileMap["is_dir"].(bool)
 							filePath := path.Join(dirPath, name)
 
-							// 缓存文件信息
-							p.fileCache.Store(filePath, &FileInfo{
+							// 缓存文件信息（使用带 TTL 的缓存）
+							p.storeFileCache(filePath, &FileInfo{
 								Name:  name,
 								Size:  int64(size),
 								IsDir: isDir,
 								Path:  filePath,
 							})
 
-							// 如果需要加密文件名且不是目录
+							// 收集需要解密文件名的文件
 							if encPath != nil && encPath.EncName && !isDir {
-								// 将加密的文件名转换为显示名
-								showName := ConvertShowName(encPath.Password, encPath.EncType, name)
-								if showName != name && !strings.HasPrefix(showName, "orig_") {
-									log.Infof("Decrypt filename: %s -> %s", name, showName)
+								decryptTasks = append(decryptTasks, fileDecryptTask{
+									index:    i,
+									fileMap:  fileMap,
+									name:     name,
+									filePath: filePath,
+								})
+							}
+						}
+					}
+
+					// 并行解密文件名（当文件数超过阈值时）
+					if len(decryptTasks) > 0 {
+						if len(decryptTasks) >= parallelDecryptThreshold {
+							// 使用并行解密
+							p.parallelDecryptFileNames(decryptTasks, encPath)
+						} else {
+							// 串行解密（文件数少时开销更小）
+							for _, task := range decryptTasks {
+								showName := ConvertShowName(encPath.Password, encPath.EncType, task.name)
+								if showName != task.name && !strings.HasPrefix(showName, "orig_") {
+									log.Debugf("Decrypt filename: %s -> %s", task.name, showName)
 								}
-								fileMap["name"] = showName
+								task.fileMap["name"] = showName
 							}
 						}
 					}
@@ -1082,6 +1241,36 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 	// 为了此处可读，需要先重-open resp.Body — 但 resp.Body 已在流式解码中消费或关闭，
 	// 所以此分支通常不会被触达。作为保险，尝试写空体。
 	return
+}
+
+// parallelDecryptFileNames 并行解密文件名
+func (p *ProxyServer) parallelDecryptFileNames(tasks []fileDecryptTask, encPath *EncryptPath) {
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, maxParallelDecrypt)
+
+	for _, task := range tasks {
+		wg.Add(1)
+		go func(t fileDecryptTask) {
+			defer wg.Done()
+			semaphore <- struct{}{}        // 获取信号量
+			defer func() { <-semaphore }() // 释放信号量
+
+			showName := ConvertShowName(encPath.Password, encPath.EncType, t.name)
+			if showName != t.name && !strings.HasPrefix(showName, "orig_") {
+				log.Debugf("Parallel decrypt filename: %s -> %s", t.name, showName)
+			}
+			t.fileMap["name"] = showName
+		}(task)
+	}
+	wg.Wait()
+}
+
+// fileDecryptTask 文件解密任务
+type fileDecryptTask struct {
+	index    int
+	fileMap  map[string]interface{}
+	name     string
+	filePath string
 }
 
 // handleFsGet 处理获取文件信息
@@ -1166,9 +1355,9 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 
-				// 创建重定向缓存
+				// 创建重定向缓存（使用带 TTL 的缓存方法）
 				key := generateRedirectKey()
-				redirectCache.Store(key, &RedirectInfo{
+				p.storeRedirectCache(key, &RedirectInfo{
 					RedirectURL: rawURL,
 					PasswdInfo:  encPath,
 					FileSize:    int64(size),
@@ -1311,10 +1500,10 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 获取文件大小 - 首先尝试从缓存获取
+	// 获取文件大小 - 首先尝试从缓存获取（使用带 TTL 的缓存方法）
 	var fileSize int64 = 0
-	if cached, ok := p.fileCache.Load(filePath); ok {
-		fileSize = cached.(*FileInfo).Size
+	if cached, ok := p.loadFileCache(filePath); ok {
+		fileSize = cached.Size
 		log.Debugf("handleDownload: got fileSize from cache: %d for path: %s", fileSize, filePath)
 	}
 
