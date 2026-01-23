@@ -984,10 +984,11 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 获取文件大小
+	// 获取文件大小 - 首先尝试从缓存获取
 	var fileSize int64 = 0
 	if cached, ok := p.fileCache.Load(filePath); ok {
 		fileSize = cached.(*FileInfo).Size
+		log.Debugf("handleDownload: got fileSize from cache: %d for path: %s", fileSize, filePath)
 	}
 
 	// 创建到 Alist 的请求
@@ -1013,6 +1014,32 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// 如果缓存中没有文件大小，尝试从响应头获取
+	if fileSize == 0 && encPath != nil {
+		// 尝试从 Content-Length 获取
+		if cl := resp.Header.Get("Content-Length"); cl != "" {
+			if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
+				fileSize = size
+				log.Infof("handleDownload: got fileSize from Content-Length: %d for path: %s", fileSize, filePath)
+			}
+		}
+		// 尝试从 Content-Range 获取总大小 (格式: bytes start-end/total)
+		if fileSize == 0 {
+			if cr := resp.Header.Get("Content-Range"); cr != "" {
+				// Content-Range: bytes 0-1023/10240
+				if idx := strings.LastIndex(cr, "/"); idx != -1 {
+					totalStr := cr[idx+1:]
+					if totalStr != "*" {
+						if total, err := strconv.ParseInt(totalStr, 10, 64); err == nil && total > 0 {
+							fileSize = total
+							log.Infof("handleDownload: got fileSize from Content-Range: %d for path: %s", fileSize, filePath)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// 复制响应头
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -1034,8 +1061,11 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	// 如果需要解密
 	if encPath != nil && fileSize > 0 {
+		log.Infof("handleDownload: decrypting with fileSize=%d for path: %s", fileSize, filePath)
+
 		encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
 		if err != nil {
+			log.Errorf("handleDownload: failed to create encryptor: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1047,6 +1077,12 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		decryptReader := NewDecryptReader(resp.Body, encryptor)
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, decryptReader)
+	} else if encPath != nil && fileSize == 0 {
+		// fileSize 为 0 时无法正确解密（因为 fileSize 参与密钥生成）
+		// 直接透传原始数据，让客户端知道这是加密的文件
+		log.Warnf("handleDownload: cannot decrypt, fileSize is 0 for encrypted path: %s. Passing through raw data.", filePath)
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
 	} else {
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
