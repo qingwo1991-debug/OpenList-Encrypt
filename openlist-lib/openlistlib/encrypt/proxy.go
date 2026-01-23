@@ -39,6 +39,8 @@ type ProxyConfig struct {
 	ProxyPort     int            `json:"proxyPort"`     // 代理服务端口
 	EncryptPaths  []*EncryptPath `json:"encryptPaths"`  // 加密路径配置
 	AdminPassword string         `json:"adminPassword"` // 管理密码
+	// ProbeOnDownload: attempt HEAD or Range=0-0 to discover remote file size when missing
+	ProbeOnDownload bool `json:"probeOnDownload"`
 }
 
 // ProxyServer 加密代理服务器
@@ -46,6 +48,7 @@ type ProxyServer struct {
 	config       *ProxyConfig
 	httpClient   *http.Client
 	streamClient *http.Client
+	transport    *http.Transport
 	server       *http.Server
 	running      bool
 	mutex        sync.RWMutex
@@ -105,27 +108,24 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		}
 	}
 
+	// default: enable probe if not explicitly disabled
+	if !config.ProbeOnDownload {
+		config.ProbeOnDownload = true
+	}
+
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
 	return &ProxyServer{
-		config: config,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 20,
-				IdleConnTimeout:     90 * time.Second,
-			},
-		},
+		config:     config,
+		transport:  transport,
+		httpClient: &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		// streamClient is used for long-running download / webdav stream requests (no timeout)
-		// to avoid premature client-side timeouts when streaming large videos to Android clients.
 		// Reuse the same Transport to share connection pool.
-		streamClient: &http.Client{
-			Timeout: 0,
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 20,
-				IdleConnTimeout:     90 * time.Second,
-			},
-		},
+		streamClient: &http.Client{Timeout: 0, Transport: transport},
 	}, nil
 }
 
@@ -259,6 +259,9 @@ func (p *ProxyServer) getAlistURL() string {
 
 // probeRemoteFileSize 尝试通过 HEAD 或 Range 请求获取远程文件总大小，失败返回 0
 func (p *ProxyServer) probeRemoteFileSize(targetURL string, headers http.Header) int64 {
+	if p.config != nil && !p.config.ProbeOnDownload {
+		return 0
+	}
 	// try HEAD first
 	req, err := http.NewRequest("HEAD", targetURL, nil)
 	if err == nil {
@@ -325,6 +328,114 @@ func (p *ProxyServer) probeRemoteFileSize(targetURL string, headers http.Header)
 	}
 
 	return 0
+}
+
+// processPropfindResponse 解析并替换 PROPFIND XML 中的 href/displayname，并缓存文件信息
+func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPath *EncryptPath) error {
+	dec := xml.NewDecoder(body)
+	enc := xml.NewEncoder(w)
+
+	inResponse := false
+	var curHref string
+	var curSize int64 = -1
+
+	for {
+		t, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		switch tok := t.(type) {
+		case xml.StartElement:
+			if strings.EqualFold(tok.Name.Local, "response") {
+				inResponse = true
+				curHref = ""
+				curSize = -1
+			}
+			if err := enc.EncodeToken(tok); err != nil {
+				return err
+			}
+
+			if inResponse && strings.EqualFold(tok.Name.Local, "href") {
+				t2, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				if cd, ok := t2.(xml.CharData); ok {
+					content := string(cd)
+					decodedPath, err := url.PathUnescape(content)
+					if err == nil {
+						curHref = decodedPath
+						fileName := path.Base(decodedPath)
+						if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
+							showName := ConvertShowName(encPath.Password, encPath.EncType, fileName)
+							if showName != fileName && !strings.HasPrefix(showName, "orig_") {
+								newPath := path.Join(path.Dir(decodedPath), showName)
+								content = (&url.URL{Path: newPath}).EscapedPath()
+							}
+						}
+					}
+					if err := enc.EncodeToken(xml.CharData([]byte(content))); err != nil {
+						return err
+					}
+				} else {
+					if err := enc.EncodeToken(t2); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+
+			if inResponse && strings.EqualFold(tok.Name.Local, "getcontentlength") {
+				t2, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				if cd, ok := t2.(xml.CharData); ok {
+					s := strings.TrimSpace(string(cd))
+					if s != "" {
+						if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+							curSize = v
+						}
+					}
+					if err := enc.EncodeToken(xml.CharData([]byte(s))); err != nil {
+						return err
+					}
+				} else {
+					if err := enc.EncodeToken(t2); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+
+		case xml.EndElement:
+			if err := enc.EncodeToken(tok); err != nil {
+				return err
+			}
+			if inResponse && strings.EqualFold(tok.Name.Local, "response") {
+				if curHref != "" {
+					name := path.Base(curHref)
+					isDir := false
+					size := curSize
+					if size <= 0 {
+						isDir = true
+						size = 0
+					}
+					p.fileCache.Store(curHref, &FileInfo{Name: name, Size: size, IsDir: isDir, Path: curHref})
+				}
+				inResponse = false
+			}
+		default:
+			if err := enc.EncodeToken(tok); err != nil {
+				return err
+			}
+		}
+	}
+	return enc.Flush()
 }
 
 // findEncryptPath 查找匹配的加密路径配置
@@ -1392,7 +1503,6 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 	// 5. 处理 PROPFIND 响应 (文件名解密)
 	if r.Method == "PROPFIND" && encPath != nil && encPath.EncName {
-		// We'll stream-parse the XML response and replace <href> and <displayname> contents safely.
 		// Remove Content-Length so Go will use chunked transfer when streaming the modified output.
 		for key, values := range resp.Header {
 			if strings.ToLower(key) == "content-length" {
@@ -1404,109 +1514,9 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(resp.StatusCode)
 
-		pr, pw := io.Pipe()
-		go func() {
-			defer pw.Close()
-			dec := xml.NewDecoder(resp.Body)
-			enc := xml.NewEncoder(pw)
-
-			inResponse := false
-			var curHref string
-			var curSize int64 = -1
-
-			for {
-				t, err := dec.Token()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					pw.CloseWithError(err)
-					return
-				}
-
-				switch tok := t.(type) {
-				case xml.StartElement:
-					// enter a response block
-					if strings.EqualFold(tok.Name.Local, "response") {
-						inResponse = true
-						curHref = ""
-						curSize = -1
-					}
-					enc.EncodeToken(tok)
-
-					// handle href: read next token and replace content if needed
-					if inResponse && strings.EqualFold(tok.Name.Local, "href") {
-						t2, err := dec.Token()
-						if err != nil {
-							pw.CloseWithError(err)
-							return
-						}
-						if cd, ok := t2.(xml.CharData); ok {
-							content := string(cd)
-							decodedPath, err := url.PathUnescape(content)
-							if err == nil {
-								curHref = decodedPath
-								fileName := path.Base(decodedPath)
-								if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
-									showName := ConvertShowName(encPath.Password, encPath.EncType, fileName)
-									if showName != fileName && !strings.HasPrefix(showName, "orig_") {
-										newPath := path.Join(path.Dir(decodedPath), showName)
-										content = (&url.URL{Path: newPath}).EscapedPath()
-									}
-								}
-							}
-							enc.EncodeToken(xml.CharData([]byte(content)))
-						} else {
-							enc.EncodeToken(t2)
-						}
-						continue
-					}
-
-					// handle getcontentlength inside propstat
-					if inResponse && strings.EqualFold(tok.Name.Local, "getcontentlength") {
-						t2, err := dec.Token()
-						if err != nil {
-							pw.CloseWithError(err)
-							return
-						}
-						if cd, ok := t2.(xml.CharData); ok {
-							s := strings.TrimSpace(string(cd))
-							if s != "" {
-								if v, err := strconv.ParseInt(s, 10, 64); err == nil {
-									curSize = v
-								}
-							}
-							enc.EncodeToken(xml.CharData([]byte(s)))
-						} else {
-							enc.EncodeToken(t2)
-						}
-						continue
-					}
-
-				case xml.EndElement:
-					enc.EncodeToken(tok)
-					if inResponse && strings.EqualFold(tok.Name.Local, "response") {
-						// cache file info if we have an href
-						if curHref != "" {
-							name := path.Base(curHref)
-							isDir := false
-							size := curSize
-							if size <= 0 {
-								isDir = true
-								size = 0
-							}
-							p.fileCache.Store(curHref, &FileInfo{Name: name, Size: size, IsDir: isDir, Path: curHref})
-						}
-						inResponse = false
-					}
-				default:
-					enc.EncodeToken(tok)
-				}
-			}
-			enc.Flush()
-		}()
-
-		io.Copy(w, pr)
+		if err := p.processPropfindResponse(resp.Body, w, encPath); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 
