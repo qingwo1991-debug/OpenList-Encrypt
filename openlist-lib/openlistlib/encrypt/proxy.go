@@ -165,11 +165,8 @@ func (p *ProxyServer) Start() error {
 
 	// 路由配置
 	mux.HandleFunc("/ping", p.handlePing)
-	mux.HandleFunc("/index", p.handleIndex) // 管理页面快捷入口
-	mux.HandleFunc("/public/", p.handleStatic)
-	mux.HandleFunc("/static/", p.handleStatic)
-	mux.HandleFunc("/favicon.ico", p.handleStatic)
-	mux.HandleFunc("/logo.png", p.handleStatic)
+	// 注意：不再提供加密代理的独立 WebUI（/ 或 /index）。
+	// 加解密相关配置统一由 App 前端（encrypt tab）通过 /enc-api/* 或 /api/encrypt/config 下发。
 	mux.HandleFunc("/enc-api/getAlistConfig", p.handleConfig)
 	mux.HandleFunc("/enc-api/saveAlistConfig", p.handleConfig)
 	mux.HandleFunc("/enc-api/getUserInfo", p.handleUserInfo)
@@ -184,7 +181,7 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/p/", p.handleDownload)
 	mux.HandleFunc("/dav/", p.handleWebDAV)
 	mux.HandleFunc("/dav", p.handleWebDAV)
-	mux.HandleFunc("/", p.handleRoot) // 根路径处理
+	// 不注册 "/"：让根路径默认 404，避免与 OpenList 管理页概念混淆
 
 	p.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", p.config.ProxyPort),
