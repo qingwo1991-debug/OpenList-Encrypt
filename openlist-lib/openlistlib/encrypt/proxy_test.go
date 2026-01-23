@@ -66,6 +66,45 @@ func TestUpdateConfigCompilesPattern(t *testing.T) {
 	}
 }
 
+// TestFindEncryptPath 测试通过 findEncryptPath 方法查找匹配的加密路径
+func TestFindEncryptPath(t *testing.T) {
+	cfg := &ProxyConfig{
+		AlistHost:  "localhost",
+		AlistPort:  80,
+		AlistHttps: false,
+		ProxyPort:  0,
+		EncryptPaths: []*EncryptPath{
+			{Path: "移动云盘156/encrypt/*", Password: "test123", EncType: EncTypeAESCTR, Enable: true},
+			{Path: "/天翼云盘156/encrypt/*", Password: "test456", EncType: EncTypeAESCTR, Enable: true},
+		},
+	}
+
+	p, err := NewProxyServer(cfg)
+	if err != nil {
+		t.Fatalf("NewProxyServer failed: %v", err)
+	}
+
+	tests := []struct {
+		filePath string
+		expected bool
+		desc     string
+	}{
+		{"/移动云盘156/encrypt/test.mp4", true, "带前导/访问不带前导/配置"},
+		{"移动云盘156/encrypt/test.mp4", true, "不带前导/访问不带前导/配置"},
+		{"/移动云盘156/encrypt/subdir/video.mkv", true, "子目录文件"},
+		{"/天翼云盘156/encrypt/test.mp4", true, "带前导/访问带前导/配置"},
+		{"/其他盘/encrypt/test.mp4", false, "不匹配的路径"},
+	}
+
+	for _, tc := range tests {
+		ep := p.findEncryptPath(tc.filePath)
+		found := ep != nil
+		if found != tc.expected {
+			t.Errorf("%s: findEncryptPath(%q) = %v, expected %v", tc.desc, tc.filePath, found, tc.expected)
+		}
+	}
+}
+
 func TestProcessPropfindResponse(t *testing.T) {
 	p := &ProxyServer{fileCache: sync.Map{}}
 

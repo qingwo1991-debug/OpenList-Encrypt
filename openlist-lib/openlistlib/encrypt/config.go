@@ -21,10 +21,11 @@ type ConfigManager struct {
 // DefaultConfig 默认配置
 func DefaultConfig() *ProxyConfig {
 	return &ProxyConfig{
-		AlistHost:  "127.0.0.1",
-		AlistPort:  5244,
-		AlistHttps: false,
-		ProxyPort:  5344,
+		AlistHost:       "127.0.0.1",
+		AlistPort:       5244,
+		AlistHttps:      false,
+		ProxyPort:       5344,
+		ProbeOnDownload: true, // 默认开启，确保能正确获取文件大小以解密
 		EncryptPaths: []*EncryptPath{
 			{
 				Path:     "encrypt_folder/*",
