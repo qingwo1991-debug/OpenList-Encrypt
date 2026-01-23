@@ -97,6 +97,12 @@ abstract class EncryptProxy {
   /// 设置代理端口
   void setEncryptProxyPort(int port);
   
+  /// 设置 H2C 开关（HTTP/2 Cleartext）
+  void setEncryptEnableH2C(bool enable);
+  
+  /// 获取 H2C 开关状态
+  bool getEncryptEnableH2C();
+  
   /// 添加加密路径
   void addEncryptPath(String path, String password, String encType, bool encName);
   

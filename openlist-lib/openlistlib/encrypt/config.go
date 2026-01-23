@@ -157,6 +157,15 @@ func (m *ConfigManager) SetProxyPort(port int) error {
 	return m.saveConfigLocked()
 }
 
+// SetEnableH2C 设置 H2C 开关
+func (m *ConfigManager) SetEnableH2C(enable bool) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	m.config.EnableH2C = enable
+	return m.saveConfigLocked()
+}
+
 // AddEncryptPath 添加加密路径
 func (m *ConfigManager) AddEncryptPath(pathVal, password string, encType EncryptionType, encName bool) error {
 	m.mutex.Lock()

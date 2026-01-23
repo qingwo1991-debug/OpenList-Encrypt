@@ -175,6 +175,24 @@ func (m *EncryptProxyManager) SetProxyPort(port int) error {
 	return err
 }
 
+// SetEnableH2C 设置 H2C 开关
+func (m *EncryptProxyManager) SetEnableH2C(enable bool) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	err := m.configManager.SetEnableH2C(enable)
+	if err == nil {
+		// H2C 修改需要重启代理才能生效
+		if m.proxyServer != nil && m.proxyServer.IsRunning() {
+			log.Info("H2C setting changed, restart proxy to apply")
+		}
+	}
+	return err
+}
+
 // AddEncryptPath 添加加密路径
 func (m *EncryptProxyManager) AddEncryptPath(path, password string, encType string, encName bool) error {
 	m.mutex.Lock()
@@ -303,6 +321,20 @@ func SetEncryptProxyPort(port int64) error {
 	return GetEncryptManager().SetProxyPort(int(port))
 }
 
+// SetEncryptEnableH2C 设置 H2C 开关（供 gomobile 调用）
+func SetEncryptEnableH2C(enable bool) error {
+	return GetEncryptManager().SetEnableH2C(enable)
+}
+
+// GetEncryptEnableH2C 获取 H2C 开关状态（供 gomobile 调用）
+func GetEncryptEnableH2C() bool {
+	config := GetEncryptManager().GetConfig()
+	if config == nil {
+		return false
+	}
+	return config.EnableH2C
+}
+
 // AddEncryptPathConfig 添加加密路径配置（供 gomobile 调用）
 func AddEncryptPathConfig(path, password, encType string, encName bool) error {
 	return GetEncryptManager().AddEncryptPath(path, password, encType, encName)
@@ -373,6 +405,7 @@ func GetEncryptConfigJson() string {
 		AlistPort    int        `json:"alistPort"`
 		AlistHttps   bool       `json:"alistHttps"`
 		ProxyPort    int        `json:"proxyPort"`
+		EnableH2C    bool       `json:"enableH2C"`
 		EncryptPaths []PathInfo `json:"encryptPaths"`
 	}
 
@@ -391,6 +424,7 @@ func GetEncryptConfigJson() string {
 		AlistPort:    config.AlistPort,
 		AlistHttps:   config.AlistHttps,
 		ProxyPort:    config.ProxyPort,
+		EnableH2C:    config.EnableH2C,
 		EncryptPaths: paths,
 	}
 

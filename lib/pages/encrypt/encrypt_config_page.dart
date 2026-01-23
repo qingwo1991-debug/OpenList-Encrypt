@@ -22,6 +22,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   // 代理端口
   final _proxyPortController = TextEditingController(text: '5344');
   
+  // H2C 开关（HTTP/2 Cleartext）
+  bool _enableH2C = false;
+  
   // 加密路径列表
   List<EncryptPathConfig> _encryptPaths = [];
   
@@ -71,6 +74,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           _alistPortController.text = (config['alistPort'] ?? 5244).toString();
           _alistHttps = config['alistHttps'] ?? false;
           _proxyPortController.text = (config['proxyPort'] ?? 5344).toString();
+          _enableH2C = config['enableH2C'] ?? false;
           
           // 解析加密路径列表
           final paths = config['encryptPaths'] as List<dynamic>?;
@@ -491,6 +495,19 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                       title: const Text('使用 HTTPS'),
                       value: _alistHttps,
                       onChanged: (value) => setState(() => _alistHttps = value),
+                    ),
+                    SwitchListTile(
+                      title: const Text('启用 H2C (HTTP/2 明文)'),
+                      subtitle: const Text('需要后端 OpenList 也开启 enable_h2c'),
+                      value: _enableH2C,
+                      onChanged: (value) async {
+                        setState(() => _enableH2C = value);
+                        try {
+                          await NativeBridge.encryptProxy.setEncryptEnableH2C(value);
+                        } catch (e) {
+                          debugPrint('Failed to set H2C: $e');
+                        }
+                      },
                     ),
                     
                     const SizedBox(height: 24),

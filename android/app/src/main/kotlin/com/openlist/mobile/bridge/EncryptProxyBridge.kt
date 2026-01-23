@@ -99,6 +99,25 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
         }
     }
     
+    override fun setEncryptEnableH2C(enable: Boolean) {
+        Log.d(TAG, "setEncryptEnableH2C: enable=$enable")
+        try {
+            Openlistlib.setEncryptEnableH2C(enable)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set H2C enable", e)
+            throw e
+        }
+    }
+    
+    override fun getEncryptEnableH2C(): Boolean {
+        return try {
+            Openlistlib.getEncryptEnableH2C()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get H2C enable", e)
+            false
+        }
+    }
+    
     override fun addEncryptPath(path: String, password: String, encType: String, encName: Boolean) {
         Log.d(TAG, "addEncryptPath: path=$path, encType=$encType, encName=$encName")
         try {
