@@ -98,6 +98,7 @@ type ProxyServer struct {
 	httpClient     *http.Client
 	streamClient   *http.Client
 	transport      *http.Transport
+	h2cTransport   *http2.Transport // H2C Transport (如果启用)
 	server         *http.Server
 	running        bool
 	mutex          sync.RWMutex
@@ -163,6 +164,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 			} else {
 				pattern = "^/?" + converted + "(/.*)?$"
 			}
+			log.Infof("Init path %s -> regex pattern: %s", ep.Path, pattern)
 			if reg, err := regexp.Compile(pattern); err == nil {
 				ep.regex = reg
 			} else {
@@ -180,6 +182,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		} else {
 			pattern = "^/?" + converted
 		}
+		log.Infof("Init path %s -> regex pattern: %s", ep.Path, pattern)
 		if reg, err := regexp.Compile(pattern); err == nil {
 			ep.regex = reg
 		} else {
@@ -207,12 +210,13 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	}
 
 	var httpClient, streamClient *http.Client
+	var h2cTransport *http2.Transport
 
 	// 如果启用 H2C，创建支持 H2C 的客户端
 	if config.EnableH2C {
 		log.Info("H2C (HTTP/2 Cleartext) enabled for backend connections")
 		// H2C Transport - 用于明文 HTTP/2
-		h2cTransport := &http2.Transport{
+		h2cTransport = &http2.Transport{
 			AllowHTTP: true, // 允许明文 HTTP
 			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 				// 对于 H2C，我们实际上是做普通的 TCP 连接
@@ -231,6 +235,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	server := &ProxyServer{
 		config:       config,
 		transport:    transport,
+		h2cTransport: h2cTransport,
 		httpClient:   httpClient,
 		streamClient: streamClient,
 		cleanupDone:  make(chan struct{}),
@@ -415,6 +420,16 @@ func (p *ProxyServer) Stop() error {
 		}
 	}
 
+	// 关闭 HTTP Transport 的连接池，确保重启时没有残留连接
+	if p.transport != nil {
+		p.transport.CloseIdleConnections()
+	}
+
+	// 关闭 H2C Transport 的连接池
+	if p.h2cTransport != nil {
+		p.h2cTransport.CloseIdleConnections()
+	}
+
 	p.running = false
 	log.Info("Encrypt proxy server stopped")
 	return nil
@@ -461,6 +476,7 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 			} else {
 				pattern = "^/?" + converted + "(/.*)?$"
 			}
+			log.Infof("Path %s -> regex pattern: %s", ep.Path, pattern)
 			if reg, err := regexp.Compile(pattern); err == nil {
 				ep.regex = reg
 			} else {
@@ -478,6 +494,7 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		} else {
 			pattern = "^/?" + converted
 		}
+		log.Infof("Path %s -> regex pattern: %s", ep.Path, pattern)
 		if reg, err := regexp.Compile(pattern); err == nil {
 			ep.regex = reg
 		} else {
@@ -687,7 +704,7 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
 
-	log.Infof("Checking encryption path for: %s", filePath)
+	log.Infof("Checking encryption path for: %q (len=%d)", filePath, len(filePath))
 
 	// 尝试 URL 解码，以防路径被编码
 	decodedPath, err := url.PathUnescape(filePath)
@@ -700,6 +717,7 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 			continue
 		}
 		if ep.regex != nil {
+			log.Debugf("Testing rule %q (regex: %s) against %q", ep.Path, ep.regex.String(), filePath)
 			if ep.regex.MatchString(filePath) {
 				log.Infof("Matched rule (raw): %s for %s", ep.Path, filePath)
 				return ep
@@ -709,12 +727,12 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 				return ep
 			}
 			// 更详细的 Debug 日志
-			log.Debugf("Rule %s (regex: %s) did not match %s or %s", ep.Path, ep.regex.String(), filePath, decodedPath)
+			log.Debugf("Rule %s (regex: %s) did not match %q or %q", ep.Path, ep.regex.String(), filePath, decodedPath)
 		} else {
 			log.Warnf("Rule %s has nil regex", ep.Path)
 		}
 	}
-	log.Infof("No encryption path matched for: %s (decoded: %s)", filePath, decodedPath)
+	log.Infof("No encryption path matched for: %q (decoded: %q)", filePath, decodedPath)
 	return nil
 }
 
@@ -1196,9 +1214,6 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 
 					log.Infof("Handling fs list for path: %s", dirPath)
 
-					// 查找加密路径配置
-					encPath := p.findEncryptPath(dirPath)
-
 					// 收集需要解密的文件
 					var decryptTasks []fileDecryptTask
 
@@ -1207,7 +1222,12 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 							name, _ := fileMap["name"].(string)
 							size, _ := fileMap["size"].(float64)
 							isDir, _ := fileMap["is_dir"].(bool)
+							
+							// 优先使用 API 返回的 path 字段，如果没有则使用 dirPath + name
 							filePath := path.Join(dirPath, name)
+							if apiPath, ok := fileMap["path"].(string); ok && apiPath != "" {
+								filePath = apiPath
+							}
 
 							// 缓存文件信息（使用带 TTL 的缓存）
 							p.storeFileCache(filePath, &FileInfo{
@@ -1217,13 +1237,17 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 								Path:  filePath,
 							})
 
+							// 为每个文件单独查找加密路径配置（与 alist-encrypt 行为一致）
+							fileEncPath := p.findEncryptPath(filePath)
+							
 							// 收集需要解密文件名的文件
-							if encPath != nil && encPath.EncName && !isDir {
+							if fileEncPath != nil && fileEncPath.EncName && !isDir {
 								decryptTasks = append(decryptTasks, fileDecryptTask{
 									index:    i,
 									fileMap:  fileMap,
 									name:     name,
 									filePath: filePath,
+									encPath:  fileEncPath, // 保存每个文件的加密配置
 								})
 							}
 						}
@@ -1233,11 +1257,11 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 					if len(decryptTasks) > 0 {
 						if len(decryptTasks) >= parallelDecryptThreshold {
 							// 使用并行解密
-							p.parallelDecryptFileNames(decryptTasks, encPath)
+							p.parallelDecryptFileNamesV2(decryptTasks)
 						} else {
 							// 串行解密（文件数少时开销更小）
 							for _, task := range decryptTasks {
-								showName := ConvertShowName(encPath.Password, encPath.EncType, task.name)
+								showName := ConvertShowName(task.encPath.Password, task.encPath.EncType, task.name)
 								if showName != task.name && !strings.HasPrefix(showName, "orig_") {
 									log.Debugf("Decrypt filename: %s -> %s", task.name, showName)
 								}
@@ -1266,7 +1290,7 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-// parallelDecryptFileNames 并行解密文件名
+// parallelDecryptFileNames 并行解密文件名（旧版本，使用统一的 encPath）
 func (p *ProxyServer) parallelDecryptFileNames(tasks []fileDecryptTask, encPath *EncryptPath) {
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, maxParallelDecrypt)
@@ -1288,12 +1312,38 @@ func (p *ProxyServer) parallelDecryptFileNames(tasks []fileDecryptTask, encPath 
 	wg.Wait()
 }
 
+// parallelDecryptFileNamesV2 并行解密文件名（新版本，每个文件使用自己的 encPath）
+func (p *ProxyServer) parallelDecryptFileNamesV2(tasks []fileDecryptTask) {
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, maxParallelDecrypt)
+
+	for _, task := range tasks {
+		wg.Add(1)
+		go func(t fileDecryptTask) {
+			defer wg.Done()
+			semaphore <- struct{}{}        // 获取信号量
+			defer func() { <-semaphore }() // 释放信号量
+
+			if t.encPath == nil {
+				return
+			}
+			showName := ConvertShowName(t.encPath.Password, t.encPath.EncType, t.name)
+			if showName != t.name && !strings.HasPrefix(showName, "orig_") {
+				log.Debugf("Parallel decrypt filename: %s -> %s", t.name, showName)
+			}
+			t.fileMap["name"] = showName
+		}(task)
+	}
+	wg.Wait()
+}
+
 // fileDecryptTask 文件解密任务
 type fileDecryptTask struct {
 	index    int
 	fileMap  map[string]interface{}
 	name     string
 	filePath string
+	encPath  *EncryptPath // 每个文件的加密配置
 }
 
 // handleFsGet 处理获取文件信息
