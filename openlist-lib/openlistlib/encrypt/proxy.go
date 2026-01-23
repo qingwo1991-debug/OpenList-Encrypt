@@ -86,17 +86,37 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	for _, ep := range config.EncryptPaths {
 		if ep.Path != "" {
 			// 转换简单通配符为正则表达式
-			pattern := ep.Path
+			raw := ep.Path
 			// 特殊处理 /* 结尾，使其匹配目录本身和子文件
-			if strings.HasSuffix(pattern, "/*") {
-				base := strings.TrimSuffix(pattern, "/*")
-				pattern = "^" + regexp.QuoteMeta(base) + "(/.*)?$"
-			} else {
-				pattern = strings.ReplaceAll(pattern, "*", ".*")
-				pattern = strings.ReplaceAll(pattern, "?", ".")
-				if !strings.HasPrefix(pattern, "^") {
-					pattern = "^" + pattern
+			if strings.HasSuffix(raw, "/*") {
+				base := strings.TrimSuffix(raw, "/*")
+				// 如果用户没有以 / 开头，允许可选的前导 /
+				if strings.HasPrefix(base, "/") {
+					pattern := "^" + regexp.QuoteMeta(base) + "(/.*)?$"
+					regex, err := regexp.Compile(pattern)
+					if err != nil {
+						log.Warnf("Invalid path pattern: %s, error: %v", ep.Path, err)
+						continue
+					}
+					ep.regex = regex
+					continue
 				}
+				pattern := "^/?" + regexp.QuoteMeta(base) + "(/.*)?$"
+				regex, err := regexp.Compile(pattern)
+				if err != nil {
+					log.Warnf("Invalid path pattern: %s, error: %v", ep.Path, err)
+					continue
+				}
+				ep.regex = regex
+				continue
+			}
+
+			// 普通通配符替换
+			pattern := strings.ReplaceAll(raw, "*", ".*")
+			pattern = strings.ReplaceAll(pattern, "?", ".")
+			// 如果没有以 ^ 开头，确保接受可选前导 /
+			if !strings.HasPrefix(pattern, "^") {
+				pattern = "^/?" + pattern
 			}
 
 			regex, err := regexp.Compile(pattern)
@@ -150,6 +170,8 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/enc-api/getAlistConfig", p.handleConfig)
 	mux.HandleFunc("/enc-api/saveAlistConfig", p.handleConfig)
 	mux.HandleFunc("/enc-api/getUserInfo", p.handleUserInfo)
+	// 兼容前端请求：统一的获取/保存配置接口
+	mux.HandleFunc("/api/encrypt/config", p.handleConfig)
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
 	mux.HandleFunc("/redirect/", p.handleRedirect)
 	mux.HandleFunc("/api/fs/list", p.handleFsList)
@@ -222,23 +244,37 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	for _, ep := range config.EncryptPaths {
 		log.Infof("Compiling regex for path: %s", ep.Path)
 		if ep.Path != "" {
-			pattern := ep.Path
-			if strings.HasSuffix(pattern, "/*") {
-				base := strings.TrimSuffix(pattern, "/*")
-				pattern = "^" + regexp.QuoteMeta(base) + "(/.*)?$"
-			} else {
-				pattern = strings.ReplaceAll(pattern, "*", ".*")
-				pattern = strings.ReplaceAll(pattern, "?", ".")
-				if !strings.HasPrefix(pattern, "^") {
-					pattern = "^" + pattern
+			raw := ep.Path
+			if strings.HasSuffix(raw, "/*") {
+				base := strings.TrimSuffix(raw, "/*")
+				if strings.HasPrefix(base, "/") {
+					pattern := "^" + regexp.QuoteMeta(base) + "(/.*)?$"
+					if reg, err := regexp.Compile(pattern); err == nil {
+						ep.regex = reg
+					} else {
+						log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
+					}
+					continue
 				}
-			}
-			reg, err := regexp.Compile(pattern)
-			if err != nil {
-				log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
+				pattern := "^/?" + regexp.QuoteMeta(base) + "(/.*)?$"
+				if reg, err := regexp.Compile(pattern); err == nil {
+					ep.regex = reg
+				} else {
+					log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
+				}
 				continue
 			}
-			ep.regex = reg
+
+			pattern := strings.ReplaceAll(raw, "*", ".*")
+			pattern = strings.ReplaceAll(pattern, "?", ".")
+			if !strings.HasPrefix(pattern, "^") {
+				pattern = "^/?" + pattern
+			}
+			if reg, err := regexp.Compile(pattern); err == nil {
+				ep.regex = reg
+			} else {
+				log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
+			}
 		}
 	}
 
@@ -607,12 +643,11 @@ func (p *ProxyServer) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 
 // handleConfig 处理配置 API
 func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
-	// 根据路径判断是获取还是保存，或者通过 Method（但 getAlistConfig 用的是 POST）
-	if strings.Contains(r.URL.Path, "getAlistConfig") {
-		// 转换为前端期望的格式 (alist-encrypt 兼容)
+	// 支持 GET 返回当前配置，支持 POST 保存配置（兼容前端多种请求场景）
+	if r.Method == http.MethodGet {
+		// 转换为前端期望的格式
 		passwdList := make([]map[string]interface{}, 0)
 		for _, ep := range p.config.EncryptPaths {
-			// 转换加密类型
 			encType := string(ep.EncType)
 			if encType == "aes-ctr" {
 				encType = "aesctr"
@@ -621,142 +656,228 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			}
 
 			passwdList = append(passwdList, map[string]interface{}{
-				"encPath":  []string{ep.Path}, // 前端期望数组
-				"password": ep.Password,       // 返回密码以便前端回显
+				"encPath":  []string{ep.Path},
+				"password": ep.Password,
 				"encType":  encType,
 				"encName":  ep.EncName,
 				"enable":   ep.Enable,
-				"describe": "", // Go配置中没有备注字段，留空
 			})
 		}
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 200,
 			"data": map[string]interface{}{
-				"alistHost":  p.config.AlistHost,
-				"alistPort":  p.config.AlistPort,
-				"https":      p.config.AlistHttps,
-				"proxyPort":  p.config.ProxyPort,
-				"passwdList": passwdList,
+				"alistHost":       p.config.AlistHost,
+				"alistPort":       p.config.AlistPort,
+				"https":           p.config.AlistHttps,
+				"proxyPort":       p.config.ProxyPort,
+				"passwdList":      passwdList,
+				"probeOnDownload": p.config.ProbeOnDownload,
 			},
 		})
 		return
 	}
 
-	if strings.Contains(r.URL.Path, "saveAlistConfig") {
-		// 解析前端发来的配置
-		var reqData struct {
-			AlistHost  string `json:"alistHost"`
-			AlistPort  string `json:"alistPort"` // 前端可能是字符串
-			Https      bool   `json:"https"`
-			ProxyPort  string `json:"proxyPort"` // 前端可能是字符串
-			PasswdList []struct {
-				EncPath  interface{} `json:"encPath"` // 可能是 string 或 []string
-				Password string      `json:"password"`
-				EncType  string      `json:"encType"`
-				EncName  bool        `json:"encName"`
-				Enable   bool        `json:"enable"`
-			} `json:"passwdList"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
+	if r.Method == http.MethodPost {
+		// 尝试解析为通用保存结构：优先处理 encryptPaths（前端路径保存），其次处理 saveAlistConfig 兼容格式
+		var bodyMap map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&bodyMap); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		p.mutex.Lock()
-		p.config.AlistHost = reqData.AlistHost
-		if port, err := strconv.Atoi(reqData.AlistPort); err == nil {
-			p.config.AlistPort = port
-		}
-		p.config.AlistHttps = reqData.Https
-		if port, err := strconv.Atoi(reqData.ProxyPort); err == nil {
-			p.config.ProxyPort = port
-		}
-
-		// 重建 EncryptPaths
-		var newPaths []*EncryptPath
-		for _, item := range reqData.PasswdList {
-			// 处理 encType 转换
-			var encType EncryptionType
-			switch item.EncType {
-			case "aesctr":
-				encType = EncTypeAESCTR
-			case "rc4":
-				encType = EncTypeRC4
-			case "mix":
-				encType = EncTypeMix
-			default:
-				encType = EncryptionType(item.EncType)
+		// 更新 ProbeOnDownload 如果存在
+		if v, ok := bodyMap["probeOnDownload"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.ProbeOnDownload = b
+				p.mutex.Unlock()
 			}
+		}
 
-			// 处理 encPath (支持逗号分隔字符串或数组)
-			var paths []string
-			switch v := item.EncPath.(type) {
+		// 更新 Alist / Proxy 基本配置（如果前端提交）
+		if v, ok := bodyMap["alistHost"]; ok {
+			if s, ok2 := v.(string); ok2 {
+				p.mutex.Lock()
+				p.config.AlistHost = s
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["alistPort"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.AlistPort = int(vt)
+				p.mutex.Unlock()
 			case string:
-				// 逗号分隔
-				parts := strings.Split(v, ",")
-				for _, part := range parts {
-					if strings.TrimSpace(part) != "" {
-						paths = append(paths, strings.TrimSpace(part))
-					}
+				if port, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.AlistPort = port
+					p.mutex.Unlock()
 				}
-			case []interface{}:
-				for _, p := range v {
-					if s, ok := p.(string); ok && strings.TrimSpace(s) != "" {
-						paths = append(paths, strings.TrimSpace(s))
-					}
-				}
-			}
-
-			// 为每个路径创建 Entry
-			for _, pathStr := range paths {
-				pwd := item.Password
-
-				epa := &EncryptPath{
-					Path:     pathStr,
-					Password: pwd,
-					EncType:  encType,
-					EncName:  item.EncName,
-					Enable:   item.Enable,
-				}
-				newPaths = append(newPaths, epa)
 			}
 		}
-		p.config.EncryptPaths = newPaths
-
-		// Re-compile regex
-		for _, ep := range p.config.EncryptPaths {
-			if ep.Path != "" {
-				pattern := ep.Path
-				if strings.HasSuffix(pattern, "/*") {
-					base := strings.TrimSuffix(pattern, "/*")
-					pattern = "^" + regexp.QuoteMeta(base) + "(/.*)?$"
-				} else {
-					pattern = strings.ReplaceAll(pattern, "*", ".*")
-					pattern = strings.ReplaceAll(pattern, "?", ".")
-					if !strings.HasPrefix(pattern, "^") {
-						pattern = "^" + pattern
-					}
-				}
-				reg, err := regexp.Compile(pattern)
-				if err != nil {
-					log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
-					continue
-				}
-				ep.regex = reg
+		if v, ok := bodyMap["alistHttps"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.AlistHttps = b
+				p.mutex.Unlock()
 			}
 		}
-		p.mutex.Unlock()
+		if v, ok := bodyMap["proxyPort"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.ProxyPort = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if port, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.ProxyPort = port
+					p.mutex.Unlock()
+				}
+			}
+		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"code":    200,
-			"message": "Config updated",
-		})
+		// 如果前端直接提交 encryptPaths（来自页面保存路径）
+		if v, ok := bodyMap["encryptPaths"]; ok {
+			if arr, ok2 := v.([]interface{}); ok2 {
+				var newPaths []*EncryptPath
+				for _, item := range arr {
+					if m, ok3 := item.(map[string]interface{}); ok3 {
+						pathStr, _ := m["path"].(string)
+						pwd, _ := m["password"].(string)
+						encTypeStr, _ := m["encType"].(string)
+						encName, _ := m["encName"].(bool)
+						enable, okEnable := m["enable"].(bool)
+						if !okEnable {
+							enable = true
+						}
+						var encType EncryptionType
+						switch encTypeStr {
+						case "aes-ctr", "aesctr":
+							encType = EncTypeAESCTR
+						case "rc4md5", "rc4":
+							encType = EncTypeRC4
+						case "mix":
+							encType = EncTypeMix
+						default:
+							encType = EncryptionType(encTypeStr)
+						}
+						newPaths = append(newPaths, &EncryptPath{Path: pathStr, Password: pwd, EncType: encType, EncName: encName, Enable: enable})
+					}
+				}
+				// assign and compile regex
+				p.mutex.Lock()
+				p.config.EncryptPaths = newPaths
+				for _, ep := range p.config.EncryptPaths {
+					if ep.Path != "" {
+						pattern := ep.Path
+						if strings.HasSuffix(pattern, "/*") {
+							base := strings.TrimSuffix(pattern, "/*")
+							pattern = "^" + regexp.QuoteMeta(base) + "(/.*)?$"
+						} else {
+							pattern = strings.ReplaceAll(pattern, "*", ".*")
+							pattern = strings.ReplaceAll(pattern, "?", ".")
+							if !strings.HasPrefix(pattern, "^") {
+								pattern = "^" + pattern
+							}
+						}
+						if reg, err := regexp.Compile(pattern); err == nil {
+							ep.regex = reg
+						}
+					}
+				}
+				p.mutex.Unlock()
+			}
+		}
+
+		// 兼容旧的 saveAlistConfig 格式（passwdList 等）
+		if v, ok := bodyMap["passwdList"]; ok {
+			if arr, ok2 := v.([]interface{}); ok2 {
+				var newPaths []*EncryptPath
+				for _, item := range arr {
+					if m, ok3 := item.(map[string]interface{}); ok3 {
+						// encPath may be array or string
+						if epv, ok4 := m["encPath"]; ok4 {
+							switch vv := epv.(type) {
+							case string:
+								parts := strings.Split(vv, ",")
+								for _, pstr := range parts {
+									pstr = strings.TrimSpace(pstr)
+									if pstr == "" {
+										continue
+									}
+									pwd, _ := m["password"].(string)
+									encTypeStr, _ := m["encType"].(string)
+									encName, _ := m["encName"].(bool)
+									var encType EncryptionType
+									switch encTypeStr {
+									case "aesctr":
+										encType = EncTypeAESCTR
+									case "rc4":
+										encType = EncTypeRC4
+									case "mix":
+										encType = EncTypeMix
+									default:
+										encType = EncryptionType(encTypeStr)
+									}
+									newPaths = append(newPaths, &EncryptPath{Path: pstr, Password: pwd, EncType: encType, EncName: encName, Enable: true})
+								}
+							case []interface{}:
+								for _, epp := range vv {
+									if s, ok5 := epp.(string); ok5 {
+										pwd, _ := m["password"].(string)
+										encTypeStr, _ := m["encType"].(string)
+										encName, _ := m["encName"].(bool)
+										var encType EncryptionType
+										switch encTypeStr {
+										case "aesctr":
+											encType = EncTypeAESCTR
+										case "rc4":
+											encType = EncTypeRC4
+										case "mix":
+											encType = EncTypeMix
+										default:
+											encType = EncryptionType(encTypeStr)
+										}
+										newPaths = append(newPaths, &EncryptPath{Path: s, Password: pwd, EncType: encType, EncName: encName, Enable: true})
+									}
+								}
+							}
+						}
+					}
+				}
+				p.mutex.Lock()
+				p.config.EncryptPaths = newPaths
+				// compile regex
+				for _, ep := range p.config.EncryptPaths {
+					if ep.Path != "" {
+						pattern := ep.Path
+						if strings.HasSuffix(pattern, "/*") {
+							base := strings.TrimSuffix(pattern, "/*")
+							pattern = "^" + regexp.QuoteMeta(base) + "(/.*)?$"
+						} else {
+							pattern = strings.ReplaceAll(pattern, "*", ".*")
+							pattern = strings.ReplaceAll(pattern, "?", ".")
+							if !strings.HasPrefix(pattern, "^") {
+								pattern = "^" + pattern
+							}
+						}
+						if reg, err := regexp.Compile(pattern); err == nil {
+							ep.regex = reg
+						}
+					}
+				}
+				p.mutex.Unlock()
+			}
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "message": "Config updated"})
 		return
 	}
 
-	http.Error(w, "Method not allowed or Unknown action", http.StatusNotFound)
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
 // handleRedirect 处理重定向下载
