@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -327,12 +328,16 @@ func EncodeName(password string, encType EncryptionType, plainName string) strin
 	// 添加 CRC6 校验位
 	crc6Bit := crc6.Checksum([]byte(encodeName + passwdOutward))
 	crc6Check := MixBase64GetSourceChar(int(crc6Bit))
-	return encodeName + string(crc6Check)
+	result := encodeName + string(crc6Check)
+	log.Debugf("EncodeName: password=%q, encType=%q, plainName=%q -> passwdOutward=%q, encoded=%q, crc6=%d, result=%q",
+		password, encType, plainName, passwdOutward, encodeName, crc6Bit, result)
+	return result
 }
 
 // DecodeName 使用 MixBase64 解码文件名（兼容 alist-encrypt）
 func DecodeName(password string, encType EncryptionType, encodedName string) string {
 	if len(encodedName) < 2 {
+		log.Debugf("DecodeName: encodedName too short: %q", encodedName)
 		return ""
 	}
 
@@ -342,52 +347,50 @@ func DecodeName(password string, encType EncryptionType, encodedName string) str
 	// 验证 CRC6
 	subEncName := encodedName[:len(encodedName)-1]
 	crc6Bit := crc6.Checksum([]byte(subEncName + passwdOutward))
-	if MixBase64GetSourceChar(int(crc6Bit)) != crc6Check {
+	expectedCrc6Check := MixBase64GetSourceChar(int(crc6Bit))
+	if expectedCrc6Check != crc6Check {
+		log.Debugf("DecodeName: CRC6 mismatch for %q: expected %c, got %c (passwdOutward=%q)", 
+			encodedName, expectedCrc6Check, crc6Check, passwdOutward)
 		return ""
 	}
 
 	mix64 := NewMixBase64(passwdOutward)
 	decoded, err := mix64.Decode(subEncName)
 	if err != nil {
-		// Log error if needed
+		log.Debugf("DecodeName: Decode failed for %q: %v", subEncName, err)
 		return ""
 	}
 
-	return string(decoded)
+	result := string(decoded)
+	log.Debugf("DecodeName: %q -> %q (passwdOutward=%q)", encodedName, result, passwdOutward)
+	return result
 }
 
 // ConvertRealName 将显示名转换为真实加密名
 func ConvertRealName(password string, encType EncryptionType, pathText string) string {
 	fileName := path.Base(pathText)
+	log.Debugf("ConvertRealName: pathText=%q, fileName=%q", pathText, fileName)
 
 	// 检查是否有 orig_ 前缀（表示原始未加密文件）
+	// 这与 alist-encrypt 的行为一致
 	if strings.HasPrefix(fileName, "orig_") {
-		return strings.TrimPrefix(fileName, "orig_")
+		result := strings.TrimPrefix(fileName, "orig_")
+		log.Debugf("ConvertRealName: has orig_ prefix, returning %q", result)
+		return result
 	}
 
 	ext := path.Ext(fileName)
-	// 为了兼容 Node.js 逻辑，对完整文件名加密
-	// 但仍需注意 URL 解码。这里先解码 fileName
+	// URL 解码文件名
 	if decoded, err := url.PathUnescape(fileName); err == nil {
 		fileName = decoded
 	}
 
-	// 防二次加密检查：如果已经是有效密文（例如列目录时未解密成功导致客户端发来密文），则不再加密
-	// 尝试去掉后缀后解码（因为加密后的文件名是 [Enc].ext）
-	// 注意：这里的 ext 来自 fileName。如果是 [Enc].ext，ext 就是 .ext。
-	// DecodeName(strings.TrimSuffix(fileName, ext))
-	// 但是要小心误判。我们可以二次验证：Encode(Decode(X)) == X
-	potentialCipher := strings.TrimSuffix(fileName, ext)
-	if decodedName := DecodeName(password, encType, potentialCipher); decodedName != "" {
-		// 再次加密验证，确保是真正的密文
-		// 注意：Node.js 逻辑 Encode 返回的是不带 ext 的部分
-		if EncodeName(password, encType, decodedName) == potentialCipher {
-			return fileName // 确实是密文，直接返回原名
-		}
-	}
-
+	// 直接加密完整文件名（含扩展名），然后再加扩展名
+	// 这与 alist-encrypt 的 convertRealName 逻辑完全一致
 	encName := EncodeName(password, encType, fileName)
-	return encName + ext
+	result := encName + ext
+	log.Debugf("ConvertRealName: fileName=%q, ext=%q, encName=%q, result=%q", fileName, ext, encName, result)
+	return result
 }
 
 // ConvertShowName 将加密名转换为显示名
@@ -404,13 +407,16 @@ func ConvertShowName(password string, encType EncryptionType, pathText string) s
 	// 尝试解码
 	showName := DecodeName(password, encType, encName)
 	if showName == "" {
-		// 解码失败（可能是明文目录，或者损坏的密文）
-		// 直接返回原名，不加 orig_ 前缀，避免目录显示异常
-		// 只有当明确是有 orig_ 前缀的文件被请求时，ConvertRealName 才会处理它
-		return fileName
+		// 解码失败（可能是明文文件或损坏的密文）
+		// 添加 orig_ 前缀，这样 ConvertRealName 就知道这是未加密的文件名，不需要再次加密
+		// 这与 alist-encrypt 的行为一致
+		result := "orig_" + fileName
+		log.Debugf("ConvertShowName: decode failed for %q, returning %q", encName, result)
+		return result
 	}
 
 	// Node.js 逻辑中，加密的是完整文件名（含后缀），且解密后不再附加后缀
+	log.Debugf("ConvertShowName: %q (ext=%q, encName=%q) -> %q", pathText, ext, encName, showName)
 	return showName
 }
 

@@ -144,9 +144,9 @@ func TestProcessPropfindResponse(t *testing.T) {
 	if v, ok := p.fileCache.Load(rawHref); !ok {
 		t.Fatalf("expected file info cached for %s", rawHref)
 	} else {
-		fi := v.(*FileInfo)
-		if fi.Size != 12345 {
-			t.Fatalf("expected size 12345, got %d", fi.Size)
+		fi := v.(*CachedFileInfo)
+		if fi.Info.Size != 12345 {
+			t.Fatalf("expected size 12345, got %d", fi.Info.Size)
 		}
 	}
 }

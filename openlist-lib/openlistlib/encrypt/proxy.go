@@ -173,14 +173,33 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 			continue
 		}
 
+		// 处理以 / 结尾的目录匹配（与 /* 类似，匹配目录及其子路径）
+		if strings.HasSuffix(raw, "/") {
+			base := strings.TrimSuffix(raw, "/")
+			converted := wildcardToRegex(base)
+			var pattern string
+			if strings.HasPrefix(base, "/") {
+				pattern = "^" + converted + "(/.*)?$"
+			} else {
+				pattern = "^/?" + converted + "(/.*)?$"
+			}
+			log.Infof("Init path %s -> regex pattern: %s", ep.Path, pattern)
+			if reg, err := regexp.Compile(pattern); err == nil {
+				ep.regex = reg
+			} else {
+				log.Warnf("Invalid path pattern: %s, error: %v", ep.Path, err)
+			}
+			continue
+		}
+
 		converted := wildcardToRegex(raw)
 		var pattern string
 		if strings.HasPrefix(raw, "^") {
 			pattern = converted
 		} else if strings.HasPrefix(raw, "/") {
-			pattern = "^" + converted
+			pattern = "^" + converted + "(/.*)?$"
 		} else {
-			pattern = "^/?" + converted
+			pattern = "^/?" + converted + "(/.*)?$"
 		}
 		log.Infof("Init path %s -> regex pattern: %s", ep.Path, pattern)
 		if reg, err := regexp.Compile(pattern); err == nil {
@@ -224,8 +243,23 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 				return d.DialContext(ctx, network, addr)
 			},
 		}
-		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: h2cTransport}
-		streamClient = &http.Client{Timeout: 0, Transport: h2cTransport}
+		
+		// 测试 H2C 连接是否可用
+		testClient := &http.Client{Timeout: 5 * time.Second, Transport: h2cTransport}
+		testURL := fmt.Sprintf("http://%s:%d/ping", config.AlistHost, config.AlistPort)
+		resp, err := testClient.Get(testURL)
+		if err != nil {
+			log.Warnf("H2C connection test failed: %v, falling back to HTTP/1.1", err)
+			// H2C 连接失败，回退到 HTTP/1.1
+			h2cTransport = nil
+			httpClient = &http.Client{Timeout: 30 * time.Second, Transport: transport}
+			streamClient = &http.Client{Timeout: 0, Transport: transport}
+		} else {
+			resp.Body.Close()
+			log.Info("H2C connection test successful")
+			httpClient = &http.Client{Timeout: 30 * time.Second, Transport: h2cTransport}
+			streamClient = &http.Client{Timeout: 0, Transport: h2cTransport}
+		}
 	} else {
 		// 标准 HTTP/1.1 或 HTTP/2 over TLS
 		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: transport}
@@ -704,7 +738,7 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
 
-	log.Infof("Checking encryption path for: %q (len=%d)", filePath, len(filePath))
+	log.Debugf("Checking encryption path for: %q (len=%d)", filePath, len(filePath))
 
 	// 尝试 URL 解码，以防路径被编码
 	decodedPath, err := url.PathUnescape(filePath)
@@ -719,20 +753,18 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 		if ep.regex != nil {
 			log.Debugf("Testing rule %q (regex: %s) against %q", ep.Path, ep.regex.String(), filePath)
 			if ep.regex.MatchString(filePath) {
-				log.Infof("Matched rule (raw): %s for %s", ep.Path, filePath)
+				log.Infof("Matched rule: %s for %s (encType=%q, encName=%v)", ep.Path, filePath, ep.EncType, ep.EncName)
 				return ep
 			}
 			if filePath != decodedPath && ep.regex.MatchString(decodedPath) {
-				log.Infof("Matched rule (decoded): %s for %s", ep.Path, decodedPath)
+				log.Infof("Matched rule (decoded): %s for %s (encType=%q, encName=%v)", ep.Path, decodedPath, ep.EncType, ep.EncName)
 				return ep
 			}
-			// 更详细的 Debug 日志
-			log.Debugf("Rule %s (regex: %s) did not match %q or %q", ep.Path, ep.regex.String(), filePath, decodedPath)
 		} else {
 			log.Warnf("Rule %s has nil regex", ep.Path)
 		}
 	}
-	log.Infof("No encryption path matched for: %q (decoded: %q)", filePath, decodedPath)
+	log.Debugf("No encryption path matched for: %q (decoded: %q)", filePath, decodedPath)
 	return nil
 }
 

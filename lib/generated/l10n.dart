@@ -1978,6 +1978,56 @@ class S {
       args: [],
     );
   }
+
+  /// `导出日志`
+  String get exportLogs {
+    return Intl.message(
+      '导出日志',
+      name: 'exportLogs',
+      desc: '',
+      args: [],
+    );
+  }
+
+  /// `导出所有日志到文件`
+  String get exportLogsDesc {
+    return Intl.message(
+      '导出所有日志到文件',
+      name: 'exportLogsDesc',
+      desc: '',
+      args: [],
+    );
+  }
+
+  /// `暂无日志可导出`
+  String get noLogsToExport {
+    return Intl.message(
+      '暂无日志可导出',
+      name: 'noLogsToExport',
+      desc: '',
+      args: [],
+    );
+  }
+
+  /// `日志导出成功`
+  String get logsExportSuccess {
+    return Intl.message(
+      '日志导出成功',
+      name: 'logsExportSuccess',
+      desc: '',
+      args: [],
+    );
+  }
+
+  /// `日志导出失败`
+  String get logsExportFailed {
+    return Intl.message(
+      '日志导出失败',
+      name: 'logsExportFailed',
+      desc: '',
+      args: [],
+    );
+  }
 }
 
 class AppLocalizationDelegate extends LocalizationsDelegate<S> {
