@@ -848,8 +848,13 @@ func (p *ProxyServer) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"code": 200,
 		"data": map[string]interface{}{
-			"username": "admin",
-			"roleId":   "[13]",
+			"userInfo": map[string]interface{}{
+				"username": "admin",
+				"avatar":   "",
+			},
+			"roles":   []string{"admin"},
+			"codes":   []string{},
+			"version": "0.1.0",
 		},
 	})
 }
