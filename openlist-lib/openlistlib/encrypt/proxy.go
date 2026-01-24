@@ -243,7 +243,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 				return d.DialContext(ctx, network, addr)
 			},
 		}
-		
+
 		// 测试 H2C 连接是否可用
 		testClient := &http.Client{Timeout: 5 * time.Second, Transport: h2cTransport}
 		testURL := fmt.Sprintf("http://%s:%d/ping", config.AlistHost, config.AlistPort)
@@ -668,11 +668,11 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 							// 仅对“看起来像文件”的名称进行解密（与 alist-encrypt 行为一致，避免误判目录）
 							ext := path.Ext(fileName)
 							if ext != "" {
-							showName := ConvertShowName(encPath.Password, encPath.EncType, fileName)
-							if showName != fileName && !strings.HasPrefix(showName, "orig_") {
-								newPath := path.Join(path.Dir(decodedPath), showName)
-								content = (&url.URL{Path: newPath}).EscapedPath()
-							}
+								showName := ConvertShowName(encPath.Password, encPath.EncType, fileName)
+								if showName != fileName && !strings.HasPrefix(showName, "orig_") {
+									newPath := path.Join(path.Dir(decodedPath), showName)
+									content = (&url.URL{Path: newPath}).EscapedPath()
+								}
 							}
 						}
 					}
@@ -1233,7 +1233,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	decode := r.URL.Query().Get("decode")
 	if decode != "0" && info.PasswdInfo != nil {
 		fileSize := info.FileSize
-		
+
 		// 如果 fileSize 为 0，尝试从响应头获取
 		if fileSize == 0 {
 			// 首先尝试从 Content-Range 获取总大小 (格式: bytes start-end/total)
@@ -1382,7 +1382,7 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 							name, _ := fileMap["name"].(string)
 							size, _ := fileMap["size"].(float64)
 							isDir, _ := fileMap["is_dir"].(bool)
-							
+
 							// 优先使用 API 返回的 path 字段，如果没有则使用 dirPath + name
 							filePath := path.Join(dirPath, name)
 							if apiPath, ok := fileMap["path"].(string); ok && apiPath != "" {
@@ -1399,7 +1399,7 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 
 							// 为每个文件单独查找加密路径配置（与 alist-encrypt 行为一致）
 							fileEncPath := p.findEncryptPath(filePath)
-							
+
 							// 收集需要解密文件名的文件
 							if fileEncPath != nil && fileEncPath.EncName && !isDir {
 								decryptTasks = append(decryptTasks, fileDecryptTask{
