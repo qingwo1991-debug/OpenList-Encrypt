@@ -27,6 +27,11 @@ func TestFilenameDecryptCompat(t *testing.T) {
 			cipherName: "87kdQg0Y5VOWIUjiGUwG5GMHOZHtage-r",
 			plainName:  "hhd800.com@YMDS-195.mp4",
 		},
+		// 用户提供的谷歌云盘测试用例
+		{
+			cipherName: "cGlHlVLp5VOWIUjGG3H~5GUbQmRIO7tF5V+AFX--r",
+			plainName:  "169bbs.com@SONE-519_[4k].mkv",
+		},
 	}
 
 	// 先打印 passwdOutward

@@ -1782,17 +1782,48 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 	// 2. 转换请求路径中的文件名 (Client明文 -> Server密文)
 	targetURLPath := r.URL.Path
-	// 对需要转换文件名的方法进行处理
-	// PROPFIND 分两种情况：
-	//   - 目录 PROPFIND（路径以 / 结尾或没有扩展名）：不需要转换
-	//   - 文件 PROPFIND（路径有文件扩展名）：需要转换，因为播放器会用明文文件名请求文件元数据
-	// node.js 版只转换 GET, PUT, DELETE。我们加上 COPY, MOVE, HEAD, POST，以及文件的 PROPFIND
 	fileName := path.Base(filePath)
-	isFileRequest := fileName != "/" && fileName != "." && path.Ext(fileName) != ""
-	
+
+	// 与 alist-encrypt 一致的逻辑：
+	// - GET, PUT, DELETE, COPY, MOVE, HEAD, POST: 直接转换文件名
+	// - PROPFIND: 只有当文件缓存中存在且不是目录时才转换
+	//   这是因为 PROPFIND 既可能是请求目录列表，也可能是请求单个文件元数据
+	//   alist-encrypt 使用 getFileInfo 查询缓存来判断
 	methodNeedConvert := r.Method == "GET" || r.Method == "PUT" || r.Method == "DELETE" ||
-		r.Method == "COPY" || r.Method == "MOVE" || r.Method == "HEAD" || r.Method == "POST" ||
-		(r.Method == "PROPFIND" && isFileRequest) // 文件的 PROPFIND 也需要转换
+		r.Method == "COPY" || r.Method == "MOVE" || r.Method == "HEAD" || r.Method == "POST"
+
+	// PROPFIND 特殊处理：检查文件缓存来判断是否是文件
+	if r.Method == "PROPFIND" && encPath != nil && encPath.EncName {
+		// 先计算加密后的路径用于缓存查找
+		// alist-encrypt: const realName = convertRealName(passwdInfo.password, passwdInfo.encType, url)
+		//                const sourceUrl = path.dirname(url) + '/' + realName
+		//                const sourceFileInfo = await getFileInfo(sourceUrl)
+		if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
+			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			// 缓存中存储的是完整路径（包含 /dav 前缀），所以查找时也用完整路径
+			sourceUrl := path.Join(path.Dir(filePath), realName)
+			if !strings.HasPrefix(sourceUrl, "/") {
+				sourceUrl = "/" + sourceUrl
+			}
+			// 检查缓存：如果缓存中存在且不是目录，才转换 URL
+			if cached, ok := p.loadFileCache(sourceUrl); ok && !cached.IsDir {
+				log.Debugf("PROPFIND: found file in cache: %s (isDir=%v)", sourceUrl, cached.IsDir)
+				methodNeedConvert = true
+			} else {
+				// 也尝试不带 /dav 前缀的路径
+				sourceUrlNoPrefix := path.Join(path.Dir(matchPath), realName)
+				if !strings.HasPrefix(sourceUrlNoPrefix, "/") {
+					sourceUrlNoPrefix = "/" + sourceUrlNoPrefix
+				}
+				if cached, ok := p.loadFileCache(sourceUrlNoPrefix); ok && !cached.IsDir {
+					log.Debugf("PROPFIND: found file in cache (no /dav): %s (isDir=%v)", sourceUrlNoPrefix, cached.IsDir)
+					methodNeedConvert = true
+				} else {
+					log.Debugf("PROPFIND: not in cache or is dir: %s or %s", sourceUrl, sourceUrlNoPrefix)
+				}
+			}
+		}
+	}
 
 	if methodNeedConvert && encPath != nil && encPath.EncName {
 		if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
@@ -1802,8 +1833,6 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			if !strings.HasPrefix(newPath, "/") {
 				newPath = "/" + newPath
 			}
-			// 特殊处理：如果是根路径的子文件，path.Dir可能返回 /dav，Join后是 /dav/xxx
-			// 如果是 /dav/foo.txt -> Dir: /dav -> Join: /dav/xxx.txt
 			targetURLPath = newPath
 			log.Debugf("Convert real name URL (%s): %s -> %s", r.Method, r.URL.Path, targetURLPath)
 		}
