@@ -385,6 +385,14 @@ func ConvertRealName(password string, encType EncryptionType, pathText string) s
 		fileName = decoded
 	}
 
+	// 检查文件名是否已经是加密名（能被成功解码）
+	// 如果能解码，说明它已经是加密名，不需要再加密
+	nameWithoutExt := strings.TrimSuffix(fileName, ext)
+	if DecodeName(password, encType, nameWithoutExt) != "" {
+		log.Debugf("ConvertRealName: %q is already encrypted, returning as-is", fileName)
+		return fileName
+	}
+
 	// 直接加密完整文件名（含扩展名），然后再加扩展名
 	// 这与 alist-encrypt 的 convertRealName 逻辑完全一致
 	encName := EncodeName(password, encType, fileName)

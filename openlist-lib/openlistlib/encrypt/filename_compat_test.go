@@ -226,3 +226,57 @@ func TestCRC6Compat(t *testing.T) {
 		t.Errorf("CRC6 checksum out of range: %d > 63", checksum)
 	}
 }
+
+// TestConvertRealNameAlreadyEncrypted 测试 ConvertRealName 对已加密文件名的处理
+// 修复问题：如果用户访问的文件名已经是加密形式，不应该再次加密
+func TestConvertRealNameAlreadyEncrypted(t *testing.T) {
+	password := "T5Fo3sQgRzgazbFG@$vv^7s"
+	encType := EncTypeAESCTR
+
+	testCases := []struct {
+		name           string
+		inputPath      string
+		expectedOutput string // 期望输出的文件名
+		description    string
+	}{
+		{
+			name:           "already encrypted filename",
+			inputPath:      "/移动云盘156/encrypt/87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4",
+			expectedOutput: "87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4", // 已加密，不应再加密
+			description:    "文件名已经是加密形式，应该直接返回",
+		},
+		{
+			name:           "plain filename needs encryption",
+			inputPath:      "/移动云盘156/encrypt/hhd800.com@PPX-024.mp4",
+			expectedOutput: "87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4", // 明文需要加密
+			description:    "明文文件名应该被加密",
+		},
+		{
+			name:           "orig prefix",
+			inputPath:      "/移动云盘156/encrypt/orig_test.mp4",
+			expectedOutput: "test.mp4", // orig_ 前缀被移除
+			description:    "orig_ 前缀的文件名去掉前缀后返回",
+		},
+		{
+			name:           "another encrypted filename",
+			inputPath:      "/移动云盘156/encrypt/F6~klZ33OGXyIf03H.mp4",
+			expectedOutput: "F6~klZ33OGXyIf03H.mp4", // 已加密
+			description:    "另一个已加密文件名应该直接返回",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ConvertRealName(password, encType, tc.inputPath)
+			t.Logf("Input path: %s", tc.inputPath)
+			t.Logf("Expected: %s", tc.expectedOutput)
+			t.Logf("Got: %s", result)
+			t.Logf("Description: %s", tc.description)
+
+			if result != tc.expectedOutput {
+				t.Errorf("ConvertRealName failed!\n  Input: %s\n  Expected: %s\n  Got: %s\n  Description: %s",
+					tc.inputPath, tc.expectedOutput, result, tc.description)
+			}
+		})
+	}
+}
