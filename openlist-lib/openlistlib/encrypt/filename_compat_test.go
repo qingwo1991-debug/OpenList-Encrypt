@@ -228,9 +228,9 @@ func TestCRC6Compat(t *testing.T) {
 	}
 }
 
-// TestConvertRealNameAlreadyEncrypted 测试 ConvertRealName 对已加密文件名的处理
-// 修复问题：如果用户访问的文件名已经是加密形式，不应该再次加密
-func TestConvertRealNameAlreadyEncrypted(t *testing.T) {
+// TestConvertRealNameBehavior 测试 ConvertRealName 的行为
+// 与 alist-encrypt 一致：总是加密（除非有 orig_ 前缀）
+func TestConvertRealNameBehavior(t *testing.T) {
 	password := "T5Fo3sQgRzgazbFG@$vv^7s"
 	encType := EncTypeAESCTR
 
@@ -241,34 +241,28 @@ func TestConvertRealNameAlreadyEncrypted(t *testing.T) {
 		description    string
 	}{
 		{
-			name:           "already encrypted filename",
-			inputPath:      "/移动云盘156/encrypt/87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4",
-			expectedOutput: "87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4", // 已加密，不应再加密
-			description:    "文件名已经是加密形式，应该直接返回",
-		},
-		{
-			name:           "plain filename needs encryption",
+			name:           "plain filename gets encrypted",
 			inputPath:      "/移动云盘156/encrypt/hhd800.com@PPX-024.mp4",
-			expectedOutput: "87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4", // 明文需要加密
+			expectedOutput: "87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4", // 明文加密后的结果
 			description:    "明文文件名应该被加密",
 		},
 		{
-			name:           "orig prefix",
+			name:           "orig prefix stripped",
 			inputPath:      "/移动云盘156/encrypt/orig_test.mp4",
 			expectedOutput: "test.mp4", // orig_ 前缀被移除
 			description:    "orig_ 前缀的文件名去掉前缀后返回",
 		},
 		{
-			name:           "another encrypted filename",
-			inputPath:      "/移动云盘156/encrypt/F6~klZ33OGXyIf03H.mp4",
-			expectedOutput: "F6~klZ33OGXyIf03H.mp4", // 已加密
-			description:    "另一个已加密文件名应该直接返回",
+			name:           "encrypted-looking filename still gets encrypted",
+			inputPath:      "/移动云盘156/encrypt/87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4",
+			expectedOutput: "!ENCRYPTED!", // 即使看起来像加密名，也会被加密
+			description:    "即使文件名看起来像加密名，也应该被加密（与 alist-encrypt 一致）",
 		},
 		{
-			name:           "unicom cloud plain filename",
-			inputPath:      "/156联通云盘/encrypt/4k2.com@SIRO-5382.mp4",
-			expectedOutput: "!ENCRYPTED!", // 明文需要加密（我们不知道确切的加密结果，只验证不是原文）
-			description:    "联通云盘明文文件名应该被加密",
+			name:           "waaa filename gets encrypted",
+			inputPath:      "/移动云盘156/encrypt/waaa-458.mp4",
+			expectedOutput: "F6~klZ33OGXyIf03H.mp4", // 明文加密后的结果
+			description:    "waaa-458.mp4 应该被加密为 F6~klZ33OGXyIf03H.mp4",
 		},
 	}
 
@@ -284,7 +278,7 @@ func TestConvertRealNameAlreadyEncrypted(t *testing.T) {
 				// 特殊情况：只验证结果不是原文件名
 				inputFileName := path.Base(tc.inputPath)
 				if result == inputFileName {
-					t.Errorf("ConvertRealName failed! Plain filename was not encrypted!\n  Input: %s\n  Got: %s (same as input)\n  Description: %s",
+					t.Errorf("ConvertRealName failed! Filename was not encrypted!\n  Input: %s\n  Got: %s (same as input)\n  Description: %s",
 						tc.inputPath, result, tc.description)
 				}
 			} else if result != tc.expectedOutput {

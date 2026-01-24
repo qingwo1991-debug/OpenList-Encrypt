@@ -367,6 +367,13 @@ func DecodeName(password string, encType EncryptionType, encodedName string) str
 }
 
 // ConvertRealName 将显示名转换为真实加密名
+// 与 alist-encrypt 的 convertRealName 逻辑完全一致：
+// - 如果有 orig_ 前缀，去掉前缀返回原名
+// - 否则，直接加密文件名（不检查是否已加密）
+// 
+// 注意：alist-encrypt 的设计是：前端总是使用解密后的明文文件名请求，
+// 所以 convertRealName 总是需要加密。不应该检测文件名是否"看起来像"已加密，
+// 因为解密后的明文可能碰巧通过 CRC 校验。
 func ConvertRealName(password string, encType EncryptionType, pathText string) string {
 	fileName := path.Base(pathText)
 	log.Debugf("ConvertRealName: pathText=%q, fileName=%q", pathText, fileName)
@@ -380,21 +387,13 @@ func ConvertRealName(password string, encType EncryptionType, pathText string) s
 	}
 
 	ext := path.Ext(fileName)
-	// URL 解码文件名
+	// URL 解码文件名（与 alist-encrypt 的 decodeURIComponent 一致）
 	if decoded, err := url.PathUnescape(fileName); err == nil {
 		fileName = decoded
 	}
 
-	// 检查文件名是否已经是加密名（能被成功解码）
-	// 如果能解码，说明它已经是加密名，不需要再加密
-	nameWithoutExt := strings.TrimSuffix(fileName, ext)
-	if DecodeName(password, encType, nameWithoutExt) != "" {
-		log.Debugf("ConvertRealName: %q is already encrypted, returning as-is", fileName)
-		return fileName
-	}
-
 	// 直接加密完整文件名（含扩展名），然后再加扩展名
-	// 这与 alist-encrypt 的 convertRealName 逻辑完全一致
+	// 与 alist-encrypt 一致：总是加密，不检查是否已加密
 	encName := EncodeName(password, encType, fileName)
 	result := encName + ext
 	log.Debugf("ConvertRealName: fileName=%q, ext=%q, encName=%q, result=%q", fileName, ext, encName, result)
