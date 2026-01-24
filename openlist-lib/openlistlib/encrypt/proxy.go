@@ -1782,14 +1782,19 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 	// 2. 转换请求路径中的文件名 (Client明文 -> Server密文)
 	targetURLPath := r.URL.Path
-	// 仅对特定方法进行文件名转换。PROPFIND (列目录) 不需要转换（因为目录名是明文），
-	// 且必须保持明文以供 Alist 识别。
-	// node.js 版只转换 GET, PUT, DELETE。我们也加上 COPY, MOVE, HEAD。
+	// 对需要转换文件名的方法进行处理
+	// PROPFIND 分两种情况：
+	//   - 目录 PROPFIND（路径以 / 结尾或没有扩展名）：不需要转换
+	//   - 文件 PROPFIND（路径有文件扩展名）：需要转换，因为播放器会用明文文件名请求文件元数据
+	// node.js 版只转换 GET, PUT, DELETE。我们加上 COPY, MOVE, HEAD, POST，以及文件的 PROPFIND
+	fileName := path.Base(filePath)
+	isFileRequest := fileName != "/" && fileName != "." && path.Ext(fileName) != ""
+	
 	methodNeedConvert := r.Method == "GET" || r.Method == "PUT" || r.Method == "DELETE" ||
-		r.Method == "COPY" || r.Method == "MOVE" || r.Method == "HEAD" || r.Method == "POST"
+		r.Method == "COPY" || r.Method == "MOVE" || r.Method == "HEAD" || r.Method == "POST" ||
+		(r.Method == "PROPFIND" && isFileRequest) // 文件的 PROPFIND 也需要转换
 
 	if methodNeedConvert && encPath != nil && encPath.EncName {
-		fileName := path.Base(filePath)
 		if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
 			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
 			newPath := path.Join(path.Dir(filePath), realName)

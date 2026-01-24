@@ -1,6 +1,7 @@
 package encrypt
 
 import (
+	"path"
 	"testing"
 )
 
@@ -263,6 +264,12 @@ func TestConvertRealNameAlreadyEncrypted(t *testing.T) {
 			expectedOutput: "F6~klZ33OGXyIf03H.mp4", // 已加密
 			description:    "另一个已加密文件名应该直接返回",
 		},
+		{
+			name:           "unicom cloud plain filename",
+			inputPath:      "/156联通云盘/encrypt/4k2.com@SIRO-5382.mp4",
+			expectedOutput: "!ENCRYPTED!", // 明文需要加密（我们不知道确切的加密结果，只验证不是原文）
+			description:    "联通云盘明文文件名应该被加密",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -273,7 +280,14 @@ func TestConvertRealNameAlreadyEncrypted(t *testing.T) {
 			t.Logf("Got: %s", result)
 			t.Logf("Description: %s", tc.description)
 
-			if result != tc.expectedOutput {
+			if tc.expectedOutput == "!ENCRYPTED!" {
+				// 特殊情况：只验证结果不是原文件名
+				inputFileName := path.Base(tc.inputPath)
+				if result == inputFileName {
+					t.Errorf("ConvertRealName failed! Plain filename was not encrypted!\n  Input: %s\n  Got: %s (same as input)\n  Description: %s",
+						tc.inputPath, result, tc.description)
+				}
+			} else if result != tc.expectedOutput {
 				t.Errorf("ConvertRealName failed!\n  Input: %s\n  Expected: %s\n  Got: %s\n  Description: %s",
 					tc.inputPath, tc.expectedOutput, result, tc.description)
 			}
