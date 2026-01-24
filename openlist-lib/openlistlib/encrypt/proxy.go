@@ -1181,13 +1181,62 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	// 检查是否需要解密
 	decode := r.URL.Query().Get("decode")
 	if decode != "0" && info.PasswdInfo != nil {
-		// 如果 fileSize 为 0，尝试从响应 Content-Length 获取
 		fileSize := info.FileSize
+		
+		// 如果 fileSize 为 0，尝试从响应头获取
 		if fileSize == 0 {
-			if cl := resp.Header.Get("Content-Length"); cl != "" {
-				if parsedSize, err := strconv.ParseInt(cl, 10, 64); err == nil && parsedSize > 0 {
-					fileSize = parsedSize
-					log.Infof("handleRedirect: using Content-Length as fileSize: %d", fileSize)
+			// 首先尝试从 Content-Range 获取总大小 (格式: bytes start-end/total)
+			if cr := resp.Header.Get("Content-Range"); cr != "" {
+				if idx := strings.LastIndex(cr, "/"); idx != -1 {
+					totalStr := cr[idx+1:]
+					if totalStr != "*" {
+						if total, err := strconv.ParseInt(totalStr, 10, 64); err == nil && total > 0 {
+							fileSize = total
+							log.Infof("handleRedirect: got fileSize from Content-Range: %d", fileSize)
+						}
+					}
+				}
+			}
+			// 如果 Content-Range 没有总大小，尝试 Content-Length（仅当没有 Range 请求时有效）
+			if fileSize == 0 && rangeHeader == "" {
+				if cl := resp.Header.Get("Content-Length"); cl != "" {
+					if parsedSize, err := strconv.ParseInt(cl, 10, 64); err == nil && parsedSize > 0 {
+						fileSize = parsedSize
+						log.Infof("handleRedirect: using Content-Length as fileSize: %d", fileSize)
+					}
+				}
+			}
+			// 如果仍然为 0，尝试探测远程文件大小
+			if fileSize == 0 && p.config != nil && p.config.ProbeOnDownload {
+				probed := p.probeRemoteFileSize(info.RedirectURL, req.Header)
+				if probed > 0 {
+					fileSize = probed
+					log.Infof("handleRedirect: probed remote fileSize=%d", fileSize)
+					// 重新请求以获取新鲜的流
+					resp.Body.Close()
+					req2, _ := http.NewRequest("GET", info.RedirectURL, nil)
+					for key, values := range r.Header {
+						if key != "Host" {
+							for _, value := range values {
+								req2.Header.Add(key, value)
+							}
+						}
+					}
+					resp, err = p.streamClient.Do(req2)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadGateway)
+						return
+					}
+					defer resp.Body.Close()
+					// 重新复制响应头
+					for key := range w.Header() {
+						w.Header().Del(key)
+					}
+					for key, values := range resp.Header {
+						for _, value := range values {
+							w.Header().Add(key, value)
+						}
+					}
 				}
 			}
 		}
