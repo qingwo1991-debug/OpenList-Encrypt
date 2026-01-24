@@ -1426,6 +1426,12 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 									log.Debugf("Decrypt filename: %s -> %s", task.name, showName)
 								}
 								task.fileMap["name"] = showName
+								// 同步更新 path，避免客户端使用密文 path
+								if pathStr, ok := task.fileMap["path"].(string); ok && pathStr != "" {
+									task.fileMap["path"] = path.Join(path.Dir(pathStr), showName)
+								} else if task.filePath != "" {
+									task.fileMap["path"] = path.Join(path.Dir(task.filePath), showName)
+								}
 							}
 						}
 					}
@@ -1467,6 +1473,11 @@ func (p *ProxyServer) parallelDecryptFileNames(tasks []fileDecryptTask, encPath 
 				log.Debugf("Parallel decrypt filename: %s -> %s", t.name, showName)
 			}
 			t.fileMap["name"] = showName
+			if pathStr, ok := t.fileMap["path"].(string); ok && pathStr != "" {
+				t.fileMap["path"] = path.Join(path.Dir(pathStr), showName)
+			} else if t.filePath != "" {
+				t.fileMap["path"] = path.Join(path.Dir(t.filePath), showName)
+			}
 		}(task)
 	}
 	wg.Wait()
@@ -1492,6 +1503,11 @@ func (p *ProxyServer) parallelDecryptFileNamesV2(tasks []fileDecryptTask) {
 				log.Debugf("Parallel decrypt filename: %s -> %s", t.name, showName)
 			}
 			t.fileMap["name"] = showName
+			if pathStr, ok := t.fileMap["path"].(string); ok && pathStr != "" {
+				t.fileMap["path"] = path.Join(path.Dir(pathStr), showName)
+			} else if t.filePath != "" {
+				t.fileMap["path"] = path.Join(path.Dir(t.filePath), showName)
+			}
 		}(task)
 	}
 	wg.Wait()
@@ -1587,6 +1603,9 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 					if name, ok := data["name"].(string); ok {
 						showName := ConvertShowName(encPath.Password, encPath.EncType, name)
 						data["name"] = showName
+						if pathStr, ok := data["path"].(string); ok && pathStr != "" {
+							data["path"] = path.Join(path.Dir(pathStr), showName)
+						}
 					}
 				}
 
