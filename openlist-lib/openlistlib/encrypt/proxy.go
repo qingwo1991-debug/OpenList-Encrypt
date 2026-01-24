@@ -665,10 +665,45 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 						curHref = decodedPath
 						fileName := path.Base(decodedPath)
 						if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
+							// 仅对“看起来像文件”的名称进行解密（与 alist-encrypt 行为一致，避免误判目录）
+							ext := path.Ext(fileName)
+							if ext != "" {
 							showName := ConvertShowName(encPath.Password, encPath.EncType, fileName)
 							if showName != fileName && !strings.HasPrefix(showName, "orig_") {
 								newPath := path.Join(path.Dir(decodedPath), showName)
 								content = (&url.URL{Path: newPath}).EscapedPath()
+							}
+							}
+						}
+					}
+					if err := enc.EncodeToken(xml.CharData([]byte(content))); err != nil {
+						return err
+					}
+				} else {
+					if err := enc.EncodeToken(t2); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+
+			if inResponse && strings.EqualFold(tok.Name.Local, "displayname") {
+				t2, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				if cd, ok := t2.(xml.CharData); ok {
+					content := string(cd)
+					decodedName, err := url.PathUnescape(content)
+					if err == nil {
+						fileName := decodedName
+						if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
+							ext := path.Ext(fileName)
+							if ext != "" {
+								showName := ConvertShowName(encPath.Password, encPath.EncType, fileName)
+								if showName != fileName && !strings.HasPrefix(showName, "orig_") {
+									content = showName
+								}
 							}
 						}
 					}
