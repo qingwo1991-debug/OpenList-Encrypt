@@ -1149,13 +1149,29 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 复制请求头
+	// 复制请求头，但排除一些可能导致问题的头
 	for key, values := range r.Header {
-		if key != "Host" {
-			for _, value := range values {
-				req.Header.Add(key, value)
-			}
+		lowerKey := strings.ToLower(key)
+		// 不复制 Host 头
+		if lowerKey == "host" {
+			continue
 		}
+		// 阿里云盘不允许 referer，会返回 403
+		if lowerKey == "referer" {
+			continue
+		}
+		// authorization 是 alist 网页版的 token，不是存储的，删除它可以修复天翼云等无法获取资源的问题
+		if lowerKey == "authorization" {
+			continue
+		}
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+
+	// 百度云盘需要特殊的 User-Agent
+	if strings.Contains(info.RedirectURL, "baidupcs.com") {
+		req.Header.Set("User-Agent", "pan.baidu.com")
 	}
 
 	// 发送请求
