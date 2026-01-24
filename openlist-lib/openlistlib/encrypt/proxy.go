@@ -1126,6 +1126,9 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Infof("handleRedirect: key=%s, fileSize=%d, encType=%s, url=%s",
+		key, info.FileSize, info.PasswdInfo.EncType, info.RedirectURL)
+
 	// 获取 Range 头
 	rangeHeader := r.Header.Get("Range")
 	var startPos int64 = 0
@@ -1136,6 +1139,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 				startPos, _ = strconv.ParseInt(rangeParts[0], 10, 64)
 			}
 		}
+		log.Infof("handleRedirect: Range header=%s, startPos=%d", rangeHeader, startPos)
 	}
 
 	// 创建到实际资源的请求
@@ -1158,10 +1162,14 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	// Use streamClient for downloads to avoid client-side timeouts for large/long streams
 	resp, err := p.streamClient.Do(req)
 	if err != nil {
+		log.Errorf("handleRedirect: request failed: %v", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+
+	log.Infof("handleRedirect: response status=%d, content-length=%s",
+		resp.StatusCode, resp.Header.Get("Content-Length"))
 
 	// 复制响应头
 	for key, values := range resp.Header {
@@ -1173,9 +1181,29 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	// 检查是否需要解密
 	decode := r.URL.Query().Get("decode")
 	if decode != "0" && info.PasswdInfo != nil {
+		// 如果 fileSize 为 0，尝试从响应 Content-Length 获取
+		fileSize := info.FileSize
+		if fileSize == 0 {
+			if cl := resp.Header.Get("Content-Length"); cl != "" {
+				if parsedSize, err := strconv.ParseInt(cl, 10, 64); err == nil && parsedSize > 0 {
+					fileSize = parsedSize
+					log.Infof("handleRedirect: using Content-Length as fileSize: %d", fileSize)
+				}
+			}
+		}
+
+		// 如果仍然为 0，跳过解密直接代理
+		if fileSize == 0 {
+			log.Warnf("handleRedirect: fileSize is 0, skipping decryption")
+			w.WriteHeader(resp.StatusCode)
+			copyWithBuffer(w, resp.Body)
+			return
+		}
+
 		// 创建解密器
-		encryptor, err := NewFlowEncryptor(info.PasswdInfo.Password, info.PasswdInfo.EncType, info.FileSize)
+		encryptor, err := NewFlowEncryptor(info.PasswdInfo.Password, info.PasswdInfo.EncType, fileSize)
 		if err != nil {
+			log.Errorf("handleRedirect: failed to create encryptor: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1451,6 +1479,8 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 			if data, ok := result["data"].(map[string]interface{}); ok {
 				rawURL, _ := data["raw_url"].(string)
 				size, _ := data["size"].(float64)
+
+				log.Infof("handleFsGet: path=%s, size=%v, rawURL=%s", originalPath, size, rawURL)
 
 				// 如果开启了文件名加密，将加密名转换为显示名
 				if encPath.EncName {
