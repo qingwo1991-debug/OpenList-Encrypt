@@ -2166,16 +2166,26 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if fileSize == 0 {
+		// Range 请求下 Content-Length 只是分片大小，不能用作总大小
+		rangeHeader := r.Header.Get("Range")
+		if fileSize == 0 && rangeHeader == "" {
 			if cl := resp.Header.Get("Content-Length"); cl != "" {
 				fileSize, _ = strconv.ParseInt(cl, 10, 64)
+			}
+		}
+
+		// 如果仍然未知，尝试探测远程总大小
+		if fileSize == 0 && p.config != nil && p.config.ProbeOnDownload {
+			probed := p.probeRemoteFileSize(targetURL, req.Header)
+			if probed > 0 {
+				fileSize = probed
+				log.Infof("handleWebDAV: probed remote fileSize=%d for %s", fileSize, targetURL)
 			}
 		}
 
 		// 只有当服务端返回了内容，且知道大小，才解密
 		if fileSize > 0 {
 			var startPos int64 = 0
-			rangeHeader := r.Header.Get("Range")
 			if rangeHeader != "" {
 				if strings.HasPrefix(rangeHeader, "bytes=") {
 					rangeParts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
