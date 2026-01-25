@@ -873,11 +873,11 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 			log.Debugf("Testing rule %q (regex: %s) against %q", ep.Path, ep.regex.String(), filePath)
 			if ep.regex.MatchString(filePath) {
 				log.Infof("Matched rule: %s for %s (encType=%q, encName=%v)", ep.Path, filePath, ep.EncType, ep.EncName)
-				return ep
+				return p.applyFolderOverride(ep, decodedPath)
 			}
 			if filePath != decodedPath && ep.regex.MatchString(decodedPath) {
 				log.Infof("Matched rule (decoded): %s for %s (encType=%q, encName=%v)", ep.Path, decodedPath, ep.EncType, ep.EncName)
-				return ep
+				return p.applyFolderOverride(ep, decodedPath)
 			}
 		} else {
 			log.Warnf("Rule %s has nil regex", ep.Path)
@@ -885,6 +885,30 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 	}
 	log.Debugf("No encryption path matched for: %q (decoded: %q)", filePath, decodedPath)
 	return nil
+}
+
+// applyFolderOverride 按 alist-encrypt 逻辑解析目录名中的加密配置
+func (p *ProxyServer) applyFolderOverride(ep *EncryptPath, filePath string) *EncryptPath {
+	if ep == nil {
+		return nil
+	}
+	folders := strings.Split(filePath, "/")
+	for _, folder := range folders {
+		if folder == "" {
+			continue
+		}
+		decodedFolder, err := url.PathUnescape(folder)
+		if err == nil {
+			folder = decodedFolder
+		}
+		if encType, passwd, ok := DecodeFolderName(ep.Password, ep.EncType, folder); ok {
+			newEp := *ep
+			newEp.EncType = encType
+			newEp.Password = passwd
+			return &newEp
+		}
+	}
+	return ep
 }
 
 // handlePing 处理 ping 请求

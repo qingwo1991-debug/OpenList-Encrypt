@@ -90,50 +90,33 @@ func (e *AESCTREncryptor) incrementIV(increment int64) {
 	copy(iv, e.sourceIv)
 	e.iv = iv
 
-	// logic from Node.js incrementIV
-	// Node.js uses 4 uint32 big endian
-	// increment is passed as number (int in Go)
-	// Node.js:
-	// const MAX_UINT32 = 0xffffffff
-	// const incrementBig = ~~(increment / MAX_UINT32)
-	// const incrementLittle = (increment % MAX_UINT32) - incrementBig
-	// Careful with negative values? increment should be positive.
+	// Match Node.js aesCTR.js incrementIV implementation
+	const maxUint32 = uint64(0xffffffff)
+	inc := uint64(increment)
+	incrementBig := int64(inc / maxUint32)
+	incrementLittle := int64(inc%maxUint32) - incrementBig
 
-	// Since Go int64 is large enough, we can implement simpler addition on 128-bit integer if we treat it as such.
-	// But to matching exactly Node.js behavior (overflow/wrapping):
-	// Node.js splits into 4 uint32s.
-
-	// Be careful: Javascript numbers are doubles. MAX_UINT32 is 4294967295.
-	// increment is int64.
-	// 4294967295 matches math.MaxUint32.
-
-	// Go implementation:
-	// Treat IV as 128 bit integer (big endian). Add increment.
-	// Or follow Node.js 4 chunks logic.
-
-	// Let's implement generic 128-bit counter increment.
-	// Since AES-CTR is just counter mode, we add increment to the counter.
-	// IV is 16 bytes.
-	// Treat as BigEndian uint128.
-
-	// We can use math/big or just loop.
-	carry := increment
-	for i := 15; i >= 0; i-- {
-		val := int64(e.iv[i]) + (carry & 0xFF)
-		e.iv[i] = byte(val)
-		carry = (carry >> 8) + (val >> 8)
+	overflow := int64(0)
+	for idx := 0; idx < 4; idx++ {
+		offset := 12 - idx*4
+		num := int64(uint32(e.iv[offset])<<24 | uint32(e.iv[offset+1])<<16 | uint32(e.iv[offset+2])<<8 | uint32(e.iv[offset+3]))
+		incPart := overflow
+		if idx == 0 {
+			incPart += incrementLittle
+		}
+		if idx == 1 {
+			incPart += incrementBig
+		}
+		num += incPart
+		numBig := num / int64(maxUint32)
+		numLittle := num%int64(maxUint32) - numBig
+		overflow = numBig
+		v := uint32(numLittle)
+		e.iv[offset] = byte(v >> 24)
+		e.iv[offset+1] = byte(v >> 16)
+		e.iv[offset+2] = byte(v >> 8)
+		e.iv[offset+3] = byte(v)
 	}
-	// Note: Node.js implementation "incrementIV" does weird things with splitting 4 chunks.
-	// "const incrementBig = ~~(increment / MAX_UINT32)"
-	// "const incrementLittle = (increment % MAX_UINT32) - incrementBig"
-	// Wait, (increment % MAX) - incrementBig ?? That seems wrong in JS logic unless incrementBig is small?
-	// Actually (increment % MAX_UINT32) is the lower 32 bits.
-	// If increment < MAX_UINT32, incrementBig is 0. incrementLittle = increment.
-	// It seems Node.js implementation tries to handle > 32 bit increments.
-
-	// Given standard CTR mode, we just add the offset (in blocks) to the IV.
-	// My loop implementation above does standard addition.
-	// Let's stick with standard addition which AES-CTR expects.
 }
 
 // SetPosition 设置流位置
@@ -349,7 +332,7 @@ func DecodeName(password string, encType EncryptionType, encodedName string) str
 	crc6Bit := crc6.Checksum([]byte(subEncName + passwdOutward))
 	expectedCrc6Check := MixBase64GetSourceChar(int(crc6Bit))
 	if expectedCrc6Check != crc6Check {
-		log.Debugf("DecodeName: CRC6 mismatch for %q: expected %c, got %c (passwdOutward=%q)", 
+		log.Debugf("DecodeName: CRC6 mismatch for %q: expected %c, got %c (passwdOutward=%q)",
 			encodedName, expectedCrc6Check, crc6Check, passwdOutward)
 		return ""
 	}
@@ -366,11 +349,37 @@ func DecodeName(password string, encType EncryptionType, encodedName string) str
 	return result
 }
 
+// EncodeFolderName 编码目录名（用于目录级别切换密码/算法）
+func EncodeFolderName(password string, encType EncryptionType, folderPasswd string, folderEncType EncryptionType) string {
+	passwdInfo := string(folderEncType) + "_" + folderPasswd
+	return EncodeName(password, encType, passwdInfo)
+}
+
+// DecodeFolderName 解码目录名（返回目录内覆盖的加密配置）
+func DecodeFolderName(password string, encType EncryptionType, encodedName string) (EncryptionType, string, bool) {
+	arr := strings.Split(encodedName, "_")
+	if len(arr) < 2 {
+		return "", "", false
+	}
+	folderEncName := arr[len(arr)-1]
+	decodeStr := DecodeName(password, encType, folderEncName)
+	if decodeStr == "" {
+		return "", "", false
+	}
+	idx := strings.Index(decodeStr, "_")
+	if idx <= 0 || idx >= len(decodeStr)-1 {
+		return "", "", false
+	}
+	folderEncType := EncryptionType(decodeStr[:idx])
+	folderPasswd := decodeStr[idx+1:]
+	return folderEncType, folderPasswd, true
+}
+
 // ConvertRealName 将显示名转换为真实加密名
 // 与 alist-encrypt 的 convertRealName 逻辑完全一致：
 // - 如果有 orig_ 前缀，去掉前缀返回原名
 // - 否则，直接加密文件名（不检查是否已加密）
-// 
+//
 // 注意：alist-encrypt 的设计是：前端总是使用解密后的明文文件名请求，
 // 所以 convertRealName 总是需要加密。不应该检测文件名是否"看起来像"已加密，
 // 因为解密后的明文可能碰巧通过 CRC 校验。

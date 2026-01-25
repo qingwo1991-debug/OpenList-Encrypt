@@ -3,6 +3,7 @@ package encrypt
 import (
 	"bytes"
 	"crypto/sha256"
+	"strings"
 )
 
 const base64Source = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~+"
@@ -138,9 +139,9 @@ func (m *MixBase64) Decode(base64Str string) ([]byte, error) {
 	size := (len(base64Str) / 4) * 3
 
 	padChar := chars[64]
-	if len(base64Str) > 1 && base64Str[len(base64Str)-2:] == padChar+padChar {
+	if strings.Contains(base64Str, padChar+padChar) {
 		size -= 2
-	} else if len(base64Str) > 0 && string(base64Str[len(base64Str)-1]) == padChar {
+	} else if strings.Contains(base64Str, padChar) {
 		size -= 1
 	}
 
@@ -153,13 +154,6 @@ func (m *MixBase64) Decode(base64Str string) ([]byte, error) {
 	length := len(runes)
 
 	for i < length {
-		// Bounds check to avoid panic if invalid char
-		charStr := string(runes[i])
-		if _, ok := m.mapChars[charStr]; !ok {
-			i++
-			continue // Skip invalid chars or error? JS logic just access map chars[char]
-		}
-
 		enc1 := m.mapChars[string(runes[i])]
 		i++
 		// check bounds for subsequent chars
