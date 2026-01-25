@@ -337,23 +337,49 @@ func (p *ProxyServer) cleanupExpiredCache() {
 	}
 }
 
+// normalizeCacheKey 统一缓存键（对齐 alist-encrypt：decodeURIComponent）
+func normalizeCacheKey(p string) string {
+	if decoded, err := url.PathUnescape(p); err == nil {
+		return decoded
+	}
+	return p
+}
+
 // storeFileCache 存储文件信息到缓存（带 TTL）
 func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
-	p.fileCache.Store(path, &CachedFileInfo{
+	key := normalizeCacheKey(path)
+	entry := &CachedFileInfo{
 		Info:     info,
 		ExpireAt: time.Now().Add(fileCacheTTL),
-	})
+	}
+	p.fileCache.Store(key, entry)
+	// 兼容：也保存原始 key
+	if key != path {
+		p.fileCache.Store(path, entry)
+	}
 }
 
 // loadFileCache 从缓存加载文件信息（检查 TTL）
 func (p *ProxyServer) loadFileCache(path string) (*FileInfo, bool) {
-	if value, ok := p.fileCache.Load(path); ok {
+	key := normalizeCacheKey(path)
+	if value, ok := p.fileCache.Load(key); ok {
 		if cached, ok := value.(*CachedFileInfo); ok {
 			if time.Now().Before(cached.ExpireAt) {
 				return cached.Info, true
 			}
 			// 过期了，删除
-			p.fileCache.Delete(path)
+			p.fileCache.Delete(key)
+		}
+	}
+	// 回退尝试原始 key
+	if key != path {
+		if value, ok := p.fileCache.Load(path); ok {
+			if cached, ok := value.(*CachedFileInfo); ok {
+				if time.Now().Before(cached.ExpireAt) {
+					return cached.Info, true
+				}
+				p.fileCache.Delete(path)
+			}
 		}
 	}
 	return nil, false
