@@ -650,6 +650,57 @@ func (p *ProxyServer) probeRemoteFileSize(targetURL string, headers http.Header)
 	return 0
 }
 
+// fetchWebDAVFileSize 通过 PROPFIND 获取文件大小（Depth: 0）
+func (p *ProxyServer) fetchWebDAVFileSize(targetURL string, headers http.Header) int64 {
+	body := `<?xml version="1.0" encoding="utf-8" ?><D:propfind xmlns:D="DAV:"><D:prop><D:getcontentlength/></D:prop></D:propfind>`
+	req, err := http.NewRequest("PROPFIND", targetURL, strings.NewReader(body))
+	if err != nil {
+		return 0
+	}
+	for key, values := range headers {
+		if key == "Host" || strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		for _, v := range values {
+			req.Header.Add(key, v)
+		}
+	}
+	req.Header.Set("Depth", "0")
+	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0
+	}
+
+	dec := xml.NewDecoder(resp.Body)
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return 0
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if strings.EqualFold(t.Name.Local, "getcontentlength") {
+				if t2, err := dec.Token(); err == nil {
+					if cd, ok := t2.(xml.CharData); ok {
+						s := strings.TrimSpace(string(cd))
+						if s != "" {
+							if v, err := strconv.ParseInt(s, 10, 64); err == nil && v > 0 {
+								return v
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // processPropfindResponse 解析并替换 PROPFIND XML 中的 href/displayname，并缓存文件信息
 func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPath *EncryptPath) error {
 	dec := xml.NewDecoder(body)
@@ -657,6 +708,7 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 
 	inResponse := false
 	var curHref string
+	var curHrefShow string
 	var curSize int64 = -1
 
 	for {
@@ -673,6 +725,7 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 			if strings.EqualFold(tok.Name.Local, "response") {
 				inResponse = true
 				curHref = ""
+				curHrefShow = ""
 				curSize = -1
 			}
 			if err := enc.EncodeToken(tok); err != nil {
@@ -689,6 +742,7 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 					decodedPath, err := url.PathUnescape(content)
 					if err == nil {
 						curHref = decodedPath
+						curHrefShow = decodedPath
 						fileName := path.Base(decodedPath)
 						if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
 							// 仅对“看起来像文件”的名称进行解密（与 alist-encrypt 行为一致，避免误判目录）
@@ -697,6 +751,7 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 								showName := ConvertShowName(encPath.Password, encPath.EncType, fileName)
 								if showName != fileName && !strings.HasPrefix(showName, "orig_") {
 									newPath := path.Join(path.Dir(decodedPath), showName)
+									curHrefShow = newPath
 									content = (&url.URL{Path: newPath}).EscapedPath()
 								}
 							}
@@ -780,8 +835,11 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 						isDir = true
 						size = 0
 					}
-					// 使用带 TTL 的缓存
+					// 使用带 TTL 的缓存（同时缓存密文与明文路径，便于 WebDAV GET 命中）
 					p.storeFileCache(curHref, &FileInfo{Name: name, Size: size, IsDir: isDir, Path: curHref})
+					if curHrefShow != "" && curHrefShow != curHref {
+						p.storeFileCache(curHrefShow, &FileInfo{Name: path.Base(curHrefShow), Size: size, IsDir: isDir, Path: curHrefShow})
+					}
 				}
 				inResponse = false
 			}
@@ -2207,6 +2265,23 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// 进一步尝试：使用密文路径查缓存（对齐 alist-encrypt 的重试逻辑）
+		if fileSize == 0 && encPath != nil && encPath.EncName {
+			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			encPathFull := path.Join(path.Dir(filePath), realName)
+			if !strings.HasPrefix(encPathFull, "/") {
+				encPathFull = "/" + encPathFull
+			}
+			if cached, ok := p.loadFileCache(encPathFull); ok && !cached.IsDir && cached.Size > 0 {
+				fileSize = cached.Size
+			} else if strings.HasPrefix(encPathFull, "/dav/") {
+				noDav := strings.TrimPrefix(encPathFull, "/dav")
+				if cached, ok := p.loadFileCache(noDav); ok && !cached.IsDir && cached.Size > 0 {
+					fileSize = cached.Size
+				}
+			}
+		}
+
 		// 尝试获取文件大小
 		contentRange := resp.Header.Get("Content-Range")
 		if contentRange != "" {
@@ -2224,6 +2299,19 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		if fileSize == 0 && rangeHeader == "" {
 			if cl := resp.Header.Get("Content-Length"); cl != "" {
 				fileSize, _ = strconv.ParseInt(cl, 10, 64)
+			}
+		}
+
+		// 如果仍然未知，先尝试 WebDAV PROPFIND 获取大小
+		if fileSize == 0 {
+			if size := p.fetchWebDAVFileSize(targetURL, req.Header); size > 0 {
+				fileSize = size
+				p.storeFileCache(filePath, &FileInfo{Name: path.Base(filePath), Size: size, IsDir: false, Path: filePath})
+				if strings.HasPrefix(filePath, "/dav/") {
+					noDav := strings.TrimPrefix(filePath, "/dav")
+					p.storeFileCache(noDav, &FileInfo{Name: path.Base(noDav), Size: size, IsDir: false, Path: noDav})
+				}
+				log.Infof("handleWebDAV: propfind fileSize=%d for %s", fileSize, targetURL)
 			}
 		}
 
