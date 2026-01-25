@@ -1356,6 +1356,34 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 下载时解密文件名（修改 Content-Disposition，与 alist-encrypt 一致）
+	lastUrl := r.URL.Query().Get("lastUrl")
+	if lastUrl != "" && info.PasswdInfo != nil && info.PasswdInfo.EncName {
+		if decoded, err := url.QueryUnescape(lastUrl); err == nil {
+			lastUrl = decoded
+		}
+		fileName := path.Base(lastUrl)
+		if decoded, err := url.PathUnescape(fileName); err == nil {
+			fileName = decoded
+		}
+		ext := path.Ext(fileName)
+		baseName := strings.TrimSuffix(fileName, ext)
+		decryptedName := DecodeName(info.PasswdInfo.Password, info.PasswdInfo.EncType, baseName)
+		if decryptedName != "" {
+			cd := w.Header().Get("Content-Disposition")
+			if cd != "" {
+				cd = regexp.MustCompile(`filename\*?=[^;]*;?\s*`).ReplaceAllString(cd, "")
+			}
+			if cd == "" {
+				cd = "attachment; "
+			} else if !strings.HasSuffix(cd, "; ") && !strings.HasSuffix(cd, ";") {
+				cd += "; "
+			}
+			w.Header().Set("Content-Disposition", cd+fmt.Sprintf("filename*=UTF-8''%s", url.PathEscape(decryptedName)))
+			log.Debugf("Decrypted filename in redirect Content-Disposition: %s -> %s", fileName, decryptedName)
+		}
+	}
+
 	// 检查是否需要解密
 	decode := r.URL.Query().Get("decode")
 	if decode != "0" && info.PasswdInfo != nil {
@@ -1798,6 +1826,29 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 
 	// 检查是否需要加密
 	encPath := p.findEncryptPath(filePath)
+
+	// 记录原始文件名用于缓存
+	originalFilePath := filePath
+
+	// 如果开启了文件名加密，转换文件名（与 alist-encrypt 一致）
+	if encPath != nil && encPath.EncName {
+		fileName := path.Base(filePath)
+		if fileName != "/" && fileName != "." {
+			// alist-encrypt: const encName = encodeName(passwdInfo.password, passwdInfo.encType, fileName)
+			// 然后 filePath = dirname + '/' + encName + ext
+			ext := path.Ext(fileName)
+			encName := EncodeName(encPath.Password, encPath.EncType, fileName)
+			newFilePath := path.Join(path.Dir(filePath), encName+ext)
+			log.Infof("Encrypting filename: %s -> %s", fileName, encName+ext)
+
+			// 更新 File-Path header
+			r.Header.Set("File-Path", url.PathEscape(newFilePath))
+
+			// 更新 targetURL
+			targetURL = p.getAlistURL() + "/api/fs/put"
+		}
+	}
+
 	if encPath != nil {
 		log.Infof("Encrypting upload for path: %s", filePath)
 		contentLength := r.ContentLength
@@ -1812,6 +1863,14 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body = NewEncryptReader(r.Body, encryptor)
+
+		// 缓存文件信息（与 alist-encrypt 一致：上传前缓存，便于 rclone 的 PROPFIND）
+		p.storeFileCache(originalFilePath, &FileInfo{
+			Name:  path.Base(originalFilePath),
+			Size:  contentLength,
+			IsDir: false,
+			Path:  originalFilePath,
+		})
 	}
 
 	req, err := http.NewRequest(r.Method, targetURL, body)
@@ -1989,6 +2048,33 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 下载时解密文件名（修改 Content-Disposition，与 alist-encrypt 一致）
+	if encPath != nil && encPath.EncName && resp.StatusCode == http.StatusOK {
+		fileName := path.Base(filePath)
+		if decoded, err := url.PathUnescape(fileName); err == nil {
+			fileName = decoded
+		}
+		ext := path.Ext(fileName)
+		baseName := strings.TrimSuffix(fileName, ext)
+		decryptedName := DecodeName(encPath.Password, encPath.EncType, baseName)
+		if decryptedName != "" {
+			// 清除旧的 filename 参数，设置解密后的文件名
+			cd := w.Header().Get("Content-Disposition")
+			// 移除现有的 filename 和 filename* 参数
+			if cd != "" {
+				// 简单的正则替换：移除 filename=xxx 或 filename*=xxx
+				cd = regexp.MustCompile(`filename\*?=[^;]*;?\s*`).ReplaceAllString(cd, "")
+			}
+			if cd == "" {
+				cd = "attachment; "
+			} else if !strings.HasSuffix(cd, "; ") && !strings.HasSuffix(cd, ";") {
+				cd += "; "
+			}
+			w.Header().Set("Content-Disposition", cd+fmt.Sprintf("filename*=UTF-8''%s", url.PathEscape(decryptedName)))
+			log.Debugf("Decrypted filename in Content-Disposition: %s -> %s", fileName, decryptedName)
+		}
+	}
+
 	// 获取 Range 信息
 	var startPos int64 = 0
 	rangeHeader := r.Header.Get("Range")
@@ -2129,6 +2215,11 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				contentLength, _ = strconv.ParseInt(l, 10, 64)
 			}
 		}
+		if contentLength <= 0 {
+			if l := r.Header.Get("Content-Length"); l != "" {
+				contentLength, _ = strconv.ParseInt(l, 10, 64)
+			}
+		}
 
 		if contentLength > 0 {
 			encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, contentLength)
@@ -2137,6 +2228,25 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			body = NewEncryptReader(r.Body, encryptor)
+
+			// 缓存原始文件信息（与 alist-encrypt 一致：上传前缓存，便于 rclone 的 PROPFIND）
+			originalFileName := path.Base(filePath)
+			p.storeFileCache(filePath, &FileInfo{
+				Name:  originalFileName,
+				Size:  contentLength,
+				IsDir: false,
+				Path:  filePath,
+			})
+			// 同时缓存不带 /dav 前缀的路径
+			if strings.HasPrefix(filePath, "/dav/") {
+				noDav := strings.TrimPrefix(filePath, "/dav")
+				p.storeFileCache(noDav, &FileInfo{
+					Name:  originalFileName,
+					Size:  contentLength,
+					IsDir: false,
+					Path:  noDav,
+				})
+			}
 		} else {
 			log.Warnf("PUT request encryption skipped: missing content length for %s", r.URL.Path)
 		}
