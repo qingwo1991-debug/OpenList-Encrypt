@@ -2087,6 +2087,15 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 只有响应状态码是 2xx 时才尝试解密
+	// 非 2xx 状态码（如 4xx、5xx 错误）直接透传，不尝试解密
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Debugf("handleDownload: non-2xx response: status=%d, skip decryption", resp.StatusCode)
+		w.WriteHeader(statusCode)
+		copyWithBuffer(w, resp.Body)
+		return
+	}
+
 	// 如果需要解密
 	if encPath != nil && fileSize > 0 {
 		log.Infof("handleDownload: decrypting with fileSize=%d for path: %s", fileSize, filePath)
@@ -2406,6 +2415,15 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 	// 6. 处理 GET 下载解密
 	if r.Method == "GET" && encPath != nil {
+		// 只有响应状态码是 2xx 时才尝试解密
+		// 非 2xx 状态码（如 4xx、5xx 错误）直接透传，不尝试解密
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			log.Debugf("WebDAV GET non-2xx response: status=%d, skip decryption", resp.StatusCode)
+			w.WriteHeader(statusCode)
+			copyWithBuffer(w, resp.Body)
+			return
+		}
+
 		// 检查 Content-Type，避免解密错误页面或目录列表
 		contentType := resp.Header.Get("Content-Type")
 		if strings.Contains(contentType, "text/html") ||
