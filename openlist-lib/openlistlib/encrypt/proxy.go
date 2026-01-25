@@ -1349,16 +1349,16 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusPartialContent
 	}
 
-	statusCode := resp.StatusCode
-	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
-		statusCode = http.StatusPartialContent
-	}
-
 	// 复制响应头
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
+	}
+
+	statusCode := resp.StatusCode
+	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
+		statusCode = http.StatusPartialContent
 	}
 
 	// 检查是否需要解密
@@ -2301,7 +2301,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(contentType, "text/html") ||
 			strings.Contains(contentType, "application/json") ||
 			strings.Contains(contentType, "application/xml") {
-			w.WriteHeader(resp.StatusCode)
+			w.WriteHeader(statusCode)
 			copyWithBuffer(w, resp.Body)
 			return
 		}
