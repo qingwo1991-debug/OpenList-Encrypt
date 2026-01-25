@@ -1989,11 +1989,6 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	statusCode := resp.StatusCode
-	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
-		statusCode = http.StatusPartialContent
-	}
-
 	// 获取 Range 信息
 	var startPos int64 = 0
 	rangeHeader := r.Header.Get("Range")
@@ -2292,6 +2287,11 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
+	}
+
+	statusCode := resp.StatusCode
+	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
+		statusCode = http.StatusPartialContent
 	}
 
 	// 6. 处理 GET 下载解密
