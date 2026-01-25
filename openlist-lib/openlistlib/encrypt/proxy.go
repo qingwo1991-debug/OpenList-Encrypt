@@ -845,17 +845,26 @@ func (p *ProxyServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 // handleUserInfo 处理用户信息请求
 func (p *ProxyServer) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	userInfo := map[string]interface{}{
+		"username": "admin",
+		"avatar":   "",
+	}
+	roles := []string{"admin"}
+	codes := []string{}
+	version := "0.1.0"
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"code": 200,
 		"data": map[string]interface{}{
-			"userInfo": map[string]interface{}{
-				"username": "admin",
-				"avatar":   "",
-			},
-			"roles":   []string{"admin"},
-			"codes":   []string{},
-			"version": "0.1.0",
+			"userInfo": userInfo,
+			"roles":    roles,
+			"codes":    codes,
+			"version":  version,
 		},
+		// 兼容旧前端：直接返回顶层字段
+		"userInfo": userInfo,
+		"roles":    roles,
+		"codes":    codes,
+		"version":  version,
 	})
 }
 
