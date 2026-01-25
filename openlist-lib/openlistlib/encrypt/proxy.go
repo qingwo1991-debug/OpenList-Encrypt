@@ -1356,11 +1356,6 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	statusCode := resp.StatusCode
-	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
-		statusCode = http.StatusPartialContent
-	}
-
 	// 检查是否需要解密
 	decode := r.URL.Query().Get("decode")
 	if decode != "0" && info.PasswdInfo != nil {
@@ -1847,6 +1842,11 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
+	}
+
+	statusCode := resp.StatusCode
+	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
+		statusCode = http.StatusPartialContent
 	}
 
 	w.WriteHeader(resp.StatusCode)
