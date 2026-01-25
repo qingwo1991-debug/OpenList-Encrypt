@@ -1844,11 +1844,6 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	statusCode := resp.StatusCode
-	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
-		statusCode = http.StatusPartialContent
-	}
-
 	w.WriteHeader(resp.StatusCode)
 	copyWithBuffer(w, resp.Body)
 }
@@ -1992,6 +1987,11 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
+	}
+
+	statusCode := resp.StatusCode
+	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
+		statusCode = http.StatusPartialContent
 	}
 
 	// 获取 Range 信息
