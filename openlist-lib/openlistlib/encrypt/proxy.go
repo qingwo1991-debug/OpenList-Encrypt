@@ -1320,6 +1320,16 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	log.Infof("handleRedirect: response status=%d, content-length=%s",
 		resp.StatusCode, resp.Header.Get("Content-Length"))
 
+	statusCode := resp.StatusCode
+	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
+		statusCode = http.StatusPartialContent
+	}
+
+	statusCode := resp.StatusCode
+	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
+		statusCode = http.StatusPartialContent
+	}
+
 	// 复制响应头
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -1393,7 +1403,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		// 如果仍然为 0，跳过解密直接代理
 		if fileSize == 0 {
 			log.Warnf("handleRedirect: fileSize is 0, skipping decryption")
-			w.WriteHeader(resp.StatusCode)
+			w.WriteHeader(statusCode)
 			copyWithBuffer(w, resp.Body)
 			return
 		}
@@ -1413,10 +1423,10 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		// 创建解密读取器
 		decryptReader := NewDecryptReader(resp.Body, encryptor)
 
-		w.WriteHeader(resp.StatusCode)
+		w.WriteHeader(statusCode)
 		copyWithBuffer(w, decryptReader)
 	} else {
-		w.WriteHeader(resp.StatusCode)
+		w.WriteHeader(statusCode)
 		copyWithBuffer(w, resp.Body)
 	}
 }
@@ -1646,9 +1656,9 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 	// 检查是否需要转换文件名
 	encPath := p.findEncryptPath(filePath)
 	if encPath != nil && encPath.EncName {
-		// 尝试将显示名转换为真实加密名
+		// 尝试将显示名转换为真实加密名（ConvertRealName 会处理 orig_ 前缀）
 		fileName := path.Base(filePath)
-		if !strings.HasPrefix(fileName, "orig_") {
+		if fileName != "/" && fileName != "." {
 			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
 			filePath = path.Join(path.Dir(filePath), realName)
 			reqData["path"] = filePath
@@ -1841,7 +1851,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// 如果开启了文件名加密，转换为真实加密名
 	if encPath != nil && encPath.EncName {
 		fileName := path.Base(filePath)
-		if !strings.HasPrefix(fileName, "orig_") {
+		if fileName != "/" && fileName != "." {
 			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
 			newFilePath := path.Join(path.Dir(filePath), realName)
 			if strings.HasPrefix(originalPath, "/d/") {
@@ -1855,8 +1865,21 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// 获取文件大小 - 首先尝试从缓存获取（使用带 TTL 的缓存方法）
 	var fileSize int64 = 0
 	if cached, ok := p.loadFileCache(filePath); ok {
-		fileSize = cached.Size
+		if !cached.IsDir && cached.Size > 0 {
+			fileSize = cached.Size
+		}
 		log.Debugf("handleDownload: got fileSize from cache: %d for path: %s", fileSize, filePath)
+	}
+	if fileSize == 0 && encPath != nil && encPath.EncName {
+		realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+		encPathFull := path.Join(path.Dir(filePath), realName)
+		if !strings.HasPrefix(encPathFull, "/") {
+			encPathFull = "/" + encPathFull
+		}
+		if cached, ok := p.loadFileCache(encPathFull); ok && !cached.IsDir && cached.Size > 0 {
+			fileSize = cached.Size
+			log.Debugf("handleDownload: got fileSize from enc cache: %d for path: %s", fileSize, encPathFull)
+		}
 	}
 
 	// 创建到 Alist 的请求
@@ -1884,11 +1907,14 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	// 如果缓存中没有文件大小，尝试从响应头获取；如果仍然未知，探测远程总大小（HEAD 或 Range=0-0）
 	if fileSize == 0 && encPath != nil {
-		// 尝试从 Content-Length 获取
-		if cl := resp.Header.Get("Content-Length"); cl != "" {
-			if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
-				fileSize = size
-				log.Infof("handleDownload: got fileSize from Content-Length: %d for path: %s", fileSize, filePath)
+		// Range 请求下 Content-Length 只是分片大小，不能用作总大小
+		rangeHeader := r.Header.Get("Range")
+		if rangeHeader == "" {
+			if cl := resp.Header.Get("Content-Length"); cl != "" {
+				if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
+					fileSize = size
+					log.Infof("handleDownload: got fileSize from Content-Length: %d for path: %s", fileSize, filePath)
+				}
 			}
 		}
 		// 尝试从 Content-Range 获取总大小 (格式: bytes start-end/total)
@@ -1932,6 +1958,11 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	statusCode := resp.StatusCode
+	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
+		statusCode = http.StatusPartialContent
+	}
+
 	// 复制响应头
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -1967,16 +1998,16 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		decryptReader := NewDecryptReader(resp.Body, encryptor)
-		w.WriteHeader(resp.StatusCode)
+		w.WriteHeader(statusCode)
 		copyWithBuffer(w, decryptReader)
 	} else if encPath != nil && fileSize == 0 {
 		// fileSize 为 0 时无法正确解密（因为 fileSize 参与密钥生成）
 		// 直接透传原始数据，让客户端知道这是加密的文件
 		log.Warnf("handleDownload: cannot decrypt, fileSize is 0 for encrypted path: %s. Passing through raw data.", filePath)
-		w.WriteHeader(resp.StatusCode)
+		w.WriteHeader(statusCode)
 		copyWithBuffer(w, resp.Body)
 	} else {
-		w.WriteHeader(resp.StatusCode)
+		w.WriteHeader(statusCode)
 		copyWithBuffer(w, resp.Body)
 	}
 }
@@ -2020,7 +2051,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		// alist-encrypt: const realName = convertRealName(passwdInfo.password, passwdInfo.encType, url)
 		//                const sourceUrl = path.dirname(url) + '/' + realName
 		//                const sourceFileInfo = await getFileInfo(sourceUrl)
-		if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
+		if fileName != "/" && fileName != "." {
 			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
 			// 缓存中存储的是完整路径（包含 /dav 前缀），所以查找时也用完整路径
 			sourceUrl := path.Join(path.Dir(filePath), realName)
@@ -2048,7 +2079,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if methodNeedConvert && encPath != nil && encPath.EncName {
-		if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
+		if fileName != "/" && fileName != "." {
 			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
 			newPath := path.Join(path.Dir(filePath), realName)
 			// 确保路径以 / 开头
@@ -2128,7 +2159,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			// 如果目标路径需要加密文件名
 			if destEncPath != nil && destEncPath.EncName {
 				destName := path.Base(destPath)
-				if destName != "/" && destName != "." && !strings.HasPrefix(destName, "orig_") {
+				if destName != "/" && destName != "." {
 					realDestName := ConvertRealName(destEncPath.Password, destEncPath.EncType, destPath)
 					newDestPath := path.Join(path.Dir(destPath), realDestName)
 					if !strings.HasPrefix(newDestPath, "/") {
@@ -2176,7 +2207,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 		// 重新计算加密路径
 		fileName := path.Base(filePath)
-		if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
+		if fileName != "/" && fileName != "." {
 			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
 			newPath := path.Join(path.Dir(filePath), realName)
 			if !strings.HasPrefix(newPath, "/") {
@@ -2343,7 +2374,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				// 无法创建解密器(如未知算法)，直接透传
 				log.Warnf("Failed to create encryptor for download: %v", err)
-				w.WriteHeader(resp.StatusCode)
+				w.WriteHeader(statusCode)
 				copyWithBuffer(w, resp.Body)
 				return
 			}
@@ -2353,13 +2384,13 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			}
 
 			decryptReader := NewDecryptReader(resp.Body, encryptor)
-			w.WriteHeader(resp.StatusCode)
+			w.WriteHeader(statusCode)
 			copyWithBuffer(w, decryptReader)
 			return
 		}
 	}
 
-	w.WriteHeader(resp.StatusCode)
+	w.WriteHeader(statusCode)
 	copyWithBuffer(w, resp.Body)
 }
 
