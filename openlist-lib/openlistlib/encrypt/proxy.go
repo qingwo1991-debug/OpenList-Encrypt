@@ -1939,6 +1939,11 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		encPath = p.findEncryptPath(filePath)
 	}
 
+	// 记录 WebDAV 请求关键日志
+	if encPath != nil {
+		log.Infof("WebDAV: method=%s path=%s match=%s encName=%v", r.Method, filePath, matchPath, encPath.EncName)
+	}
+
 	// 2. 转换请求路径中的文件名 (Client明文 -> Server密文)
 	targetURLPath := r.URL.Path
 	fileName := path.Base(filePath)
@@ -2242,6 +2247,9 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+
+			log.Infof("WebDAV decrypt: path=%s range=%q content-range=%q content-length=%q fileSize=%d start=%d",
+				filePath, rangeHeader, resp.Header.Get("Content-Range"), resp.Header.Get("Content-Length"), fileSize, startPos)
 
 			encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
 			if err != nil {
