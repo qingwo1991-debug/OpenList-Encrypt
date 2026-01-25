@@ -49,6 +49,18 @@ var bufferPool = sync.Pool{
 	},
 }
 
+// ErrStopRedirect 用于停止自动重定向跟随
+var ErrStopRedirect = errors.New("redirect stopped")
+
+// RedirectInfo 重定向信息，用于缓存和代理重定向
+type RedirectInfo struct {
+	RedirectURL string       `json:"redirectUrl"` // 实际重定向目标
+	PasswdInfo  *EncryptPath `json:"passwdInfo"`  // 加密配置
+	FileSize    int64        `json:"fileSize"`    // 文件大小
+	OriginalURL string       `json:"originalUrl"` // 原始请求URL
+	Headers     http.Header  `json:"headers"`     // 原始请求头
+}
+
 // copyWithBuffer 使用缓冲区池进行高效复制
 func copyWithBuffer(dst io.Writer, src io.Reader) (int64, error) {
 	bufPtr := bufferPool.Get().(*[]byte)
@@ -116,14 +128,6 @@ type FileInfo struct {
 	IsDir    bool   `json:"is_dir"`
 	Modified string `json:"modified"`
 	Path     string `json:"path"`
-}
-
-// RedirectInfo 重定向信息
-type RedirectInfo struct {
-	RedirectURL string       `json:"redirectUrl"`
-	PasswdInfo  *EncryptPath `json:"passwdInfo"`
-	FileSize    int64        `json:"fileSize"`
-	ExpireAt    time.Time    `json:"expireAt"`
 }
 
 var (
@@ -252,18 +256,56 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 			log.Warnf("H2C connection test failed: %v, falling back to HTTP/1.1", err)
 			// H2C 连接失败，回退到 HTTP/1.1
 			h2cTransport = nil
-			httpClient = &http.Client{Timeout: 30 * time.Second, Transport: transport}
-			streamClient = &http.Client{Timeout: 0, Transport: transport}
+			httpClient = &http.Client{
+				Timeout:   30 * time.Second,
+				Transport: transport,
+				// 禁用自动重定向跟随，手动处理 302/303 重定向
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			}
+			streamClient = &http.Client{
+				Timeout:   0,
+				Transport: transport,
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			}
 		} else {
 			resp.Body.Close()
 			log.Info("H2C connection test successful")
-			httpClient = &http.Client{Timeout: 30 * time.Second, Transport: h2cTransport}
-			streamClient = &http.Client{Timeout: 0, Transport: h2cTransport}
+			httpClient = &http.Client{
+				Timeout:   30 * time.Second,
+				Transport: h2cTransport,
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			}
+			streamClient = &http.Client{
+				Timeout:   0,
+				Transport: h2cTransport,
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			}
 		}
 	} else {
 		// 标准 HTTP/1.1 或 HTTP/2 over TLS
-		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: transport}
-		streamClient = &http.Client{Timeout: 0, Transport: transport}
+		// 禁用自动重定向跟随，手动处理 302/303 重定向
+		httpClient = &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+		streamClient = &http.Client{
+			Timeout:   0,
+			Transport: transport,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 
 	server := &ProxyServer{
@@ -1770,7 +1812,7 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 					RedirectURL: rawURL,
 					PasswdInfo:  encPath,
 					FileSize:    int64(size),
-					ExpireAt:    time.Now().Add(72 * time.Hour),
+					OriginalURL: originalPath,
 				})
 
 				// 修改返回的 URL
@@ -1982,6 +2024,62 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// 处理 302/303 重定向：对于需要解密的路径，创建代理重定向
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		location := resp.Header.Get("Location")
+		log.Infof("handleDownload backend redirect: path=%s statusCode=%d location=%s",
+			filePath, resp.StatusCode, location)
+
+		if encPath != nil && encPath.Enable && location != "" {
+			// 对于需要解密的 GET 请求，创建代理重定向
+			// 生成唯一的重定向 key
+			redirectKey := fmt.Sprintf("%d-%s", time.Now().UnixNano(), path.Base(filePath))
+
+			// 缓存重定向信息
+			redirectInfo := &RedirectInfo{
+				RedirectURL: location,
+				PasswdInfo:  encPath,
+				FileSize:    fileSize,
+				OriginalURL: r.URL.String(),
+				Headers:     r.Header.Clone(),
+			}
+			p.storeRedirectCache(redirectKey, redirectInfo)
+
+			// 构建代理重定向 URL
+			proxyLocation := fmt.Sprintf("/redirect/%s?decode=1&lastUrl=%s",
+				redirectKey, url.QueryEscape(r.URL.Path))
+
+			log.Infof("handleDownload proxy redirect: path=%s, original=%s, proxy=%s, fileSize=%d",
+				filePath, location, proxyLocation, fileSize)
+
+			// 复制响应头（排除 Location）
+			for key, values := range resp.Header {
+				if strings.ToLower(key) == "location" {
+					continue
+				}
+				for _, value := range values {
+					w.Header().Add(key, value)
+				}
+			}
+
+			// 返回修改后的重定向响应
+			w.Header().Set("Location", proxyLocation)
+			w.WriteHeader(resp.StatusCode)
+			copyWithBuffer(w, resp.Body)
+			return
+		}
+
+		// 对于不需要解密的请求，直接透传重定向
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		copyWithBuffer(w, resp.Body)
+		return
+	}
 
 	// 如果缓存中没有文件大小，尝试从响应头获取；如果仍然未知，探测远程总大小（HEAD 或 Range=0-0）
 	if fileSize == 0 && encPath != nil {
@@ -2337,6 +2435,10 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 添加调试日志：记录后端响应状态码和内容长度
+	log.Infof("WebDAV backend response: method=%s path=%s statusCode=%d contentLength=%s contentType=%s",
+		r.Method, filePath, resp.StatusCode, resp.Header.Get("Content-Length"), resp.Header.Get("Content-Type"))
+
 	// PROPFIND 404 重试机制 (因为我们不知道请求的是目录还是加密文件)
 	// 如果默认透传 (当作目录) 失败，尝试加密文件名再试 (当作文件)
 	if r.Method == "PROPFIND" && resp.StatusCode == 404 && encPath != nil && encPath.EncName {
@@ -2401,8 +2503,13 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 复制响应头
+	// 复制响应头（排除 Location，后面可能需要修改）
 	for key, values := range resp.Header {
+		lowerKey := strings.ToLower(key)
+		// 暂不复制 Location，后面处理重定向时可能需要修改
+		if lowerKey == "location" {
+			continue
+		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
@@ -2411,6 +2518,71 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	statusCode := resp.StatusCode
 	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
 		statusCode = http.StatusPartialContent
+	}
+
+	// 处理 302/303 重定向：对于需要解密的路径，创建代理重定向
+	// 这模拟了 alist-encrypt 的行为，拦截重定向并通过 /redirect/ 端点处理
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		location := resp.Header.Get("Location")
+		log.Infof("WebDAV backend redirect: method=%s path=%s statusCode=%d location=%s",
+			r.Method, filePath, resp.StatusCode, location)
+
+		if r.Method == "GET" && encPath != nil && encPath.Enable && location != "" {
+			// 对于需要解密的 GET 请求，创建代理重定向
+			// 尝试获取文件大小（从缓存或响应头）
+			var fileSize int64 = 0
+			if cached, ok := p.loadFileCache(filePath); ok && !cached.IsDir && cached.Size > 0 {
+				fileSize = cached.Size
+			} else if strings.HasPrefix(filePath, "/dav/") {
+				noDav := strings.TrimPrefix(filePath, "/dav")
+				if cached, ok := p.loadFileCache(noDav); ok && !cached.IsDir && cached.Size > 0 {
+					fileSize = cached.Size
+				}
+			}
+			// 也尝试用密文路径查缓存
+			if fileSize == 0 && encPath.EncName {
+				realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+				encPathFull := path.Join(path.Dir(filePath), realName)
+				if !strings.HasPrefix(encPathFull, "/") {
+					encPathFull = "/" + encPathFull
+				}
+				if cached, ok := p.loadFileCache(encPathFull); ok && !cached.IsDir && cached.Size > 0 {
+					fileSize = cached.Size
+				}
+			}
+
+			// 生成唯一的重定向 key
+			redirectKey := fmt.Sprintf("%d-%s", time.Now().UnixNano(), path.Base(filePath))
+
+			// 缓存重定向信息
+			redirectInfo := &RedirectInfo{
+				RedirectURL: location,
+				PasswdInfo:  encPath,
+				FileSize:    fileSize,
+				OriginalURL: r.URL.String(),
+				Headers:     r.Header.Clone(),
+			}
+			p.storeRedirectCache(redirectKey, redirectInfo)
+
+			// 构建代理重定向 URL
+			proxyLocation := fmt.Sprintf("/redirect/%s?decode=1&lastUrl=%s",
+				redirectKey, url.QueryEscape(r.URL.Path))
+
+			log.Infof("WebDAV proxy redirect: path=%s, original=%s, proxy=%s, fileSize=%d",
+				filePath, location, proxyLocation, fileSize)
+
+			// 返回修改后的重定向响应
+			w.Header().Set("Location", proxyLocation)
+			w.WriteHeader(resp.StatusCode)
+			copyWithBuffer(w, resp.Body)
+			return
+		}
+
+		// 对于不需要解密的请求，直接透传重定向
+		w.Header().Set("Location", location)
+		w.WriteHeader(statusCode)
+		copyWithBuffer(w, resp.Body)
+		return
 	}
 
 	// 6. 处理 GET 下载解密
