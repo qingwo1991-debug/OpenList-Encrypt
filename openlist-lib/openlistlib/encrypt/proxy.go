@@ -2162,8 +2162,21 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 尝试获取文件大小
+		// 尝试从缓存获取文件大小（WebDAV PROPFIND 已缓存）
 		var fileSize int64 = 0
+		if cached, ok := p.loadFileCache(filePath); ok && !cached.IsDir && cached.Size > 0 {
+			fileSize = cached.Size
+		} else {
+			// 兼容不带 /dav 前缀的缓存键
+			if strings.HasPrefix(filePath, "/dav/") {
+				noDav := strings.TrimPrefix(filePath, "/dav")
+				if cached, ok := p.loadFileCache(noDav); ok && !cached.IsDir && cached.Size > 0 {
+					fileSize = cached.Size
+				}
+			}
+		}
+
+		// 尝试获取文件大小
 		contentRange := resp.Header.Get("Content-Range")
 		if contentRange != "" {
 			// 格式: bytes start-end/total
