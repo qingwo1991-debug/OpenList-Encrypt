@@ -11,14 +11,28 @@ fetch_release_info() {
     local api_url="https://api.github.com/repos/OpenListTeam/OpenList-Frontend/releases/latest"
     local proxy_url="https://ghproxy.lvedong.eu.org/https://api.github.com/repos/OpenListTeam/OpenList-Frontend/releases/latest"
     
+    # Build auth header if GITHUB_TOKEN is available (increases rate limit from 60 to 5000 per hour)
+    local auth_header=""
+    if [ -n "$GITHUB_TOKEN" ]; then
+        auth_header="Authorization: Bearer $GITHUB_TOKEN"
+        echo "Using GITHUB_TOKEN for API authentication"
+    fi
+    
     # First try direct API
     echo "Trying direct GitHub API..."
     while [ $attempt -le $max_attempts ]; do
         echo "Direct API attempt $attempt/$max_attempts..."
         
-        RELEASE_INFO=$(curl -fsSL --max-time 10 \
-            -H "Accept: application/vnd.github.v3+json" \
-            "$api_url" 2>/dev/null)
+        if [ -n "$auth_header" ]; then
+            RELEASE_INFO=$(curl -fsSL --max-time 10 \
+                -H "Accept: application/vnd.github.v3+json" \
+                -H "$auth_header" \
+                "$api_url" 2>/dev/null)
+        else
+            RELEASE_INFO=$(curl -fsSL --max-time 10 \
+                -H "Accept: application/vnd.github.v3+json" \
+                "$api_url" 2>/dev/null)
+        fi
         
         local curl_exit_code=$?
         

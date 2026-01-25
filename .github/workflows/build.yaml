@@ -48,6 +48,8 @@ jobs:
           node-version: '16'
 
       - name: Build and Setup WebUI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 1. Initialize OpenList Frontend (using official script for better compatibility)
           echo "Initializing OpenList Frontend..."

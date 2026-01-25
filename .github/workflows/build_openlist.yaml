@@ -53,6 +53,8 @@ jobs:
           fetch-depth: 0
 
       - name: Download OpenList Source Code
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd $GITHUB_WORKSPACE/openlist-lib/scripts
           chmod +x *.sh
