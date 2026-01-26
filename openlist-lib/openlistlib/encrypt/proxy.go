@@ -1431,21 +1431,48 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	if decode != "0" && info.PasswdInfo != nil {
 		fileSize := info.FileSize
 
-		// 如果 fileSize 为 0，尝试从响应头获取
+		// 如果 fileSize 为 0，尝试多种方式获取（修复 WebDAV 播放问题）
 		if fileSize == 0 {
-			// 首先尝试从 Content-Range 获取总大小 (格式: bytes start-end/total)
-			if cr := resp.Header.Get("Content-Range"); cr != "" {
-				if idx := strings.LastIndex(cr, "/"); idx != -1 {
-					totalStr := cr[idx+1:]
-					if totalStr != "*" {
-						if total, err := strconv.ParseInt(totalStr, 10, 64); err == nil && total > 0 {
-							fileSize = total
-							log.Infof("handleRedirect: got fileSize from Content-Range: %d", fileSize)
+			// 1. 首先尝试从缓存中查找（使用多种路径变体）
+			if info.OriginalURL != "" {
+				origPath := info.OriginalURL
+				if u, err := url.Parse(info.OriginalURL); err == nil {
+					origPath = u.Path
+				}
+				// 尝试多种路径变体查找缓存
+				pathVariants := []string{
+					origPath,
+					strings.TrimPrefix(origPath, "/dav"),
+					"/dav" + strings.TrimPrefix(origPath, "/dav"),
+				}
+				for _, cachePath := range pathVariants {
+					if cachePath == "" {
+						continue
+					}
+					if cached, ok := p.loadFileCache(cachePath); ok && !cached.IsDir && cached.Size > 0 {
+						fileSize = cached.Size
+						log.Infof("handleRedirect: got fileSize from cache (%s): %d", cachePath, fileSize)
+						break
+					}
+				}
+			}
+
+			// 2. 尝试从 Content-Range 获取总大小 (格式: bytes start-end/total)
+			if fileSize == 0 {
+				if cr := resp.Header.Get("Content-Range"); cr != "" {
+					if idx := strings.LastIndex(cr, "/"); idx != -1 {
+						totalStr := cr[idx+1:]
+						if totalStr != "*" {
+							if total, err := strconv.ParseInt(totalStr, 10, 64); err == nil && total > 0 {
+								fileSize = total
+								log.Infof("handleRedirect: got fileSize from Content-Range: %d", fileSize)
+							}
 						}
 					}
 				}
 			}
-			// 如果 Content-Range 没有总大小，尝试 Content-Length（仅当没有 Range 请求时有效）
+
+			// 3. 如果 Content-Range 没有总大小，尝试 Content-Length（仅当没有 Range 请求时有效）
 			if fileSize == 0 && rangeHeader == "" {
 				if cl := resp.Header.Get("Content-Length"); cl != "" {
 					if parsedSize, err := strconv.ParseInt(cl, 10, 64); err == nil && parsedSize > 0 {
@@ -1454,8 +1481,27 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			// 如果仍然为 0，尝试探测远程文件大小
-			if fileSize == 0 && p.config != nil && p.config.ProbeOnDownload {
+
+			// 4. 尝试通过 WebDAV PROPFIND 获取文件大小
+			if fileSize == 0 && info.OriginalURL != "" {
+				origPath := info.OriginalURL
+				if u, err := url.Parse(info.OriginalURL); err == nil {
+					origPath = u.Path
+				}
+				// 构建 WebDAV URL
+				webdavPath := origPath
+				if !strings.HasPrefix(webdavPath, "/dav") {
+					webdavPath = "/dav" + webdavPath
+				}
+				webdavURL := p.getAlistURL() + webdavPath
+				if size := p.fetchWebDAVFileSize(webdavURL, info.Headers); size > 0 {
+					fileSize = size
+					log.Infof("handleRedirect: got fileSize from WebDAV PROPFIND: %d", fileSize)
+				}
+			}
+
+			// 5. 如果仍然为 0，尝试探测远程文件大小（即使 ProbeOnDownload 未开启也尝试）
+			if fileSize == 0 {
 				probed := p.probeRemoteFileSize(info.RedirectURL, req.Header)
 				if probed > 0 {
 					fileSize = probed
@@ -1464,11 +1510,17 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 					resp.Body.Close()
 					req2, _ := http.NewRequest("GET", info.RedirectURL, nil)
 					for key, values := range r.Header {
-						if key != "Host" {
-							for _, value := range values {
-								req2.Header.Add(key, value)
-							}
+						lowerKey := strings.ToLower(key)
+						if lowerKey == "host" || lowerKey == "referer" || lowerKey == "authorization" {
+							continue
 						}
+						for _, value := range values {
+							req2.Header.Add(key, value)
+						}
+					}
+					// 百度云盘需要特殊的 User-Agent
+					if strings.Contains(info.RedirectURL, "baidupcs.com") {
+						req2.Header.Set("User-Agent", "pan.baidu.com")
 					}
 					resp, err = p.streamClient.Do(req2)
 					if err != nil {
@@ -1489,9 +1541,9 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// 如果仍然为 0，跳过解密直接代理
+		// 如果仍然为 0，跳过解密直接代理（记录更详细的警告信息）
 		if fileSize == 0 {
-			log.Warnf("handleRedirect: fileSize is 0, skipping decryption")
+			log.Warnf("handleRedirect: fileSize is 0, skipping decryption. originalURL=%s, redirectURL=%s", info.OriginalURL, info.RedirectURL)
 			w.WriteHeader(statusCode)
 			copyWithBuffer(w, resp.Body)
 			return
@@ -2548,6 +2600,30 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				}
 				if cached, ok := p.loadFileCache(encPathFull); ok && !cached.IsDir && cached.Size > 0 {
 					fileSize = cached.Size
+				}
+			}
+
+			// 如果缓存中没有 fileSize，尝试通过 PROPFIND 获取（修复 WebDAV 播放问题）
+			if fileSize == 0 {
+				propfindURL := targetURL
+				if size := p.fetchWebDAVFileSize(propfindURL, r.Header); size > 0 {
+					fileSize = size
+					log.Infof("WebDAV redirect: got fileSize from PROPFIND: %d for %s", fileSize, filePath)
+					// 缓存文件大小
+					p.storeFileCache(filePath, &FileInfo{Name: path.Base(filePath), Size: size, IsDir: false, Path: filePath})
+					if strings.HasPrefix(filePath, "/dav/") {
+						noDav := strings.TrimPrefix(filePath, "/dav")
+						p.storeFileCache(noDav, &FileInfo{Name: path.Base(noDav), Size: size, IsDir: false, Path: noDav})
+					}
+				}
+			}
+
+			// 如果 PROPFIND 也获取不到，尝试探测远程文件大小
+			if fileSize == 0 {
+				probed := p.probeRemoteFileSize(location, r.Header)
+				if probed > 0 {
+					fileSize = probed
+					log.Infof("WebDAV redirect: probed remote fileSize: %d for %s", fileSize, filePath)
 				}
 			}
 
