@@ -35,11 +35,17 @@ const (
 	fileCacheMaxSize = 10000
 	// redirectCacheTTL 重定向缓存过期时间
 	redirectCacheTTL = 5 * time.Minute
-	// parallelDecryptThreshold 并行解密文件名的阈值
-	parallelDecryptThreshold = 20
+	// parallelDecryptThreshold 并行解密文件名的阈值（降低以更早启用并行）
+	parallelDecryptThreshold = 10
 	// maxParallelDecrypt 最大并行解密数
 	maxParallelDecrypt = 8
 )
+
+// 常见视频封面文件扩展名
+var coverExtensions = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true,
+	".webp": true, ".gif": true, ".bmp": true,
+}
 
 // bufferPool 缓冲区池，避免频繁内存分配
 var bufferPool = sync.Pool{
@@ -1685,6 +1691,9 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 
+					// 封面自动隐藏：将与视频同名的图片设置为视频的 thumb
+					p.processCoverFiles(content)
+
 					result["data"] = data
 					outBody, _ = json.Marshal(result)
 				}
@@ -1769,6 +1778,70 @@ type fileDecryptTask struct {
 	name     string
 	filePath string
 	encPath  *EncryptPath // 每个文件的加密配置
+}
+
+// 常见视频扩展名
+var videoExtensions = map[string]bool{
+	".mp4": true, ".mkv": true, ".avi": true, ".mov": true,
+	".wmv": true, ".flv": true, ".webm": true, ".m4v": true,
+	".ts": true, ".rmvb": true, ".rm": true, ".3gp": true,
+}
+
+// processCoverFiles 处理封面文件：将与视频同名的图片隐藏并设置为视频的 thumb
+func (p *ProxyServer) processCoverFiles(content []interface{}) {
+	// 构建视频文件名映射（不含扩展名 -> 文件信息）
+	videoMap := make(map[string]map[string]interface{})
+	coverFiles := make([]int, 0)
+
+	for i, item := range content {
+		if fileMap, ok := item.(map[string]interface{}); ok {
+			name, _ := fileMap["name"].(string)
+			isDir, _ := fileMap["is_dir"].(bool)
+			if isDir || name == "" {
+				continue
+			}
+
+			ext := strings.ToLower(path.Ext(name))
+			baseName := strings.TrimSuffix(name, ext)
+
+			if videoExtensions[ext] {
+				videoMap[baseName] = fileMap
+			} else if coverExtensions[ext] {
+				coverFiles = append(coverFiles, i)
+			}
+		}
+	}
+
+	// 将封面文件与视频匹配
+	omitIndices := make(map[int]bool)
+	for _, idx := range coverFiles {
+		if fileMap, ok := content[idx].(map[string]interface{}); ok {
+			name, _ := fileMap["name"].(string)
+			ext := strings.ToLower(path.Ext(name))
+			baseName := strings.TrimSuffix(name, ext)
+
+			// 查找同名视频
+			if videoFileMap, exists := videoMap[baseName]; exists {
+				// 设置视频的 thumb 为封面的 path
+				if coverPath, ok := fileMap["path"].(string); ok && coverPath != "" {
+					videoFileMap["thumb"] = coverPath
+					omitIndices[idx] = true
+					log.Debugf("Cover auto-hide: %s -> thumb for video %s", name, baseName)
+				}
+			}
+		}
+	}
+
+	// 从列表中移除被隐藏的封面（从后向前删除以保持索引正确）
+	if len(omitIndices) > 0 {
+		// 注意：由于 content 是 []interface{}，我们不能直接修改切片长度
+		// 但可以将隐藏的文件标记为 hidden
+		for idx := range omitIndices {
+			if fileMap, ok := content[idx].(map[string]interface{}); ok {
+				fileMap["hidden"] = true
+			}
+		}
+	}
 }
 
 // handleFsGet 处理获取文件信息

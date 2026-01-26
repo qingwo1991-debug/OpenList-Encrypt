@@ -21,9 +21,10 @@ import (
 type EncryptionType string
 
 const (
-	EncTypeAESCTR EncryptionType = "aes-ctr"
-	EncTypeRC4    EncryptionType = "rc4md5"
-	EncTypeMix    EncryptionType = "mix"
+	EncTypeAESCTR   EncryptionType = "aes-ctr"
+	EncTypeRC4      EncryptionType = "rc4md5"
+	EncTypeMix      EncryptionType = "mix"
+	EncTypeChaCha20 EncryptionType = "chacha20"
 )
 
 // 缓存密码外部密钥
@@ -205,6 +206,8 @@ func NewFlowEncryptor(password string, encType EncryptionType, fileSize int64) (
 		return NewRC4MD5Encryptor(password, passwdOutward, fileSize)
 	case EncTypeMix:
 		return NewMixEncryptor(password, fileSize)
+	case EncTypeChaCha20, "chacha":
+		return NewChaCha20Encryptor(password, passwdOutward, fileSize)
 	default:
 		return nil, errors.New("unsupported encryption type: " + string(encType))
 	}
@@ -231,6 +234,8 @@ func GetPasswdOutward(password string, encType EncryptionType) string {
 		salt = "AES-CTR"
 	case EncTypeRC4, "rc4":
 		salt = "RC4"
+	case EncTypeChaCha20, "chacha":
+		salt = "CHACHA20"
 	default:
 		// Unknown type, assume password is raw? Or MIX default?
 		salt = "MIX"
