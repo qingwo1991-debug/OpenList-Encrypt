@@ -27,8 +27,12 @@ import (
 const (
 	// streamBufferSize 流传输缓冲区大小 (512KB)，优化大文件播放
 	streamBufferSize = 512 * 1024
+	// mediumBufferSize 中等文件缓冲区 (128KB)
+	mediumBufferSize = 128 * 1024
 	// smallBufferSize 小文件/API响应缓冲区 (32KB)
 	smallBufferSize = 32 * 1024
+	// prefetchBufferSize 视频预读缓冲区大小 (1MB)
+	prefetchBufferSize = 1024 * 1024
 	// fileCacheTTL 文件信息缓存过期时间
 	fileCacheTTL = 10 * time.Minute
 	// fileCacheMaxSize 文件缓存最大条目数
@@ -47,13 +51,30 @@ var coverExtensions = map[string]bool{
 	".webp": true, ".gif": true, ".bmp": true,
 }
 
-// bufferPool 缓冲区池，避免频繁内存分配
-var bufferPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, streamBufferSize)
-		return &buf
-	},
-}
+// 分级缓冲区池，根据文件大小选择合适的缓冲区
+var (
+	// largeBufferPool 大文件缓冲区池 (512KB)
+	largeBufferPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, streamBufferSize)
+			return &buf
+		},
+	}
+	// mediumBufferPool 中等文件缓冲区池 (128KB)
+	mediumBufferPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, mediumBufferSize)
+			return &buf
+		},
+	}
+	// smallBufferPool 小文件缓冲区池 (32KB)
+	smallBufferPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, smallBufferSize)
+			return &buf
+		},
+	}
+)
 
 // ErrStopRedirect 用于停止自动重定向跟随
 var ErrStopRedirect = errors.New("redirect stopped")
@@ -67,11 +88,31 @@ type RedirectInfo struct {
 	Headers     http.Header  `json:"headers"`     // 原始请求头
 }
 
-// copyWithBuffer 使用缓冲区池进行高效复制
+// copyWithBuffer 使用大缓冲区池进行高效复制（用于流媒体）
 func copyWithBuffer(dst io.Writer, src io.Reader) (int64, error) {
-	bufPtr := bufferPool.Get().(*[]byte)
-	defer bufferPool.Put(bufPtr)
+	bufPtr := largeBufferPool.Get().(*[]byte)
+	defer largeBufferPool.Put(bufPtr)
 	return io.CopyBuffer(dst, src, *bufPtr)
+}
+
+// copyWithSmallBuffer 使用小缓冲区池进行复制（用于小文件/API）
+func copyWithSmallBuffer(dst io.Writer, src io.Reader) (int64, error) {
+	bufPtr := smallBufferPool.Get().(*[]byte)
+	defer smallBufferPool.Put(bufPtr)
+	return io.CopyBuffer(dst, src, *bufPtr)
+}
+
+// copyWithAdaptiveBuffer 根据文件大小自适应选择缓冲区
+func copyWithAdaptiveBuffer(dst io.Writer, src io.Reader, fileSize int64) (int64, error) {
+	if fileSize <= 0 || fileSize > 10*1024*1024 { // 未知大小或大于 10MB
+		return copyWithBuffer(dst, src)
+	} else if fileSize > 1024*1024 { // 1MB - 10MB
+		bufPtr := mediumBufferPool.Get().(*[]byte)
+		defer mediumBufferPool.Put(bufPtr)
+		return io.CopyBuffer(dst, src, *bufPtr)
+	} else { // 小于 1MB
+		return copyWithSmallBuffer(dst, src)
+	}
 }
 
 // CachedFileInfo 带过期时间的文件信息缓存

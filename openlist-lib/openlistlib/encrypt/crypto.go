@@ -52,6 +52,8 @@ type AESCTREncryptor struct {
 	sourceIv []byte
 	position int64
 	cipher   cipher.Stream
+	block    cipher.Block // 缓存 AES block，避免每次 SetPosition 重建
+	skipBuf  []byte       // 复用的 skip 缓冲区
 }
 
 // NewAESCTREncryptor 创建 AES-CTR 加密器 (Node.js compatible)
@@ -81,6 +83,8 @@ func NewAESCTREncryptor(password, passwdOutward string, fileSize int64) (*AESCTR
 		sourceIv: sourceIv,
 		position: 0,
 		cipher:   stream,
+		block:    block,            // 缓存 block
+		skipBuf:  make([]byte, 16), // 预分配 skip 缓冲区（最大 15 字节）
 	}, nil
 }
 
@@ -125,23 +129,14 @@ func (e *AESCTREncryptor) SetPosition(position int64) error {
 	increment := position / 16
 	e.incrementIV(increment)
 
-	block, err := aes.NewCipher(e.key)
-	if err != nil {
-		return err
-	}
-	e.cipher = cipher.NewCTR(block, e.iv)
+	// 复用缓存的 block，只重建 CTR stream
+	e.cipher = cipher.NewCTR(e.block, e.iv)
 
 	offset := int(position % 16)
 	if offset > 0 {
-		skip := make([]byte, offset)
-		e.Encrypt(skip) // consumes keystream, output ignored
+		// 使用预分配的缓冲区，避免内存分配
+		e.cipher.XORKeyStream(e.skipBuf[:offset], e.skipBuf[:offset])
 	}
-
-	e.position = position // e.Encrypt updates this? No, e.Encrypt updates internal state?
-	// e.Encrypt updates e.position if I modify it to do so.
-	// Node.js doesn't seem to track position in property, but "this.encrypt" updates "this.cipher".
-	// In Go, Encrypt calls XORKeyStream.
-	// "e.Encrypt(skip)" below will update stream state.
 
 	e.position = position
 	return nil
