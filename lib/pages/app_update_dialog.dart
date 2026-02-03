@@ -20,7 +20,7 @@ class AppUpdateDialog extends StatelessWidget {
 
   static checkUpdateAndShowDialog(
       BuildContext context, ValueChanged<bool>? checkFinished) async {
-    final checker = UpdateChecker(owner: "openlistteam", repo: "OpenList-Mobile");
+    final checker = UpdateChecker(owner: "qingwo1991-debug", repo: "OpenList-Encrypt");
     await checker.downloadData();
     final hasNewVersion = await checker.hasNewVersion();
     

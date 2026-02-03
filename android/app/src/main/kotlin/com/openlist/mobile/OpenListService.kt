@@ -13,6 +13,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.IBinder
+import android.net.wifi.WifiManager
 import android.os.PowerManager
 import android.util.Log
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
@@ -61,6 +62,7 @@ class OpenListService : Service(), OpenList.Listener {
     private val mNotificationReceiver = NotificationActionReceiver()
     private val mReceiver = MyReceiver()
     private var mWakeLock: PowerManager.WakeLock? = null
+    private var mWifiLock: WifiManager.WifiLock? = null
     private var mLocalAddress: String = ""
     private var mDbSyncJob: Job? = null
 
@@ -130,6 +132,20 @@ class OpenListService : Service(), OpenList.Listener {
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to acquire wake lock", e)
             }
+
+            // Acquire WiFi lock to maintain network connection priority
+            try {
+                val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                @Suppress("DEPRECATION")
+                mWifiLock = wifiManager.createWifiLock(
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                    "openlist::wifilock"
+                )
+                mWifiLock?.acquire()
+                Log.d(TAG, "WiFi lock acquired")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to acquire wifi lock", e)
+            }
         }
 
         Log.d(TAG, "Service onCreate completed")
@@ -152,6 +168,15 @@ class OpenListService : Service(), OpenList.Listener {
             Log.d(TAG, "Wake lock released")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to release wake lock", e)
+        }
+
+        // 释放WiFi锁
+        try {
+            mWifiLock?.release()
+            mWifiLock = null
+            Log.d(TAG, "WiFi lock released")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to release wifi lock", e)
         }
 
         // 停止前台服务并取消通知
