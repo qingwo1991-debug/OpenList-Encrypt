@@ -1,18 +1,23 @@
 package com.openlist.mobile.utils
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.widget.Toast
 import androidx.annotation.StringRes
-import kotlinx.coroutines.DelicateCoroutinesApi
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.launch
 
 object ToastUtils {
-    @OptIn(DelicateCoroutinesApi::class)
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * 在主线程执行代码块
+     * 使用 Handler 替代 GlobalScope，避免内存泄漏风险
+     */
     fun runMain(block: () -> Unit) {
-        GlobalScope.launch(Dispatchers.Main) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
             block()
+        } else {
+            mainHandler.post(block)
         }
     }
 

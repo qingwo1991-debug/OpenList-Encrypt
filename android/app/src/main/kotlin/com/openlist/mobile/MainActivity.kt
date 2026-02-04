@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Bundle
 import android.util.Log
+import androidx.lifecycle.lifecycleScope
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.openlist.mobile.bridge.AndroidBridge
 import com.openlist.mobile.bridge.AppConfigBridge
@@ -19,15 +20,13 @@ import com.openlist.pigeon.GeneratedApi.VoidResult
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugins.GeneratedPluginRegistrant
-import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 
 class MainActivity : FlutterActivity() {
     companion object {
         private const val TAG = "MainActivity"
-        
+
         // 静态引用，供其他组件访问
         @Volatile
         var serviceBridge: ServiceBridge? = null
@@ -36,8 +35,8 @@ class MainActivity : FlutterActivity() {
 
     private val receiver by lazy { MyReceiver() }
     private var mEvent: GeneratedApi.Event? = null
+    private var mLoggerListener: Logger.Listener? = null
 
-    @OptIn(DelicateCoroutinesApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -58,22 +57,22 @@ class MainActivity : FlutterActivity() {
         val serviceChannel = MethodChannel(binaryMessage, "com.openlist.mobile/service")
         serviceBridge = ServiceBridge(this, serviceChannel)
 
-        Logger.addListener(object : Logger.Listener {
+        // 保存监听器引用，以便在 onDestroy 中移除，防止内存泄漏
+        mLoggerListener = object : Logger.Listener {
             override fun onLog(level: Int, time: String, msg: String) {
-                GlobalScope.launch(Dispatchers.Main) {
+                // 使用 lifecycleScope 替代 GlobalScope，确保 Activity 销毁时协程自动取消
+                lifecycleScope.launch(Dispatchers.Main) {
                     mEvent?.onServerLog(level.toLong(), time, msg, object : VoidResult {
                         override fun success() {
-
                         }
 
                         override fun error(error: Throwable) {
                         }
-
                     })
                 }
             }
-
-        })
+        }
+        Logger.addListener(mLoggerListener!!)
     }
 
     override fun onPause() {
@@ -105,7 +104,14 @@ class MainActivity : FlutterActivity() {
         super.onDestroy()
         // Trigger database sync before activity is destroyed
         triggerDatabaseSync("onDestroy")
-        
+
+        // 移除 Logger 监听器，防止内存泄漏
+        mLoggerListener?.let { Logger.removeListener(it) }
+        mLoggerListener = null
+
+        // 清除静态引用
+        serviceBridge = null
+
         LocalBroadcastManager.getInstance(this).unregisterReceiver(receiver)
     }
 

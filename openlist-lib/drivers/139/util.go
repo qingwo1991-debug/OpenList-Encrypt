@@ -572,7 +572,9 @@ func (d *Yun139) isboPost(pathname string, data interface{}, resp interface{}) (
 func getPersonalTime(t string) time.Time {
 	stamp, err := time.ParseInLocation("2006-01-02T15:04:05.999-07:00", t, utils.CNLoc)
 	if err != nil {
-		panic(err)
+		// 解析失败时返回零值而非 panic，避免因格式问题导致程序崩溃
+		log.Warnf("[139] failed to parse personal time %q: %v", t, err)
+		return time.Time{}
 	}
 	return stamp
 }

@@ -190,6 +190,23 @@ flutter build apk
 
 ## 更新日志
 
+### 2025-02-04
+- **性能优化**: Gradle 构建性能优化
+  - 启用并行构建 (`org.gradle.parallel=true`)
+  - 启用构建缓存 (`org.gradle.caching=true`)
+  - 启用配置缓存 (`org.gradle.configuration-cache=true`)
+  - 优化 JVM 内存配置
+- **性能优化**: Flutter UI 性能优化
+  - 日志列表添加 `cacheExtent` 和 `itemExtent`，提升滚动流畅度
+  - 使用普通 `Text` 替代 `SelectableText`，减少渲染开销
+- **修复**: Android 内存泄漏修复
+  - 修复 `MainActivity` 中 Logger 监听器未注销导致的内存泄漏
+  - 移除 `ToastUtils` 中的 `GlobalScope`，改用 `Handler`
+  - 使用 `lifecycleScope` 替代 `GlobalScope`，确保协程生命周期安全
+- **修复**: Go 核心库稳定性优化
+  - 移除 `drivers/139/util.go` 中的 `panic`，改为安全返回零值
+  - 移除 `pkg/utils/io.go` 中的 `panic("Not reusable")`，改为日志警告
+
 ### 2025-01-25
 - **修复**: 将默认数据目录从外部存储 (`getExternalFilesDir`) 改为内部存储 (`getFilesDir`)，确保应用卸载时加密配置等数据会被自动清除
   - 之前：某些厂商 ROM（如 MIUI、EMUI）在卸载应用时不会清除外部存储中的数据

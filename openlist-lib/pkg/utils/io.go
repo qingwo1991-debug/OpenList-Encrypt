@@ -236,7 +236,9 @@ func (c *SyncClosers) Close() error {
 func (c *SyncClosers) Add(closer io.Closer) {
 	if closer != nil {
 		if atomic.LoadInt32(&c.ref) < 0 {
-			panic("Not reusable")
+			// 已关闭的 SyncClosers 不应再添加 closer，记录警告并忽略
+			log.Warnf("SyncClosers.Add: attempted to add closer to already closed SyncClosers")
+			return
 		}
 		c.closers = append(c.closers, closer)
 	}
@@ -245,7 +247,9 @@ func (c *SyncClosers) Add(closer io.Closer) {
 func (c *SyncClosers) AddIfCloser(a any) {
 	if closer, ok := a.(io.Closer); ok {
 		if atomic.LoadInt32(&c.ref) < 0 {
-			panic("Not reusable")
+			// 已关闭的 SyncClosers 不应再添加 closer，记录警告并忽略
+			log.Warnf("SyncClosers.AddIfCloser: attempted to add closer to already closed SyncClosers")
+			return
 		}
 		c.closers = append(c.closers, closer)
 	}
