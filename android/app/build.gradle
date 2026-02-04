@@ -44,7 +44,7 @@ try {
 
 android {
     namespace "com.openlist.mobile"
-    compileSdk = 34
+    compileSdk = 35
     ndkVersion = "25.2.9519653"  // 与 CI 中安装的版本保持一致
 
     signingConfigs {
