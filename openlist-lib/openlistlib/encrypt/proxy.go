@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,9 +42,30 @@ const (
 	redirectCacheTTL = 5 * time.Minute
 	// parallelDecryptThreshold 并行解密文件名的阈值（降低以更早启用并行）
 	parallelDecryptThreshold = 5
-	// maxParallelDecrypt 最大并行解密数（增加以加速大列表解密）
-	maxParallelDecrypt = 16
+	// defaultParallelDecrypt 默认并行解密数（当无法获取 CPU 核心数时使用）
+	defaultParallelDecrypt = 8
+	// maxParallelDecryptLimit 最大并行解密数上限
+	maxParallelDecryptLimit = 32
 )
+
+// 动态计算的并行解密数，根据 CPU 核心数自动调整
+var maxParallelDecrypt = func() int {
+	numCPU := runtime.NumCPU()
+	if numCPU <= 0 {
+		// 无法获取核心数，使用默认值
+		return defaultParallelDecrypt
+	}
+	// 并发数 = CPU 核心数 * 2，范围 [4, maxParallelDecryptLimit]
+	parallel := numCPU * 2
+	if parallel < 4 {
+		parallel = 4
+	}
+	if parallel > maxParallelDecryptLimit {
+		parallel = maxParallelDecryptLimit
+	}
+	log.Infof("Auto-detected %d CPU cores, using %d parallel decrypt workers", numCPU, parallel)
+	return parallel
+}()
 
 // 常见视频封面文件扩展名
 var coverExtensions = map[string]bool{
@@ -265,13 +287,18 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	// 创建 Transport，支持 HTTP/2 over TLS
 	transport := &http.Transport{
 		MaxIdleConns:          200,               // 增加最大空闲连接
-		MaxIdleConnsPerHost:   50,                // 增加每主机空闲连接
-		MaxConnsPerHost:       100,               // 限制每主机最大连接
-		IdleConnTimeout:       120 * time.Second, // 延长空闲超时
+		MaxIdleConnsPerHost:   100,               // 增加每主机空闲连接（从50提升）
+		MaxConnsPerHost:       200,               // 增加每主机最大连接（从100提升）
+		IdleConnTimeout:       300 * time.Second, // 延长空闲超时（从120s提升到5分钟）
 		DisableCompression:    true,              // 禁用压缩，减少 CPU 开销（视频流通常已压缩）
-		ResponseHeaderTimeout: 30 * time.Second,  // 响应头超时
+		ResponseHeaderTimeout: 60 * time.Second,  // 响应头超时（从30s提升）
 		ForceAttemptHTTP2:     true,              // 启用 HTTP/2 (HTTPS)
 		TLSClientConfig:       &tls.Config{},
+		// 连接建立优化
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second, // 连接超时
+			KeepAlive: 60 * time.Second, // TCP KeepAlive，防止连接被中间设备断开
+		}).DialContext,
 	}
 
 	// 配置 HTTP/2 over TLS 支持
