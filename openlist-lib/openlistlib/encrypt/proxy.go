@@ -31,8 +31,8 @@ const (
 	mediumBufferSize = 128 * 1024
 	// smallBufferSize 小文件/API响应缓冲区 (32KB)
 	smallBufferSize = 32 * 1024
-	// prefetchBufferSize 视频预读缓冲区大小 (1MB)
-	prefetchBufferSize = 1024 * 1024
+	// prefetchBufferSize 视频预读缓冲区大小 (2MB)，优化快进体验
+	prefetchBufferSize = 2 * 1024 * 1024
 	// fileCacheTTL 文件信息缓存过期时间
 	fileCacheTTL = 10 * time.Minute
 	// fileCacheMaxSize 文件缓存最大条目数
@@ -40,9 +40,9 @@ const (
 	// redirectCacheTTL 重定向缓存过期时间
 	redirectCacheTTL = 5 * time.Minute
 	// parallelDecryptThreshold 并行解密文件名的阈值（降低以更早启用并行）
-	parallelDecryptThreshold = 10
-	// maxParallelDecrypt 最大并行解密数
-	maxParallelDecrypt = 8
+	parallelDecryptThreshold = 5
+	// maxParallelDecrypt 最大并行解密数（增加以加速大列表解密）
+	maxParallelDecrypt = 16
 )
 
 // 常见视频封面文件扩展名
@@ -533,7 +533,7 @@ func (p *ProxyServer) Start() error {
 		Handler:      mux,
 		ReadTimeout:  0, // 视频流需要长连接
 		WriteTimeout: 0,
-		IdleTimeout:  120 * time.Second,
+		IdleTimeout:  300 * time.Second, // 5分钟空闲超时，防止后台连接被过早断开
 	}
 
 	go func() {
