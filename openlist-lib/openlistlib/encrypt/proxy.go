@@ -101,6 +101,30 @@ var (
 // ErrStopRedirect 用于停止自动重定向跟随
 var ErrStopRedirect = errors.New("redirect stopped")
 
+// ProbeMethod 探测方法类型
+type ProbeMethod string
+
+const (
+	ProbeMethodRange  ProbeMethod = "range"  // Range=0-0 请求（兼容性更好）
+	ProbeMethodHead   ProbeMethod = "head"   // HEAD 请求（传统方式）
+	ProbeMethodWebDAV ProbeMethod = "webdav" // WebDAV PROPFIND
+)
+
+// probeStrategyCache 探测策略缓存（按加密路径 pattern）
+// key: 加密路径 pattern (如 "movie_encrypt/*")
+// value: *ProbeStrategy
+var probeStrategyCache sync.Map
+
+// ProbeStrategy 探测策略（学习到的成功方法）
+type ProbeStrategy struct {
+	Method       ProbeMethod // 成功的探测方法
+	SuccessCount int64       // 连续成功次数
+	mutex        sync.Mutex
+}
+
+// probeStrategyStableThreshold 探测策略稳定阈值（连续成功多少次认为稳定）
+const probeStrategyStableThreshold = 3
+
 // RedirectInfo 重定向信息，用于缓存和代理重定向
 type RedirectInfo struct {
 	RedirectURL string       `json:"redirectUrl"` // 实际重定向目标
@@ -171,6 +195,10 @@ type ProxyConfig struct {
 	ProbeOnDownload bool `json:"probeOnDownload"`
 	// EnableH2C: 启用 H2C (HTTP/2 Cleartext) 连接到后端，需要后端 OpenList 也开启 enable_h2c
 	EnableH2C bool `json:"enableH2C"`
+	// FileCacheTTL: 文件信息缓存过期时间（分钟），默认 10 分钟，视频/大文件场景可延长
+	FileCacheTTL int `json:"fileCacheTTL,omitempty"`
+	// ProbeStrategy: 文件大小探测策略 "range"(默认，兼容性更好) 或 "head"(传统方式)
+	ProbeStrategy string `json:"probeStrategy,omitempty"`
 }
 
 // ProxyServer 加密代理服务器
@@ -461,12 +489,20 @@ func normalizeCacheKey(p string) string {
 	return p
 }
 
+// getFileCacheTTL 获取文件缓存 TTL（支持配置化）
+func (p *ProxyServer) getFileCacheTTL() time.Duration {
+	if p.config != nil && p.config.FileCacheTTL > 0 {
+		return time.Duration(p.config.FileCacheTTL) * time.Minute
+	}
+	return fileCacheTTL // 默认 10 分钟
+}
+
 // storeFileCache 存储文件信息到缓存（带 TTL）
 func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
 	key := normalizeCacheKey(path)
 	entry := &CachedFileInfo{
 		Info:     info,
-		ExpireAt: time.Now().Add(fileCacheTTL),
+		ExpireAt: time.Now().Add(p.getFileCacheTTL()),
 	}
 	p.fileCache.Store(key, entry)
 	// 兼容：也保存原始 key
@@ -693,77 +729,204 @@ func (p *ProxyServer) getAlistURL() string {
 	return fmt.Sprintf("%s://%s:%d", protocol, p.config.AlistHost, p.config.AlistPort)
 }
 
-// probeRemoteFileSize 尝试通过 HEAD 或 Range 请求获取远程文件总大小，失败返回 0
+// getProbeStrategy 获取加密路径的探测策略（如果已学习）
+func getProbeStrategy(encPathPattern string) *ProbeStrategy {
+	if val, ok := probeStrategyCache.Load(encPathPattern); ok {
+		return val.(*ProbeStrategy)
+	}
+	return nil
+}
+
+// updateProbeStrategy 更新探测策略（学习成功的方法）
+func updateProbeStrategy(encPathPattern string, method ProbeMethod) {
+	val, _ := probeStrategyCache.LoadOrStore(encPathPattern, &ProbeStrategy{
+		Method:       method,
+		SuccessCount: 0,
+	})
+	strategy := val.(*ProbeStrategy)
+	strategy.mutex.Lock()
+	defer strategy.mutex.Unlock()
+	if strategy.Method == method {
+		strategy.SuccessCount++
+	} else {
+		// 方法变化，重置计数
+		strategy.Method = method
+		strategy.SuccessCount = 1
+	}
+}
+
+// clearProbeStrategy 清除加密路径的探测策略缓存
+func clearProbeStrategy(encPathPattern string) {
+	probeStrategyCache.Delete(encPathPattern)
+}
+
+// ClearAllProbeStrategies 清除所有探测策略缓存（用于调试/管理）
+func ClearAllProbeStrategies() {
+	probeStrategyCache.Range(func(key, value interface{}) bool {
+		probeStrategyCache.Delete(key)
+		return true
+	})
+	log.Info("All probe strategy cache cleared")
+}
+
+// probeWithHead 使用 HEAD 请求探测文件大小
+func (p *ProxyServer) probeWithHead(targetURL string, headers http.Header) int64 {
+	req, err := http.NewRequest("HEAD", targetURL, nil)
+	if err != nil {
+		return 0
+	}
+	for key, values := range headers {
+		if key == "Host" {
+			continue
+		}
+		for _, v := range values {
+			req.Header.Add(key, v)
+		}
+	}
+	resp, err := p.streamClient.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	// 尝试 Content-Length
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
+			return size
+		}
+	}
+	// 尝试 Content-Range
+	if cr := resp.Header.Get("Content-Range"); cr != "" {
+		if idx := strings.LastIndex(cr, "/"); idx != -1 {
+			totalStr := cr[idx+1:]
+			if totalStr != "*" {
+				if total, err := strconv.ParseInt(totalStr, 10, 64); err == nil && total > 0 {
+					return total
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// probeWithRange 使用 Range=0-0 请求探测文件大小
+func (p *ProxyServer) probeWithRange(targetURL string, headers http.Header) int64 {
+	req, err := http.NewRequest("GET", targetURL, nil)
+	if err != nil {
+		return 0
+	}
+	for key, values := range headers {
+		if key == "Host" {
+			continue
+		}
+		for _, v := range values {
+			req.Header.Add(key, v)
+		}
+	}
+	req.Header.Set("Range", "bytes=0-0")
+	resp, err := p.streamClient.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	// 优先解析 Content-Range
+	if cr := resp.Header.Get("Content-Range"); cr != "" {
+		if idx := strings.LastIndex(cr, "/"); idx != -1 {
+			totalStr := cr[idx+1:]
+			if totalStr != "*" {
+				if total, err := strconv.ParseInt(totalStr, 10, 64); err == nil && total > 0 {
+					return total
+				}
+			}
+		}
+	}
+	// 某些服务器不支持 Range，会返回完整文件的 Content-Length
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
+			// 如果状态码是 200（不是 206），说明返回的是完整文件
+			if resp.StatusCode == http.StatusOK {
+				return size
+			}
+		}
+	}
+	return 0
+}
+
+// probeRemoteFileSize 尝试通过 HEAD 或 Range 请求获取远程文件总大小
+// 支持探测策略学习：首次按顺序尝试，后续使用学习到的成功方法
 func (p *ProxyServer) probeRemoteFileSize(targetURL string, headers http.Header) int64 {
+	return p.probeRemoteFileSizeWithPath(targetURL, headers, "")
+}
+
+// probeRemoteFileSizeWithPath 带加密路径的探测（支持策略学习）
+func (p *ProxyServer) probeRemoteFileSizeWithPath(targetURL string, headers http.Header, encPathPattern string) int64 {
 	if p.config != nil && !p.config.ProbeOnDownload {
 		return 0
 	}
-	// try HEAD first
-	req, err := http.NewRequest("HEAD", targetURL, nil)
-	if err == nil {
-		for key, values := range headers {
-			if key == "Host" {
-				continue
+
+	// 如果有学习到的策略，优先使用
+	if encPathPattern != "" {
+		if strategy := getProbeStrategy(encPathPattern); strategy != nil && strategy.SuccessCount >= probeStrategyStableThreshold {
+			var size int64
+			switch strategy.Method {
+			case ProbeMethodHead:
+				size = p.probeWithHead(targetURL, headers)
+			case ProbeMethodRange:
+				size = p.probeWithRange(targetURL, headers)
 			}
-			for _, v := range values {
-				req.Header.Add(key, v)
+			if size > 0 {
+				updateProbeStrategy(encPathPattern, strategy.Method)
+				log.Debugf("Probe strategy cache hit: pattern=%s method=%s size=%d", encPathPattern, strategy.Method, size)
+				return size
+			}
+			// 策略失败，清除缓存，走完整流程
+			log.Debugf("Probe strategy cache miss (method failed): pattern=%s method=%s", encPathPattern, strategy.Method)
+			clearProbeStrategy(encPathPattern)
+		}
+	}
+
+	// 根据配置或默认策略决定尝试顺序
+	// 默认使用 Range 优先（兼容性更好，大多数网盘都支持）
+	rangeFirst := true
+	if p.config != nil && p.config.ProbeStrategy == "head" {
+		rangeFirst = false
+	}
+
+	var size int64
+	var successMethod ProbeMethod
+
+	if rangeFirst {
+		// Range 优先策略
+		size = p.probeWithRange(targetURL, headers)
+		if size > 0 {
+			successMethod = ProbeMethodRange
+		} else {
+			size = p.probeWithHead(targetURL, headers)
+			if size > 0 {
+				successMethod = ProbeMethodHead
 			}
 		}
-		resp, err := p.streamClient.Do(req)
-		if err == nil {
-			defer resp.Body.Close()
-			if cl := resp.Header.Get("Content-Length"); cl != "" {
-				if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
-					return size
-				}
-			}
-			if cr := resp.Header.Get("Content-Range"); cr != "" {
-				if idx := strings.LastIndex(cr, "/"); idx != -1 {
-					totalStr := cr[idx+1:]
-					if totalStr != "*" {
-						if total, err := strconv.ParseInt(totalStr, 10, 64); err == nil && total > 0 {
-							return total
-						}
-					}
-				}
+	} else {
+		// HEAD 优先策略（传统方式）
+		size = p.probeWithHead(targetURL, headers)
+		if size > 0 {
+			successMethod = ProbeMethodHead
+		} else {
+			size = p.probeWithRange(targetURL, headers)
+			if size > 0 {
+				successMethod = ProbeMethodRange
 			}
 		}
 	}
 
-	// fallback: request first byte to get Content-Range
-	req2, err := http.NewRequest("GET", targetURL, nil)
-	if err == nil {
-		for key, values := range headers {
-			if key == "Host" {
-				continue
-			}
-			for _, v := range values {
-				req2.Header.Add(key, v)
-			}
-		}
-		req2.Header.Set("Range", "bytes=0-0")
-		resp2, err := p.streamClient.Do(req2)
-		if err == nil {
-			defer resp2.Body.Close()
-			if cr := resp2.Header.Get("Content-Range"); cr != "" {
-				if idx := strings.LastIndex(cr, "/"); idx != -1 {
-					totalStr := cr[idx+1:]
-					if totalStr != "*" {
-						if total, err := strconv.ParseInt(totalStr, 10, 64); err == nil && total > 0 {
-							return total
-						}
-					}
-				}
-			}
-			if cl := resp2.Header.Get("Content-Length"); cl != "" {
-				if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
-					return size
-				}
-			}
-		}
+	// 学习成功的策略
+	if size > 0 && encPathPattern != "" {
+		updateProbeStrategy(encPathPattern, successMethod)
+		log.Debugf("Probe strategy learned: pattern=%s method=%s size=%d", encPathPattern, successMethod, size)
 	}
 
-	return 0
+	return size
 }
 
 // fetchWebDAVFileSize 通过 PROPFIND 获取文件大小（Depth: 0）
