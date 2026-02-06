@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 )
@@ -63,7 +64,7 @@ var maxParallelDecrypt = func() int {
 	if parallel > maxParallelDecryptLimit {
 		parallel = maxParallelDecryptLimit
 	}
-	log.Infof("Auto-detected %d CPU cores, using %d parallel decrypt workers", numCPU, parallel)
+	log.Infof("[%s] Auto-detected %d CPU cores, using %d parallel decrypt workers", internal.TagServer, numCPU, parallel)
 	return parallel
 }()
 
@@ -265,11 +266,11 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 			} else {
 				pattern = "^/?" + converted + "(/.*)?$"
 			}
-			log.Infof("Init path %s -> regex pattern: %s", ep.Path, pattern)
+			log.Infof("[%s] Init path %s -> regex pattern: %s", internal.TagConfig, ep.Path, pattern)
 			if reg, err := regexp.Compile(pattern); err == nil {
 				ep.regex = reg
 			} else {
-				log.Warnf("Invalid path pattern: %s, error: %v", ep.Path, err)
+				log.Warnf("[%s] Invalid path pattern: %s, error: %v", internal.TagConfig, ep.Path, err)
 			}
 			continue
 		}
@@ -284,11 +285,11 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 			} else {
 				pattern = "^/?" + converted + "(/.*)?$"
 			}
-			log.Infof("Init path %s -> regex pattern: %s", ep.Path, pattern)
+			log.Infof("[%s] Init path %s -> regex pattern: %s", internal.TagConfig, ep.Path, pattern)
 			if reg, err := regexp.Compile(pattern); err == nil {
 				ep.regex = reg
 			} else {
-				log.Warnf("Invalid path pattern: %s, error: %v", ep.Path, err)
+				log.Warnf("[%s] Invalid path pattern: %s, error: %v", internal.TagConfig, ep.Path, err)
 			}
 			continue
 		}
@@ -302,11 +303,11 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		} else {
 			pattern = "^/?" + converted + "(/.*)?$"
 		}
-		log.Infof("Init path %s -> regex pattern: %s", ep.Path, pattern)
+		log.Infof("[%s] Init path %s -> regex pattern: %s", internal.TagConfig, ep.Path, pattern)
 		if reg, err := regexp.Compile(pattern); err == nil {
 			ep.regex = reg
 		} else {
-			log.Warnf("Invalid path pattern: %s, error: %v", ep.Path, err)
+			log.Warnf("[%s] Invalid path pattern: %s, error: %v", internal.TagConfig, ep.Path, err)
 		}
 	}
 
@@ -331,7 +332,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 
 	// 配置 HTTP/2 over TLS 支持
 	if err := http2.ConfigureTransport(transport); err != nil {
-		log.Warnf("Failed to configure HTTP/2: %v, falling back to HTTP/1.1", err)
+		log.Warnf("[%s] Failed to configure HTTP/2: %v, falling back to HTTP/1.1", internal.TagServer, err)
 	}
 
 	var httpClient, streamClient *http.Client
@@ -339,7 +340,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 
 	// 如果启用 H2C，创建支持 H2C 的客户端
 	if config.EnableH2C {
-		log.Info("H2C (HTTP/2 Cleartext) enabled for backend connections")
+		log.Info("[" + internal.TagServer + "] H2C (HTTP/2 Cleartext) enabled for backend connections")
 		// H2C Transport - 用于明文 HTTP/2
 		h2cTransport = &http2.Transport{
 			AllowHTTP: true, // 允许明文 HTTP
@@ -355,7 +356,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		testURL := fmt.Sprintf("http://%s:%d/ping", config.AlistHost, config.AlistPort)
 		resp, err := testClient.Get(testURL)
 		if err != nil {
-			log.Warnf("H2C connection test failed: %v, falling back to HTTP/1.1", err)
+			log.Warnf("[%s] H2C connection test failed: %v, falling back to HTTP/1.1", internal.TagServer, err)
 			// H2C 连接失败，回退到 HTTP/1.1
 			h2cTransport = nil
 			httpClient = &http.Client{
@@ -375,7 +376,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 			}
 		} else {
 			resp.Body.Close()
-			log.Info("H2C connection test successful")
+			log.Info("[" + internal.TagServer + "] H2C connection test successful")
 			httpClient = &http.Client{
 				Timeout:   30 * time.Second,
 				Transport: h2cTransport,
@@ -477,7 +478,7 @@ func (p *ProxyServer) cleanupExpiredCache() {
 	})
 
 	if deletedCount > 0 {
-		log.Debugf("Cache cleanup: removed %d expired file entries", deletedCount)
+		log.Debugf("[%s] Cache cleanup: removed %d expired file entries", internal.TagCache, deletedCount)
 	}
 }
 
@@ -570,7 +571,7 @@ func (p *ProxyServer) Start() error {
 
 	mux := http.NewServeMux()
 
-	// 路由配置
+	// 路由配置 - 使用 WrapHandler 注入日志上下文实现全链路追踪
 	mux.HandleFunc("/ping", p.handlePing)
 	// 加密配置 API（供 App 前端的加密 tab 使用）
 	mux.HandleFunc("/enc-api/getAlistConfig", p.handleConfig)
@@ -578,16 +579,16 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/enc-api/getUserInfo", p.handleUserInfo)
 	mux.HandleFunc("/api/encrypt/config", p.handleConfig)
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
-	// 文件操作相关
-	mux.HandleFunc("/redirect/", p.handleRedirect)
-	mux.HandleFunc("/api/fs/list", p.handleFsList)
-	mux.HandleFunc("/api/fs/get", p.handleFsGet)
-	mux.HandleFunc("/api/fs/put", p.handleFsPut)
-	// 下载和 WebDAV
-	mux.HandleFunc("/d/", p.handleDownload)
-	mux.HandleFunc("/p/", p.handleDownload)
-	mux.HandleFunc("/dav/", p.handleWebDAV)
-	mux.HandleFunc("/dav", p.handleWebDAV)
+	// 文件操作相关 - 包装以支持全链路追踪
+	mux.HandleFunc("/redirect/", internal.WrapHandler(p.handleRedirect))
+	mux.HandleFunc("/api/fs/list", internal.WrapHandler(p.handleFsList))
+	mux.HandleFunc("/api/fs/get", internal.WrapHandler(p.handleFsGet))
+	mux.HandleFunc("/api/fs/put", internal.WrapHandler(p.handleFsPut))
+	// 下载和 WebDAV - 包装以支持全链路追踪
+	mux.HandleFunc("/d/", internal.WrapHandler(p.handleDownload))
+	mux.HandleFunc("/p/", internal.WrapHandler(p.handleDownload))
+	mux.HandleFunc("/dav/", internal.WrapHandler(p.handleWebDAV))
+	mux.HandleFunc("/dav", internal.WrapHandler(p.handleWebDAV))
 	// 根路径：直接代理到 OpenList (Alist)
 	mux.HandleFunc("/", p.handleRoot)
 
@@ -600,9 +601,9 @@ func (p *ProxyServer) Start() error {
 	}
 
 	go func() {
-		log.Infof("Encrypt proxy server starting on port %d", p.config.ProxyPort)
+		log.Infof("[%s] Encrypt proxy server starting on port %d", internal.TagServer, p.config.ProxyPort)
 		if err := p.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Errorf("Proxy server error: %v", err)
+			log.Errorf("[%s] Proxy server error: %v", internal.TagServer, err)
 		}
 	}()
 
@@ -627,7 +628,7 @@ func (p *ProxyServer) Stop() error {
 		defer cancel()
 
 		if err := p.server.Shutdown(ctx); err != nil {
-			log.Errorf("Error shutting down proxy server: %v", err)
+			log.Errorf("[%s] Error shutting down proxy server: %v", internal.TagServer, err)
 			return err
 		}
 	}
@@ -643,7 +644,7 @@ func (p *ProxyServer) Stop() error {
 	}
 
 	p.running = false
-	log.Info("Encrypt proxy server stopped")
+	log.Info("[" + internal.TagServer + "] Encrypt proxy server stopped")
 	return nil
 }
 
@@ -659,7 +660,7 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	// Compile regex BEFORE locking to avoid blocking reads too long?
 	// Or just do it all under lock but ensure assignment is last.
 
-	log.Infof("Updating Proxy Config with %d paths", len(config.EncryptPaths))
+	log.Infof("[%s] Updating Proxy Config with %d paths", internal.TagConfig, len(config.EncryptPaths))
 
 	// Re-compile regex first using the same safe wildcard->regex conversion as NewProxyServer
 	wildcardToRegex := func(raw string) string {
@@ -674,7 +675,7 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	}
 
 	for _, ep := range config.EncryptPaths {
-		log.Infof("Compiling regex for path: %s", ep.Path)
+		log.Infof("[%s] Compiling regex for path: %s", internal.TagConfig, ep.Path)
 		if ep.Path == "" {
 			continue
 		}
@@ -688,11 +689,11 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 			} else {
 				pattern = "^/?" + converted + "(/.*)?$"
 			}
-			log.Infof("Path %s -> regex pattern: %s", ep.Path, pattern)
+			log.Infof("[%s] Path %s -> regex pattern: %s", internal.TagConfig, ep.Path, pattern)
 			if reg, err := regexp.Compile(pattern); err == nil {
 				ep.regex = reg
 			} else {
-				log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
+				log.Warnf("[%s] Invalid path pattern update: %s, error: %v", internal.TagConfig, ep.Path, err)
 			}
 			continue
 		}
@@ -706,18 +707,18 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		} else {
 			pattern = "^/?" + converted
 		}
-		log.Infof("Path %s -> regex pattern: %s", ep.Path, pattern)
+		log.Infof("[%s] Path %s -> regex pattern: %s", internal.TagConfig, ep.Path, pattern)
 		if reg, err := regexp.Compile(pattern); err == nil {
 			ep.regex = reg
 		} else {
-			log.Warnf("Invalid path pattern update: %s, error: %v", ep.Path, err)
+			log.Warnf("[%s] Invalid path pattern update: %s, error: %v", internal.TagConfig, ep.Path, err)
 		}
 	}
 
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.config = config
-	log.Infof("Proxy Config updated successfully")
+	log.Infof("[%s] Proxy Config updated successfully", internal.TagConfig)
 }
 
 // getAlistURL 获取 Alist 服务 URL
@@ -766,7 +767,7 @@ func ClearAllProbeStrategies() {
 		probeStrategyCache.Delete(key)
 		return true
 	})
-	log.Info("All probe strategy cache cleared")
+	log.Info("[" + internal.TagCache + "] All probe strategy cache cleared")
 }
 
 // probeWithHead 使用 HEAD 请求探测文件大小
@@ -877,11 +878,11 @@ func (p *ProxyServer) probeRemoteFileSizeWithPath(targetURL string, headers http
 			}
 			if size > 0 {
 				updateProbeStrategy(encPathPattern, strategy.Method)
-				log.Debugf("Probe strategy cache hit: pattern=%s method=%s size=%d", encPathPattern, strategy.Method, size)
+				log.Debugf("[%s] Probe strategy cache hit: pattern=%s method=%s size=%d", internal.TagCache, encPathPattern, strategy.Method, size)
 				return size
 			}
 			// 策略失败，清除缓存，走完整流程
-			log.Debugf("Probe strategy cache miss (method failed): pattern=%s method=%s", encPathPattern, strategy.Method)
+			log.Debugf("[%s] Probe strategy cache miss (method failed): pattern=%s method=%s", internal.TagCache, encPathPattern, strategy.Method)
 			clearProbeStrategy(encPathPattern)
 		}
 	}
@@ -923,7 +924,7 @@ func (p *ProxyServer) probeRemoteFileSizeWithPath(targetURL string, headers http
 	// 学习成功的策略
 	if size > 0 && encPathPattern != "" {
 		updateProbeStrategy(encPathPattern, successMethod)
-		log.Debugf("Probe strategy learned: pattern=%s method=%s size=%d", encPathPattern, successMethod, size)
+		log.Debugf("[%s] Probe strategy learned: pattern=%s method=%s size=%d", internal.TagCache, encPathPattern, successMethod, size)
 	}
 
 	return size
@@ -1136,7 +1137,7 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
 
-	log.Debugf("Checking encryption path for: %q (len=%d)", filePath, len(filePath))
+	log.Debugf("[%s] Checking encryption path for: %q (len=%d)", internal.TagProxy, filePath, len(filePath))
 
 	// 尝试 URL 解码，以防路径被编码
 	decodedPath, err := url.PathUnescape(filePath)
@@ -1149,20 +1150,20 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 			continue
 		}
 		if ep.regex != nil {
-			log.Debugf("Testing rule %q (regex: %s) against %q", ep.Path, ep.regex.String(), filePath)
+			log.Debugf("[%s] Testing rule %q (regex: %s) against %q", internal.TagProxy, ep.Path, ep.regex.String(), filePath)
 			if ep.regex.MatchString(filePath) {
-				log.Infof("Matched rule: %s for %s (encType=%q, encName=%v)", ep.Path, filePath, ep.EncType, ep.EncName)
+				log.Infof("[%s] Matched rule: %s for %s (encType=%q, encName=%v)", internal.TagProxy, ep.Path, filePath, ep.EncType, ep.EncName)
 				return p.applyFolderOverride(ep, decodedPath)
 			}
 			if filePath != decodedPath && ep.regex.MatchString(decodedPath) {
-				log.Infof("Matched rule (decoded): %s for %s (encType=%q, encName=%v)", ep.Path, decodedPath, ep.EncType, ep.EncName)
+				log.Infof("[%s] Matched rule (decoded): %s for %s (encType=%q, encName=%v)", internal.TagProxy, ep.Path, decodedPath, ep.EncType, ep.EncName)
 				return p.applyFolderOverride(ep, decodedPath)
 			}
 		} else {
-			log.Warnf("Rule %s has nil regex", ep.Path)
+			log.Warnf("[%s] Rule %s has nil regex", internal.TagProxy, ep.Path)
 		}
 	}
-	log.Debugf("No encryption path matched for: %q (decoded: %q)", filePath, decodedPath)
+	log.Debugf("[%s] No encryption path matched for: %q (decoded: %q)", internal.TagProxy, filePath, decodedPath)
 	return nil
 }
 
@@ -1217,14 +1218,14 @@ func (p *ProxyServer) handleRestart(w http.ResponseWriter, r *http.Request) {
 	// 异步重启（给响应时间先返回）
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		log.Info("Restarting encrypt proxy server...")
+		log.Info("[" + internal.TagServer + "] Restarting encrypt proxy server...")
 		// 实际重启逻辑需要在 encrypt_server.go 中实现
 	}()
 }
 
 // handleRoot 处理根路径
 func (p *ProxyServer) handleRoot(w http.ResponseWriter, r *http.Request) {
-	log.Debugf("Handling root request: %s", r.URL.Path)
+	log.Debugf("[%s] Handling root request: %s", internal.TagProxy, r.URL.Path)
 	// 直接代理到 OpenList (Alist)
 	p.handleProxy(w, r)
 }
@@ -1562,8 +1563,9 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Infof("handleRedirect: key=%s, fileSize=%d, encType=%s, url=%s",
-		key, info.FileSize, info.PasswdInfo.EncType, info.RedirectURL)
+	ctx := r.Context()
+	log.Infof("%s handleRedirect: key=%s, fileSize=%d, encType=%s, url=%s",
+		internal.LogPrefix(ctx, internal.TagDownload), key, info.FileSize, info.PasswdInfo.EncType, info.RedirectURL)
 
 	// 获取 Range 头
 	rangeHeader := r.Header.Get("Range")
@@ -1575,7 +1577,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 				startPos, _ = strconv.ParseInt(rangeParts[0], 10, 64)
 			}
 		}
-		log.Infof("handleRedirect: Range header=%s, startPos=%d", rangeHeader, startPos)
+		log.Infof("%s handleRedirect: Range header=%s, startPos=%d", internal.LogPrefix(ctx, internal.TagDownload), rangeHeader, startPos)
 	}
 
 	// 创建到实际资源的请求
@@ -1614,14 +1616,14 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	// Use streamClient for downloads to avoid client-side timeouts for large/long streams
 	resp, err := p.streamClient.Do(req)
 	if err != nil {
-		log.Errorf("handleRedirect: request failed: %v", err)
+		log.Errorf("%s handleRedirect: request failed: %v", internal.LogPrefix(ctx, internal.TagDownload), err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	log.Infof("handleRedirect: response status=%d, content-length=%s",
-		resp.StatusCode, resp.Header.Get("Content-Length"))
+	log.Infof("%s handleRedirect: response status=%d, content-length=%s",
+		internal.LogPrefix(ctx, internal.TagDownload), resp.StatusCode, resp.Header.Get("Content-Length"))
 
 	statusCode := resp.StatusCode
 	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
@@ -1659,7 +1661,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 				cd += "; "
 			}
 			w.Header().Set("Content-Disposition", cd+fmt.Sprintf("filename*=UTF-8''%s", url.PathEscape(decryptedName)))
-			log.Debugf("Decrypted filename in redirect Content-Disposition: %s -> %s", fileName, decryptedName)
+			log.Debugf("%s Decrypted filename in redirect Content-Disposition: %s -> %s", internal.LogPrefix(ctx, internal.TagDecrypt), fileName, decryptedName)
 		}
 	}
 
@@ -1688,7 +1690,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 					}
 					if cached, ok := p.loadFileCache(cachePath); ok && !cached.IsDir && cached.Size > 0 {
 						fileSize = cached.Size
-						log.Infof("handleRedirect: got fileSize from cache (%s): %d", cachePath, fileSize)
+						log.Infof("%s handleRedirect: got fileSize from cache (%s): %d", internal.LogPrefix(ctx, internal.TagFileSize), cachePath, fileSize)
 						break
 					}
 				}
@@ -1702,7 +1704,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 						if totalStr != "*" {
 							if total, err := strconv.ParseInt(totalStr, 10, 64); err == nil && total > 0 {
 								fileSize = total
-								log.Infof("handleRedirect: got fileSize from Content-Range: %d", fileSize)
+								log.Infof("%s handleRedirect: got fileSize from Content-Range: %d", internal.LogPrefix(ctx, internal.TagFileSize), fileSize)
 							}
 						}
 					}
@@ -1714,7 +1716,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 				if cl := resp.Header.Get("Content-Length"); cl != "" {
 					if parsedSize, err := strconv.ParseInt(cl, 10, 64); err == nil && parsedSize > 0 {
 						fileSize = parsedSize
-						log.Infof("handleRedirect: using Content-Length as fileSize: %d", fileSize)
+						log.Infof("%s handleRedirect: using Content-Length as fileSize: %d", internal.LogPrefix(ctx, internal.TagFileSize), fileSize)
 					}
 				}
 			}
@@ -1733,7 +1735,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 				webdavURL := p.getAlistURL() + webdavPath
 				if size := p.fetchWebDAVFileSize(webdavURL, info.Headers); size > 0 {
 					fileSize = size
-					log.Infof("handleRedirect: got fileSize from WebDAV PROPFIND: %d", fileSize)
+					log.Infof("%s handleRedirect: got fileSize from WebDAV PROPFIND: %d", internal.LogPrefix(ctx, internal.TagFileSize), fileSize)
 				}
 			}
 
@@ -1742,7 +1744,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 				probed := p.probeRemoteFileSize(info.RedirectURL, req.Header)
 				if probed > 0 {
 					fileSize = probed
-					log.Infof("handleRedirect: probed remote fileSize=%d", fileSize)
+					log.Infof("%s handleRedirect: probed remote fileSize=%d", internal.LogPrefix(ctx, internal.TagFileSize), fileSize)
 					// 重新请求以获取新鲜的流
 					resp.Body.Close()
 					req2, _ := http.NewRequest("GET", info.RedirectURL, nil)
@@ -1780,7 +1782,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 
 		// 如果仍然为 0，跳过解密直接代理（记录更详细的警告信息）
 		if fileSize == 0 {
-			log.Warnf("handleRedirect: fileSize is 0, skipping decryption. originalURL=%s, redirectURL=%s", info.OriginalURL, info.RedirectURL)
+			log.Warnf("%s handleRedirect: fileSize is 0, skipping decryption. originalURL=%s, redirectURL=%s", internal.LogPrefix(ctx, internal.TagDownload), info.OriginalURL, info.RedirectURL)
 			w.WriteHeader(statusCode)
 			copyWithBuffer(w, resp.Body)
 			return
@@ -1789,7 +1791,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		// 创建解密器
 		encryptor, err := NewFlowEncryptor(info.PasswdInfo.Password, info.PasswdInfo.EncType, fileSize)
 		if err != nil {
-			log.Errorf("handleRedirect: failed to create encryptor: %v", err)
+			log.Errorf("%s handleRedirect: failed to create encryptor: %v", internal.LogPrefix(ctx, internal.TagDecrypt), err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1811,7 +1813,8 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 
 // handleFsList 处理文件列表
 func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
-	log.Infof("Proxy handling fs list request")
+	ctx := r.Context()
+	log.Infof("%s Proxy handling fs list request", internal.LogPrefix(ctx, internal.TagList))
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1858,7 +1861,7 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 					json.Unmarshal(body, &reqData)
 					dirPath := reqData["path"]
 
-					log.Infof("Handling fs list for path: %s", dirPath)
+					log.Infof("%s Handling fs list for path: %s", internal.LogPrefix(ctx, internal.TagList), dirPath)
 
 					// 收集需要解密的文件
 					var decryptTasks []fileDecryptTask
@@ -1909,7 +1912,7 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 							for _, task := range decryptTasks {
 								showName := ConvertShowName(task.encPath.Password, task.encPath.EncType, task.name)
 								if showName != task.name && !strings.HasPrefix(showName, "orig_") {
-									log.Debugf("Decrypt filename: %s -> %s", task.name, showName)
+										log.Debugf("%s Decrypt filename: %s -> %s", internal.LogPrefix(ctx, internal.TagDecrypt), task.name, showName)
 								}
 								task.fileMap["name"] = showName
 								// 同步更新 path，避免客户端使用密文 path
@@ -1959,7 +1962,7 @@ func (p *ProxyServer) parallelDecryptFileNames(tasks []fileDecryptTask, encPath 
 
 			showName := ConvertShowName(encPath.Password, encPath.EncType, t.name)
 			if showName != t.name && !strings.HasPrefix(showName, "orig_") {
-				log.Debugf("Parallel decrypt filename: %s -> %s", t.name, showName)
+				log.Debugf("[%s] Parallel decrypt filename: %s -> %s", internal.TagDecrypt, t.name, showName)
 			}
 			t.fileMap["name"] = showName
 			if pathStr, ok := t.fileMap["path"].(string); ok && pathStr != "" {
@@ -1989,7 +1992,7 @@ func (p *ProxyServer) parallelDecryptFileNamesV2(tasks []fileDecryptTask) {
 			}
 			showName := ConvertShowName(t.encPath.Password, t.encPath.EncType, t.name)
 			if showName != t.name && !strings.HasPrefix(showName, "orig_") {
-				log.Debugf("Parallel decrypt filename: %s -> %s", t.name, showName)
+				log.Debugf("[%s] Parallel decrypt filename: %s -> %s", internal.TagDecrypt, t.name, showName)
 			}
 			t.fileMap["name"] = showName
 			if pathStr, ok := t.fileMap["path"].(string); ok && pathStr != "" {
@@ -2057,7 +2060,7 @@ func (p *ProxyServer) processCoverFiles(content []interface{}) {
 				if coverPath, ok := fileMap["path"].(string); ok && coverPath != "" {
 					videoFileMap["thumb"] = coverPath
 					omitIndices[idx] = true
-					log.Debugf("Cover auto-hide: %s -> thumb for video %s", name, baseName)
+					log.Debugf("[%s] Cover auto-hide: %s -> thumb for video %s", internal.TagList, name, baseName)
 				}
 			}
 		}
@@ -2077,7 +2080,8 @@ func (p *ProxyServer) processCoverFiles(content []interface{}) {
 
 // handleFsGet 处理获取文件信息
 func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
-	log.Infof("Proxy handling fs get request")
+	ctx := r.Context()
+	log.Infof("%s Proxy handling fs get request", internal.LogPrefix(ctx, internal.TagProxy))
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -2149,7 +2153,7 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 				rawURL, _ := data["raw_url"].(string)
 				size, _ := data["size"].(float64)
 
-				log.Infof("handleFsGet: path=%s, size=%v, rawURL=%s", originalPath, size, rawURL)
+				log.Infof("%s handleFsGet: path=%s, size=%v, rawURL=%s", internal.LogPrefix(ctx, internal.TagProxy), originalPath, size, rawURL)
 
 				// 如果开启了文件名加密，将加密名转换为显示名
 				if encPath.EncName {
@@ -2198,7 +2202,8 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 
 // handleFsPut 处理文件上传请求
 func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
-	log.Infof("Proxy handling fs put request")
+	ctx := r.Context()
+	log.Infof("%s Proxy handling fs put request", internal.LogPrefix(ctx, internal.TagUpload))
 	if r.Method != http.MethodPut {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -2220,7 +2225,7 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 		filePath = decodedPath
 	}
 
-	log.Infof("Uploading file to path: %s", filePath)
+	log.Infof("%s Uploading file to path: %s", internal.LogPrefix(ctx, internal.TagUpload), filePath)
 
 	// 检查是否需要加密
 	encPath := p.findEncryptPath(filePath)
@@ -2237,7 +2242,7 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 			ext := path.Ext(fileName)
 			encName := EncodeName(encPath.Password, encPath.EncType, fileName)
 			newFilePath := path.Join(path.Dir(filePath), encName+ext)
-			log.Infof("Encrypting filename: %s -> %s", fileName, encName+ext)
+			log.Infof("%s Encrypting filename: %s -> %s", internal.LogPrefix(ctx, internal.TagEncrypt), fileName, encName+ext)
 
 			// 更新 File-Path header
 			r.Header.Set("File-Path", url.PathEscape(newFilePath))
@@ -2248,7 +2253,7 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if encPath != nil {
-		log.Infof("Encrypting upload for path: %s", filePath)
+		log.Infof("%s Encrypting upload for path: %s", internal.LogPrefix(ctx, internal.TagEncrypt), filePath)
 		contentLength := r.ContentLength
 		if contentLength <= 0 {
 			contentLength = 0
@@ -2256,7 +2261,7 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 
 		encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, contentLength)
 		if err != nil {
-			log.Errorf("Failed to create encryptor: %v", err)
+			log.Errorf("%s Failed to create encryptor: %v", internal.LogPrefix(ctx, internal.TagEncrypt), err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -2288,7 +2293,7 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		log.Errorf("FsPut request failed: %v", err)
+		log.Errorf("%s FsPut request failed: %v", internal.LogPrefix(ctx, internal.TagUpload), err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -2307,6 +2312,7 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 
 // handleDownload 处理下载请求
 func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	originalPath := r.URL.Path
 	filePath := originalPath
 
@@ -2344,7 +2350,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		if !cached.IsDir && cached.Size > 0 {
 			fileSize = cached.Size
 		}
-		log.Debugf("handleDownload: got fileSize from cache: %d for path: %s", fileSize, filePath)
+		log.Debugf("%s handleDownload: got fileSize from cache: %d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
 	}
 	if fileSize == 0 && encPath != nil && encPath.EncName {
 		realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
@@ -2354,7 +2360,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		if cached, ok := p.loadFileCache(encPathFull); ok && !cached.IsDir && cached.Size > 0 {
 			fileSize = cached.Size
-			log.Debugf("handleDownload: got fileSize from enc cache: %d for path: %s", fileSize, encPathFull)
+			log.Debugf("%s handleDownload: got fileSize from enc cache: %d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, encPathFull)
 		}
 	}
 
@@ -2384,8 +2390,8 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// 处理 302/303 重定向：对于需要解密的路径，创建代理重定向
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		location := resp.Header.Get("Location")
-		log.Infof("handleDownload backend redirect: path=%s statusCode=%d location=%s",
-			filePath, resp.StatusCode, location)
+		log.Infof("%s handleDownload backend redirect: path=%s statusCode=%d location=%s",
+			internal.LogPrefix(ctx, internal.TagDownload), filePath, resp.StatusCode, location)
 
 		if encPath != nil && encPath.Enable && location != "" {
 			// 对于需要解密的 GET 请求，创建代理重定向
@@ -2406,8 +2412,8 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 			proxyLocation := fmt.Sprintf("/redirect/%s?decode=1&lastUrl=%s",
 				redirectKey, url.QueryEscape(r.URL.Path))
 
-			log.Infof("handleDownload proxy redirect: path=%s, original=%s, proxy=%s, fileSize=%d",
-				filePath, location, proxyLocation, fileSize)
+			log.Infof("%s handleDownload proxy redirect: path=%s, original=%s, proxy=%s, fileSize=%d",
+				internal.LogPrefix(ctx, internal.TagDownload), filePath, location, proxyLocation, fileSize)
 
 			// 复制响应头（排除 Location）
 			for key, values := range resp.Header {
@@ -2445,7 +2451,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 			if cl := resp.Header.Get("Content-Length"); cl != "" {
 				if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
 					fileSize = size
-					log.Infof("handleDownload: got fileSize from Content-Length: %d for path: %s", fileSize, filePath)
+					log.Infof("%s handleDownload: got fileSize from Content-Length: %d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
 				}
 			}
 		}
@@ -2458,7 +2464,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 					if totalStr != "*" {
 						if total, err := strconv.ParseInt(totalStr, 10, 64); err == nil && total > 0 {
 							fileSize = total
-							log.Infof("handleDownload: got fileSize from Content-Range: %d for path: %s", fileSize, filePath)
+							log.Infof("%s handleDownload: got fileSize from Content-Range: %d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
 						}
 					}
 				}
@@ -2469,7 +2475,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 			probed := p.probeRemoteFileSize(p.getAlistURL()+actualURLPath, req.Header)
 			if probed > 0 {
 				fileSize = probed
-				log.Infof("handleDownload: probed remote fileSize=%d for path: %s", fileSize, filePath)
+				log.Infof("%s handleDownload: probed remote fileSize=%d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
 				// re-request resource to ensure fresh stream with streamClient
 				resp.Body.Close()
 				req2, _ := http.NewRequest(r.Method, p.getAlistURL()+actualURLPath, nil)
@@ -2525,7 +2531,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 				cd += "; "
 			}
 			w.Header().Set("Content-Disposition", cd+fmt.Sprintf("filename*=UTF-8''%s", url.PathEscape(decryptedName)))
-			log.Debugf("Decrypted filename in Content-Disposition: %s -> %s", fileName, decryptedName)
+			log.Debugf("%s Decrypted filename in Content-Disposition: %s -> %s", internal.LogPrefix(ctx, internal.TagDecrypt), fileName, decryptedName)
 		}
 	}
 
@@ -2544,7 +2550,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// 只有响应状态码是 2xx 时才尝试解密
 	// 非 2xx 状态码（如 4xx、5xx 错误）直接透传，不尝试解密
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Debugf("handleDownload: non-2xx response: status=%d, skip decryption", resp.StatusCode)
+		log.Debugf("%s handleDownload: non-2xx response: status=%d, skip decryption", internal.LogPrefix(ctx, internal.TagDownload), resp.StatusCode)
 		w.WriteHeader(statusCode)
 		copyWithBuffer(w, resp.Body)
 		return
@@ -2552,11 +2558,11 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	// 如果需要解密
 	if encPath != nil && fileSize > 0 {
-		log.Infof("handleDownload: decrypting with fileSize=%d for path: %s", fileSize, filePath)
+		log.Infof("%s handleDownload: decrypting with fileSize=%d for path: %s", internal.LogPrefix(ctx, internal.TagDecrypt), fileSize, filePath)
 
 		encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
 		if err != nil {
-			log.Errorf("handleDownload: failed to create encryptor: %v", err)
+			log.Errorf("%s handleDownload: failed to create encryptor: %v", internal.LogPrefix(ctx, internal.TagDecrypt), err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -2571,7 +2577,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	} else if encPath != nil && fileSize == 0 {
 		// fileSize 为 0 时无法正确解密（因为 fileSize 参与密钥生成）
 		// 直接透传原始数据，让客户端知道这是加密的文件
-		log.Warnf("handleDownload: cannot decrypt, fileSize is 0 for encrypted path: %s. Passing through raw data.", filePath)
+		log.Warnf("%s handleDownload: cannot decrypt, fileSize is 0 for encrypted path: %s. Passing through raw data.", internal.LogPrefix(ctx, internal.TagDownload), filePath)
 		w.WriteHeader(statusCode)
 		copyWithBuffer(w, resp.Body)
 	} else {
@@ -2582,6 +2588,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 // handleWebDAV 处理 WebDAV 请求
 func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	// 1. 查找加密配置
 	filePath := r.URL.Path
 	matchPath := filePath
@@ -2598,7 +2605,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 	// 记录 WebDAV 请求关键日志
 	if encPath != nil {
-		log.Infof("WebDAV: method=%s path=%s match=%s encName=%v", r.Method, filePath, matchPath, encPath.EncName)
+		log.Infof("%s WebDAV: method=%s path=%s match=%s encName=%v", internal.LogPrefix(ctx, internal.TagProxy), r.Method, filePath, matchPath, encPath.EncName)
 	}
 
 	// 2. 转换请求路径中的文件名 (Client明文 -> Server密文)
@@ -2628,7 +2635,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			}
 			// 检查缓存：如果缓存中存在且不是目录，才转换 URL
 			if cached, ok := p.loadFileCache(sourceUrl); ok && !cached.IsDir {
-				log.Debugf("PROPFIND: found file in cache: %s (isDir=%v)", sourceUrl, cached.IsDir)
+				log.Debugf("%s PROPFIND: found file in cache: %s (isDir=%v)", internal.LogPrefix(ctx, internal.TagCache), sourceUrl, cached.IsDir)
 				methodNeedConvert = true
 			} else {
 				// 也尝试不带 /dav 前缀的路径
@@ -2637,10 +2644,10 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 					sourceUrlNoPrefix = "/" + sourceUrlNoPrefix
 				}
 				if cached, ok := p.loadFileCache(sourceUrlNoPrefix); ok && !cached.IsDir {
-					log.Debugf("PROPFIND: found file in cache (no /dav): %s (isDir=%v)", sourceUrlNoPrefix, cached.IsDir)
+					log.Debugf("%s PROPFIND: found file in cache (no /dav): %s (isDir=%v)", internal.LogPrefix(ctx, internal.TagCache), sourceUrlNoPrefix, cached.IsDir)
 					methodNeedConvert = true
 				} else {
-					log.Debugf("PROPFIND: not in cache or is dir: %s or %s", sourceUrl, sourceUrlNoPrefix)
+					log.Debugf("%s PROPFIND: not in cache or is dir: %s or %s", internal.LogPrefix(ctx, internal.TagCache), sourceUrl, sourceUrlNoPrefix)
 				}
 			}
 		}
@@ -2655,7 +2662,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				newPath = "/" + newPath
 			}
 			targetURLPath = newPath
-			log.Debugf("Convert real name URL (%s): %s -> %s", r.Method, r.URL.Path, targetURLPath)
+			log.Debugf("%s Convert real name URL (%s): %s -> %s", internal.LogPrefix(ctx, internal.TagEncrypt), r.Method, r.URL.Path, targetURLPath)
 		}
 	}
 
@@ -2711,7 +2718,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		} else {
-			log.Warnf("PUT request encryption skipped: missing content length for %s", r.URL.Path)
+			log.Warnf("%s PUT request encryption skipped: missing content length for %s", internal.LogPrefix(ctx, internal.TagUpload), r.URL.Path)
 		}
 	}
 
@@ -2758,7 +2765,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 						newDestPath = "/" + newDestPath
 					}
 					destPath = newDestPath
-					log.Debugf("Convert real name Destination: %s -> %s", u.Path, destPath)
+					log.Debugf("%s Convert real name Destination: %s -> %s", internal.LogPrefix(ctx, internal.TagEncrypt), u.Path, destPath)
 				}
 			}
 
@@ -2792,8 +2799,8 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 添加调试日志：记录后端响应状态码和内容长度
-	log.Infof("WebDAV backend response: method=%s path=%s statusCode=%d contentLength=%s contentType=%s",
-		r.Method, filePath, resp.StatusCode, resp.Header.Get("Content-Length"), resp.Header.Get("Content-Type"))
+	log.Infof("%s WebDAV backend response: method=%s path=%s statusCode=%d contentLength=%s contentType=%s",
+		internal.LogPrefix(ctx, internal.TagProxy), r.Method, filePath, resp.StatusCode, resp.Header.Get("Content-Length"), resp.Header.Get("Content-Type"))
 
 	// PROPFIND 404 重试机制 (因为我们不知道请求的是目录还是加密文件)
 	// 如果默认透传 (当作目录) 失败，尝试加密文件名再试 (当作文件)
@@ -2809,7 +2816,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			if !strings.HasPrefix(newPath, "/") {
 				newPath = "/" + newPath
 			}
-			log.Debugf("PROPFIND 404 retry with encrypt path: %s -> %s", filePath, newPath)
+			log.Debugf("%s PROPFIND 404 retry with encrypt path: %s -> %s", internal.LogPrefix(ctx, internal.TagProxy), filePath, newPath)
 
 			retryTargetURL := p.getAlistURL() + newPath
 			if r.URL.RawQuery != "" {
@@ -2912,7 +2919,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				propfindURL := targetURL
 				if size := p.fetchWebDAVFileSize(propfindURL, r.Header); size > 0 {
 					fileSize = size
-					log.Infof("WebDAV redirect: got fileSize from PROPFIND: %d for %s", fileSize, filePath)
+					log.Infof("%s WebDAV redirect: got fileSize from PROPFIND: %d for %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
 					// 缓存文件大小
 					p.storeFileCache(filePath, &FileInfo{Name: path.Base(filePath), Size: size, IsDir: false, Path: filePath})
 					if strings.HasPrefix(filePath, "/dav/") {

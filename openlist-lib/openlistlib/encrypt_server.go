@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/encrypt"
+	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -53,11 +54,11 @@ func (m *EncryptProxyManager) Initialize(configPath string) error {
 	// 创建配置管理器
 	m.configManager = encrypt.NewConfigManager(configPath)
 	if err := m.configManager.Load(); err != nil {
-		log.Warnf("Failed to load encrypt config, using default: %v", err)
+		log.Warnf("[%s] Failed to load encrypt config, using default: %v", internal.TagConfig, err)
 	}
 
 	m.initialized = true
-	log.Info("Encrypt proxy manager initialized")
+	log.Info("[" + internal.TagServer + "] Encrypt proxy manager initialized")
 	return nil
 }
 
@@ -85,7 +86,7 @@ func (m *EncryptProxyManager) StartProxy() error {
 	}
 
 	m.proxyServer = server
-	log.Info("Encrypt proxy server started")
+	log.Info("[" + internal.TagServer + "] Encrypt proxy server started")
 	return nil
 }
 
@@ -103,7 +104,7 @@ func (m *EncryptProxyManager) StopProxy() error {
 	}
 
 	m.proxyServer = nil
-	log.Info("Encrypt proxy server stopped")
+	log.Info("[" + internal.TagServer + "] Encrypt proxy server stopped")
 	return nil
 }
 
@@ -121,7 +122,7 @@ func (m *EncryptProxyManager) IsProxyRunning() bool {
 // RestartProxy 重启代理服务器
 func (m *EncryptProxyManager) RestartProxy() error {
 	if err := m.StopProxy(); err != nil {
-		log.Warnf("Error stopping proxy: %v", err)
+		log.Warnf("[%s] Error stopping proxy: %v", internal.TagServer, err)
 	}
 	return m.StartProxy()
 }
@@ -187,7 +188,7 @@ func (m *EncryptProxyManager) SetEnableH2C(enable bool) error {
 	if err == nil {
 		// H2C 修改需要重启代理才能生效
 		if m.proxyServer != nil && m.proxyServer.IsRunning() {
-			log.Info("H2C setting changed, restart proxy to apply")
+			log.Info("[" + internal.TagConfig + "] H2C setting changed, restart proxy to apply")
 		}
 	}
 	return err

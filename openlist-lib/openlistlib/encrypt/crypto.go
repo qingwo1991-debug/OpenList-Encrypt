@@ -10,9 +10,11 @@ import (
 	"io"
 	"net/url"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -32,6 +34,23 @@ var passwdOutwardCache = make(map[string]string)
 
 // CRC6 实例
 var crc6 = NewCRC6()
+
+// 外部添加的后缀模式（云盘/同步工具自动添加）
+var externalSuffixPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`_\d{8}_\d{6}$`), // _YYYYMMDD_HHMMSS（百度网盘等）
+	regexp.MustCompile(` \(\d+\)$`),     // " (1)", " (2)" 等（文件冲突重命名）
+	regexp.MustCompile(`_\d+$`),         // _1, _2 等（简单数字后缀）
+}
+
+// stripExternalSuffix 尝试剥离外部添加的后缀，返回剥离后的字符串和剥离的后缀
+func stripExternalSuffix(name string) (string, string) {
+	for _, pattern := range externalSuffixPatterns {
+		if loc := pattern.FindStringIndex(name); loc != nil {
+			return name[:loc[0]], name[loc[0]:]
+		}
+	}
+	return name, ""
+}
 
 // FlowEncryptor 流加密器接口
 type FlowEncryptor interface {
@@ -312,15 +331,15 @@ func EncodeName(password string, encType EncryptionType, plainName string) strin
 	crc6Bit := crc6.Checksum([]byte(encodeName + passwdOutward))
 	crc6Check := MixBase64GetSourceChar(int(crc6Bit))
 	result := encodeName + string(crc6Check)
-	log.Debugf("EncodeName: password=%q, encType=%q, plainName=%q -> passwdOutward=%q, encoded=%q, crc6=%d, result=%q",
-		password, encType, plainName, passwdOutward, encodeName, crc6Bit, result)
+	log.Debugf("[%s] EncodeName: password=%q, encType=%q, plainName=%q -> passwdOutward=%q, encoded=%q, crc6=%d, result=%q",
+		internal.TagEncrypt, password, encType, plainName, passwdOutward, encodeName, crc6Bit, result)
 	return result
 }
 
 // DecodeName 使用 MixBase64 解码文件名（兼容 alist-encrypt）
 func DecodeName(password string, encType EncryptionType, encodedName string) string {
 	if len(encodedName) < 2 {
-		log.Debugf("DecodeName: encodedName too short: %q", encodedName)
+		log.Debugf("[%s] DecodeName: encodedName too short: %q", internal.TagDecrypt, encodedName)
 		return ""
 	}
 
@@ -332,20 +351,20 @@ func DecodeName(password string, encType EncryptionType, encodedName string) str
 	crc6Bit := crc6.Checksum([]byte(subEncName + passwdOutward))
 	expectedCrc6Check := MixBase64GetSourceChar(int(crc6Bit))
 	if expectedCrc6Check != crc6Check {
-		log.Debugf("DecodeName: CRC6 mismatch for %q: expected %c, got %c (passwdOutward=%q)",
-			encodedName, expectedCrc6Check, crc6Check, passwdOutward)
+		log.Debugf("[%s] DecodeName: CRC6 mismatch for %q: expected %c, got %c (passwdOutward=%q)",
+			internal.TagDecrypt, encodedName, expectedCrc6Check, crc6Check, passwdOutward)
 		return ""
 	}
 
 	mix64 := NewMixBase64(passwdOutward)
 	decoded, err := mix64.Decode(subEncName)
 	if err != nil {
-		log.Debugf("DecodeName: Decode failed for %q: %v", subEncName, err)
+		log.Debugf("[%s] DecodeName: Decode failed for %q: %v", internal.TagDecrypt, subEncName, err)
 		return ""
 	}
 
 	result := string(decoded)
-	log.Debugf("DecodeName: %q -> %q (passwdOutward=%q)", encodedName, result, passwdOutward)
+	log.Debugf("[%s] DecodeName: %q -> %q (passwdOutward=%q)", internal.TagDecrypt, encodedName, result, passwdOutward)
 	return result
 }
 
@@ -385,13 +404,13 @@ func DecodeFolderName(password string, encType EncryptionType, encodedName strin
 // 因为解密后的明文可能碰巧通过 CRC 校验。
 func ConvertRealName(password string, encType EncryptionType, pathText string) string {
 	fileName := path.Base(pathText)
-	log.Debugf("ConvertRealName: pathText=%q, fileName=%q", pathText, fileName)
+	log.Debugf("[%s] ConvertRealName: pathText=%q, fileName=%q", internal.TagEncrypt, pathText, fileName)
 
 	// 检查是否有 orig_ 前缀（表示原始未加密文件）
 	// 这与 alist-encrypt 的行为一致
 	if strings.HasPrefix(fileName, "orig_") {
 		result := strings.TrimPrefix(fileName, "orig_")
-		log.Debugf("ConvertRealName: has orig_ prefix, returning %q", result)
+		log.Debugf("[%s] ConvertRealName: has orig_ prefix, returning %q", internal.TagEncrypt, result)
 		return result
 	}
 
@@ -405,7 +424,7 @@ func ConvertRealName(password string, encType EncryptionType, pathText string) s
 	// 与 alist-encrypt 一致：总是加密，不检查是否已加密
 	encName := EncodeName(password, encType, fileName)
 	result := encName + ext
-	log.Debugf("ConvertRealName: fileName=%q, ext=%q, encName=%q, result=%q", fileName, ext, encName, result)
+	log.Debugf("[%s] ConvertRealName: fileName=%q, ext=%q, encName=%q, result=%q", internal.TagEncrypt, fileName, ext, encName, result)
 	return result
 }
 
@@ -423,16 +442,26 @@ func ConvertShowName(password string, encType EncryptionType, pathText string) s
 	// 尝试解码
 	showName := DecodeName(password, encType, encName)
 	if showName == "" {
+		// 第一次解码失败，尝试剥离外部添加的后缀后再解码
+		strippedName, suffix := stripExternalSuffix(encName)
+		if suffix != "" {
+			showName = DecodeName(password, encType, strippedName)
+			if showName != "" {
+				log.Debugf("[%s] ConvertShowName: decoded after stripping suffix %q: %q -> %q", internal.TagDecrypt, suffix, encName, showName)
+				return showName
+			}
+		}
+
 		// 解码失败（可能是明文文件或损坏的密文）
 		// 添加 orig_ 前缀，这样 ConvertRealName 就知道这是未加密的文件名，不需要再次加密
 		// 这与 alist-encrypt 的行为一致
 		result := "orig_" + fileName
-		log.Debugf("ConvertShowName: decode failed for %q, returning %q", encName, result)
+		log.Debugf("[%s] ConvertShowName: decode failed for %q, returning %q", internal.TagDecrypt, encName, result)
 		return result
 	}
 
 	// Node.js 逻辑中，加密的是完整文件名（含后缀），且解密后不再附加后缀
-	log.Debugf("ConvertShowName: %q (ext=%q, encName=%q) -> %q", pathText, ext, encName, showName)
+	log.Debugf("[%s] ConvertShowName: %q (ext=%q, encName=%q) -> %q", internal.TagDecrypt, pathText, ext, encName, showName)
 	return showName
 }
 

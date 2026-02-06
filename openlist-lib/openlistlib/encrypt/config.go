@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -69,19 +70,19 @@ func (m *ConfigManager) Load() error {
 	// 读取配置文件
 	data, err := os.ReadFile(m.configPath)
 	if err != nil {
-		log.Errorf("Failed to read config file: %v", err)
+		log.Errorf("[%s] Failed to read config file: %v", internal.TagConfig, err)
 		return err
 	}
 
 	// 解析配置
 	var config ProxyConfig
 	if err := json.Unmarshal(data, &config); err != nil {
-		log.Errorf("Failed to parse config: %v", err)
+		log.Errorf("[%s] Failed to parse config: %v", internal.TagConfig, err)
 		return err
 	}
 
 	m.config = &config
-	log.Info("Config loaded successfully")
+	log.Info("[" + internal.TagConfig + "] Config loaded successfully")
 	return nil
 }
 
@@ -111,7 +112,7 @@ func (m *ConfigManager) saveConfigLocked() error {
 		return err
 	}
 
-	log.Info("Config saved successfully")
+	log.Info("[" + internal.TagConfig + "] Config saved successfully")
 	return nil
 }
 
