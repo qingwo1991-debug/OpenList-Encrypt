@@ -37,8 +37,8 @@ jobs:
           VERSION_NAME="${VERSION#v}"
           echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_OUTPUT
 
-          # 生成 build number (基于时间戳 YYMMDDHHMM)
-          BUILD_NUMBER=$(date +%y%m%d%H%M)
+          # 生成 build number (基于时间戳 YYMMDDHH，避免超过Android限制2100000000)
+          BUILD_NUMBER=$(date +%y%m%d%H)
           echo "BUILD_NUMBER=$BUILD_NUMBER" >> $GITHUB_OUTPUT
 
           echo "Version: $VERSION"
