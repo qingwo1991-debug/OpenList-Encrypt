@@ -53,9 +53,13 @@ class UpdateChecker {
     final latestVersion = getTag();
     final currentVersion = _versionName;
 
-    log('latestVersion: $latestVersion, currentVersion: $currentVersion');
-    // return true;
-    return _extractNumbers(latestVersion) > _extractNumbers(currentVersion);
+    final latestNum = _extractNumbers(latestVersion);
+    final currentNum = _extractNumbers(currentVersion);
+
+    log('UpdateChecker: latestVersion=$latestVersion ($latestNum), currentVersion=$currentVersion ($currentNum)');
+    log('UpdateChecker: hasNewVersion=${latestNum > currentNum}');
+
+    return latestNum > currentNum;
   }
 
   String getApkDownloadUrl() {

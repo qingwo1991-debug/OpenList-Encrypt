@@ -23,12 +23,13 @@ static def releaseTime() {
 def openlistVersionFile = rootProject.file("../openlist_version")
 def openlistVersion = openlistVersionFile.exists() ? openlistVersionFile.readLines()[0] : "1.0.0"
 
-// Check if version is provided via environment variable (from CI/CD)
-def providedVersion = System.getenv('BUILD_VERSION_NAME')
-def baseVersion = openlistVersion.startsWith('v') ? openlistVersion.substring(1) : openlistVersion
+// Flutter 通过 --build-name 传入的版本号会设置在 flutter.versionName
+// 优先使用 Flutter 传入的版本号，否则使用环境变量，最后使用默认值
+def flutterVersionName = project.hasProperty('flutter.versionName') ? project.property('flutter.versionName') : null
+def providedVersion = flutterVersionName ?: System.getenv('BUILD_VERSION_NAME')
 
-// Use provided version if available, otherwise generate with timestamp
-def version = providedVersion ?: (baseVersion + "." + releaseTime())
+// Use provided version if available, otherwise use openlist version (without timestamp for cleaner version)
+def version = providedVersion ?: openlistVersion
 
 // 获取 git commit 数量，如果失败则使用默认值
 def gitCommits = 1
