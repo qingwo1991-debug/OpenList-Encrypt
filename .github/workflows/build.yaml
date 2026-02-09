@@ -1,10 +1,6 @@
 name: Build APK
 
 on:
-  push:
-    branches: [ main, master, dev ]
-    tags-ignore:
-      - 'v*'  # 排除 tag 推送，避免与 release.yaml 重复
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
