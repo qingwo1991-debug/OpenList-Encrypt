@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../generated/l10n.dart';
 import '../utils/update_checker.dart';
 import '../utils/intent_utils.dart';
-import '../utils/download_manager.dart';
+import 'app_update_progress_dialog.dart';
 
 class AppUpdateDialog extends StatelessWidget {
   final String content;
@@ -114,9 +114,14 @@ class AppUpdateDialog extends StatelessWidget {
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () async {
                   Navigator.pop(context);
-                  DownloadManager.downloadFileInBackground(
-                    url: apkUrl,
-                    filename: 'OpenList_$version.apk',
+                  showDialog(
+                    context: context,
+                    barrierDismissible: false,
+                    barrierColor: Colors.black.withOpacity(0.5),
+                    builder: (context) => AppUpdateProgressDialog(
+                      apkUrl: apkUrl,
+                      version: version,
+                    ),
                   );
                 },
               ),

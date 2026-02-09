@@ -16,12 +16,34 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+          # 提取纯版本号 (去掉v前缀)
+          VERSION_NAME="${VERSION#v}"
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_OUTPUT
+
+          # 生成 build number (基于时间戳 YYMMDDHHMM)
+          BUILD_NUMBER=$(date +%y%m%d%H%M)
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+
+          echo "Version: $VERSION"
+          echo "Version Name: $VERSION_NAME"
+          echo "Build Number: $BUILD_NUMBER"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -89,37 +111,34 @@ jobs:
           dart run pigeon --input pigeons/pigeon.dart || true
 
       - name: Build Release APK
-        run: flutter build apk --release
+        run: |
+          flutter build apk --release \
+            --build-name=${{ steps.version.outputs.VERSION_NAME }} \
+            --build-number=${{ steps.version.outputs.BUILD_NUMBER }}
 
       - name: Build Split APKs
-        run: flutter build apk --split-per-abi || true
-
-      - name: Get version
-        id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
+          flutter build apk --split-per-abi \
+            --build-name=${{ steps.version.outputs.VERSION_NAME }} \
+            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} || true
 
       - name: Rename APKs
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
           cd build/app/outputs/flutter-apk/
-          
+
           if [ -f app-release.apk ]; then
             mv app-release.apk OpenList-Encrypt-${VERSION}.apk
           fi
-          
+
           if [ -f app-arm64-v8a-release.apk ]; then
             mv app-arm64-v8a-release.apk OpenList-Encrypt-${VERSION}-arm64-v8a.apk
           fi
-          
+
           if [ -f app-armeabi-v7a-release.apk ]; then
             mv app-armeabi-v7a-release.apk OpenList-Encrypt-${VERSION}-armeabi-v7a.apk
           fi
-          
+
           if [ -f app-x86_64-release.apk ]; then
             mv app-x86_64-release.apk OpenList-Encrypt-${VERSION}-x86_64.apk
           fi
@@ -131,19 +150,19 @@ jobs:
           name: OpenList-Encrypt ${{ steps.version.outputs.VERSION }}
           body: |
             ## OpenList-Encrypt ${{ steps.version.outputs.VERSION }}
-            
+
             ### 功能特性
             - ✅ 内置 OpenList 服务器
             - ✅ 加密代理服务（AES-CTR, RC4）
             - ✅ 在线播放加密视频
             - ✅ WebDAV 加解密支持
-            
+
             ### 下载说明
             - `OpenList-Encrypt-xxx.apk` - 通用版本（包含所有架构）
             - `OpenList-Encrypt-xxx-arm64-v8a.apk` - ARM64 版本（推荐，适合大多数现代手机）
             - `OpenList-Encrypt-xxx-armeabi-v7a.apk` - ARM32 版本（老设备）
             - `OpenList-Encrypt-xxx-x86_64.apk` - x86_64 版本（模拟器/部分平板）
-            
+
             ### 使用方法
             1. 安装 APK
             2. 启动应用，OpenList 服务会自动启动

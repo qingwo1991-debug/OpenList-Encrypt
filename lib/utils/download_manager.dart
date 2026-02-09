@@ -242,6 +242,61 @@ class DownloadManager {
     );
   }
 
+  /// 带进度回调的下载方法（用于更新弹窗等需要实时进度的场景）
+  static Future<String?> downloadWithProgressCallback({
+    required String url,
+    String? filename,
+    CancelToken? cancelToken,
+    required Function(double progress, int received, int total) onProgress,
+    required Function(String filePath) onComplete,
+    required Function(String error) onError,
+  }) async {
+    // 获取下载目录
+    Directory? downloadDir = await _getOpenListDownloadDirectory();
+    if (downloadDir == null) {
+      onError(S.current.cannotGetDownloadDirectory);
+      return null;
+    }
+
+    // 确定文件名和路径
+    String finalFilename = filename ?? _getFilenameFromUrl(url);
+    String filePath = '${downloadDir.path}/$finalFilename';
+    filePath = _getUniqueFilePath(filePath);
+
+    try {
+      // 执行下载
+      await _dio.download(
+        url,
+        filePath,
+        cancelToken: cancelToken,
+        onReceiveProgress: (received, total) {
+          double progress = 0.0;
+          if (total > 0) {
+            progress = received / total;
+          }
+          onProgress(progress, received, total);
+        },
+      );
+
+      // 下载完成
+      onComplete(filePath);
+      log('文件下载完成: $filePath');
+      return filePath;
+
+    } catch (e) {
+      if (e is DioException && e.type == DioExceptionType.cancel) {
+        // 用户取消下载
+        log('下载已取消: $url');
+        return null;
+      } else {
+        // 下载失败
+        log('下载失败: $e');
+        onError(e.toString());
+        return null;
+      }
+    }
+  }
+
   /// 取消下载任务
   static void cancelDownload(String taskId) {
     DownloadTask? task = _activeTasks[taskId];
