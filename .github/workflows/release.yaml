@@ -194,15 +194,22 @@ jobs:
 
       - name: Build Release APK
         run: |
+          echo "Starting Flutter release build..."
           flutter build apk --release \
             --build-name=${{ steps.version.outputs.VERSION_NAME }} \
-            --build-number=${{ steps.version.outputs.BUILD_NUMBER }}
+            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee flutter_build_release.log || true
+
+          echo "Checking release build outputs:"
+          find build/app/outputs/flutter-apk -name "*.apk" || true
 
       - name: Build Split APKs
         run: |
           flutter build apk --split-per-abi \
             --build-name=${{ steps.version.outputs.VERSION_NAME }} \
-            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} || true
+            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee flutter_build_split.log || true
+
+          echo "Checking split build outputs:"
+          find build/app/outputs/flutter-apk -name "*.apk" || true
 
       - name: Rename APKs
         run: |
