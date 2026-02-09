@@ -41,11 +41,16 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+
+    // 当前项目链接
+    const projectUrl = "https://github.com/qingwo1991-debug/OpenList-Encrypt";
+    final releaseUrl = "$projectUrl/releases/tag/v$_version";
+
+    // 上游项目链接（鸣谢）
     final openlistUrl =
         "https://github.com/OpenListTeam/OpenList/releases/tag/$_openlistVersion";
-    final appUrl =
-        "https://github.com/OpenListTeam/OpenList-Mobile/releases/tag/$_version";
-    
+    const openlistMobileUrl = "https://github.com/OpenListTeam/OpenList-Mobile";
+
     return Dialog(
       child: SingleChildScrollView(
         child: Padding(
@@ -61,7 +66,7 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
               ),
               const SizedBox(height: 16),
               Text(
-                S.of(context).appName,
+                "OpenList-Encrypt",
                 style: theme.textTheme.headlineSmall?.copyWith(
                   fontWeight: FontWeight.bold,
                 ),
@@ -73,7 +78,17 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
               ),
+              const SizedBox(height: 8),
+              Text(
+                "内置加密代理的 OpenList 移动客户端",
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                textAlign: TextAlign.center,
+              ),
               const SizedBox(height: 24),
+
+              // 项目信息
               Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
@@ -88,13 +103,65 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
                 margin: EdgeInsets.zero,
                 child: ListTile(
                   leading: Icon(
-                    Icons.folder_open,
+                    Icons.lock_outline,
                     color: theme.colorScheme.primary,
                   ),
+                  title: const Text("OpenList-Encrypt"),
+                  subtitle: Text(_version.isNotEmpty ? "v$_version" : ""),
+                  trailing: const Icon(Icons.open_in_new, size: 20),
+                  onTap: () {
+                    IntentUtils.getUrlIntent(releaseUrl).launchChooser("OpenList-Encrypt");
+                  },
+                  onLongPress: () {
+                    Clipboard.setData(ClipboardData(text: projectUrl));
+                    Get.showSnackbar(GetSnackBar(
+                      message: S.of(context).copiedToClipboard,
+                      duration: const Duration(seconds: 1),
+                    ));
+                  },
+                ),
+              ),
+              const SizedBox(height: 24),
+
+              // 鸣谢部分
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.favorite,
+                      size: 16,
+                      color: Colors.red.shade400,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      "鸣谢",
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                "本项目基于以下开源项目开发，感谢开发者的无私贡献！",
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Card(
+                margin: EdgeInsets.zero,
+                child: ListTile(
+                  leading: Icon(
+                    Icons.folder_open,
+                    color: theme.colorScheme.secondary,
+                  ),
                   title: Text(S.of(context).openlist),
-                  subtitle: Text(_openlistVersion.isNotEmpty 
+                  subtitle: Text(_openlistVersion.isNotEmpty
                       ? _openlistVersion
-                      : S.of(context).about),
+                      : "文件列表程序"),
                   trailing: const Icon(Icons.open_in_new, size: 20),
                   onTap: () {
                     IntentUtils.getUrlIntent(openlistUrl).launchChooser(S.of(context).openlist);
@@ -114,16 +181,16 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
                 child: ListTile(
                   leading: Icon(
                     Icons.phone_android,
-                    color: theme.colorScheme.secondary,
+                    color: theme.colorScheme.tertiary,
                   ),
                   title: Text(S.of(context).openlistMobile),
-                  subtitle: Text(_version),
+                  subtitle: const Text("移动客户端框架"),
                   trailing: const Icon(Icons.open_in_new, size: 20),
                   onTap: () {
-                    IntentUtils.getUrlIntent(appUrl).launchChooser(S.of(context).openlistMobile);
+                    IntentUtils.getUrlIntent(openlistMobileUrl).launchChooser(S.of(context).openlistMobile);
                   },
                   onLongPress: () {
-                    Clipboard.setData(ClipboardData(text: appUrl));
+                    Clipboard.setData(const ClipboardData(text: openlistMobileUrl));
                     Get.showSnackbar(GetSnackBar(
                       message: S.of(context).copiedToClipboard,
                       duration: const Duration(seconds: 1),
@@ -137,7 +204,7 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
                 child: ListTile(
                   leading: Icon(
                     Icons.description_outlined,
-                    color: theme.colorScheme.tertiary,
+                    color: theme.colorScheme.outline,
                   ),
                   title: Text(S.of(context).openSourceLicenses),
                   subtitle: Text(S.of(context).viewThirdPartyLicenses),
@@ -145,7 +212,7 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
                   onTap: () {
                     showLicensePage(
                       context: context,
-                      applicationName: S.of(context).appName,
+                      applicationName: "OpenList-Encrypt",
                       applicationVersion: '$_version ($_versionCode)',
                       applicationIcon: Padding(
                         padding: const EdgeInsets.all(8.0),
