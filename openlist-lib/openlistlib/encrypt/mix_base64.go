@@ -134,6 +134,11 @@ func (m *MixBase64) Encode(input string) string {
 func (m *MixBase64) Decode(base64Str string) ([]byte, error) {
 	chars := m.chars
 
+	// 注意：移除了严格的字符预验证，与 Node.js alist-encrypt 行为一致
+	// Node.js 版本在解码失败时用 try-catch 处理，不预验证字符
+	// 这样可以兼容包含外部后缀（空格、括号等）的文件名
+	// 无效字符会在实际解码时通过 mapChars 查找失败来处理
+
 	// JS logic to calculate size
 	// let size = (base64Str.length / 4) * 3
 	size := (len(base64Str) / 4) * 3

@@ -64,7 +64,6 @@ func TestRedirectCacheTTL(t *testing.T) {
 	testInfo := &RedirectInfo{
 		RedirectURL: "http://example.com/file.mp4",
 		FileSize:    2048000,
-		ExpireAt:    time.Now().Add(1 * time.Hour),
 	}
 
 	server.storeRedirectCache(testKey, testInfo)

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
@@ -40,6 +41,54 @@ var externalSuffixPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`_\d{8}_\d{6}$`), // _YYYYMMDD_HHMMSS（百度网盘等）
 	regexp.MustCompile(` \(\d+\)$`),     // " (1)", " (2)" 等（文件冲突重命名）
 	regexp.MustCompile(`_\d+$`),         // _1, _2 等（简单数字后缀）
+}
+
+// 外部后缀标记常量（用于在显示名中嵌入外部后缀信息）
+const (
+	suffixMarker    = "{__esuffix__" // external suffix marker start
+	suffixMarkerEnd = "}"            // external suffix marker end
+)
+
+// ShowNameCache 显示名到真实加密名的缓存
+// Key: 目录路径 + 显示名 (如 "/path/to/dir/KBR-008.mp4")
+// Value: 真实加密文件名（包含外部后缀，如 "Z3LZ5G0YQxHtage-N (1).mp4"）
+type ShowNameCache struct {
+	cache sync.Map
+	size  int64
+}
+
+// 全局显示名缓存实例
+var showNameCache = &ShowNameCache{}
+
+// showNameCacheMaxSize 缓存最大条目数
+const showNameCacheMaxSize = 50000
+
+// CacheNameMapping 缓存显示名到真实加密名的映射
+func CacheNameMapping(dir, showName, realEncName string) {
+	if showName == "" || realEncName == "" {
+		return
+	}
+	key := path.Join(dir, showName)
+	showNameCache.cache.Store(key, realEncName)
+	// 简单计数，不精确但足够
+	if showNameCache.size < showNameCacheMaxSize {
+		showNameCache.size++
+	}
+}
+
+// GetCachedRealName 从缓存获取真实加密名
+func GetCachedRealName(dir, showName string) (string, bool) {
+	key := path.Join(dir, showName)
+	if val, ok := showNameCache.cache.Load(key); ok {
+		return val.(string), true
+	}
+	return "", false
+}
+
+// ClearShowNameCache 清除显示名缓存（用于测试或刷新）
+func ClearShowNameCache() {
+	showNameCache.cache = sync.Map{}
+	showNameCache.size = 0
 }
 
 // stripExternalSuffix 尝试剥离外部添加的后缀，返回剥离后的字符串和剥离的后缀
@@ -403,6 +452,7 @@ func DecodeFolderName(password string, encType EncryptionType, encodedName strin
 // 所以 convertRealName 总是需要加密。不应该检测文件名是否"看起来像"已加密，
 // 因为解密后的明文可能碰巧通过 CRC 校验。
 func ConvertRealName(password string, encType EncryptionType, pathText string) string {
+	dir := path.Dir(pathText)
 	fileName := path.Base(pathText)
 	log.Debugf("[%s] ConvertRealName: pathText=%q, fileName=%q", internal.TagEncrypt, pathText, fileName)
 
@@ -414,27 +464,50 @@ func ConvertRealName(password string, encType EncryptionType, pathText string) s
 		return result
 	}
 
-	ext := path.Ext(fileName)
 	// URL 解码文件名（与 alist-encrypt 的 decodeURIComponent 一致）
 	if decoded, err := url.PathUnescape(fileName); err == nil {
 		fileName = decoded
 	}
 
+	// 1. 优先查找缓存（由 ConvertShowName 建立的 显示名 → 真实加密名 映射）
+	if cachedRealName, ok := GetCachedRealName(dir, fileName); ok {
+		log.Debugf("[%s] ConvertRealName: cache hit, %q -> %q", internal.TagEncrypt, fileName, cachedRealName)
+		return cachedRealName
+	}
+
+	// 2. 解析后缀标记（降级方案：直接URL访问时缓存未命中）
+	externalSuffix := ""
+	if idx := strings.Index(fileName, suffixMarker); idx != -1 {
+		endIdx := strings.Index(fileName[idx:], suffixMarkerEnd)
+		if endIdx != -1 {
+			externalSuffix = fileName[idx+len(suffixMarker) : idx+endIdx]
+			fileName = fileName[:idx] + fileName[idx+endIdx+1:]
+			log.Debugf("[%s] ConvertRealName: parsed suffix marker, externalSuffix=%q, fileName=%q", internal.TagEncrypt, externalSuffix, fileName)
+		}
+	}
+
+	ext := path.Ext(fileName)
+
 	// 直接加密完整文件名（含扩展名），然后再加扩展名
 	// 与 alist-encrypt 一致：总是加密，不检查是否已加密
 	encName := EncodeName(password, encType, fileName)
-	result := encName + ext
-	log.Debugf("[%s] ConvertRealName: fileName=%q, ext=%q, encName=%q, result=%q", internal.TagEncrypt, fileName, ext, encName, result)
+
+	// 加密后还原外部后缀
+	result := encName + externalSuffix + ext
+	log.Debugf("[%s] ConvertRealName: fileName=%q, ext=%q, encName=%q, externalSuffix=%q, result=%q", internal.TagEncrypt, fileName, ext, encName, externalSuffix, result)
 	return result
 }
 
 // ConvertShowName 将加密名转换为显示名
 func ConvertShowName(password string, encType EncryptionType, pathText string) string {
+	dir := path.Dir(pathText)
 	fileName := path.Base(pathText)
+	originalFileName := fileName // 保存原始文件名用于缓存
 
 	// URL 解码
 	if decoded, err := url.PathUnescape(fileName); err == nil {
 		fileName = decoded
+		originalFileName = decoded
 	}
 	ext := path.Ext(fileName)
 	encName := strings.TrimSuffix(fileName, ext)
@@ -448,7 +521,15 @@ func ConvertShowName(password string, encType EncryptionType, pathText string) s
 			showName = DecodeName(password, encType, strippedName)
 			if showName != "" {
 				log.Debugf("[%s] ConvertShowName: decoded after stripping suffix %q: %q -> %q", internal.TagDecrypt, suffix, encName, showName)
-				return showName
+				// 缓存映射：显示名 -> 真实加密名（包含外部后缀）
+				CacheNameMapping(dir, showName, originalFileName)
+				// 返回带后缀标记的显示名（降级方案：直接URL访问时使用）
+				// 例如：KBR-008{__esuffix__ (1)}.mp4
+				baseShowName := strings.TrimSuffix(showName, path.Ext(showName))
+				showExt := path.Ext(showName)
+				markedName := baseShowName + suffixMarker + suffix + suffixMarkerEnd + showExt
+				log.Debugf("[%s] ConvertShowName: marked showName=%q, cached %q -> %q", internal.TagDecrypt, markedName, showName, originalFileName)
+				return markedName
 			}
 		}
 
@@ -459,6 +540,9 @@ func ConvertShowName(password string, encType EncryptionType, pathText string) s
 		log.Debugf("[%s] ConvertShowName: decode failed for %q, returning %q", internal.TagDecrypt, encName, result)
 		return result
 	}
+
+	// 解码成功，缓存映射
+	CacheNameMapping(dir, showName, originalFileName)
 
 	// Node.js 逻辑中，加密的是完整文件名（含后缀），且解密后不再附加后缀
 	log.Debugf("[%s] ConvertShowName: %q (ext=%q, encName=%q) -> %q", internal.TagDecrypt, pathText, ext, encName, showName)
