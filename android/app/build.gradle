@@ -28,8 +28,9 @@ def openlistVersion = openlistVersionFile.exists() ? openlistVersionFile.readLin
 def flutterVersionName = project.hasProperty('flutter.versionName') ? project.property('flutter.versionName') : null
 def providedVersion = flutterVersionName ?: System.getenv('BUILD_VERSION_NAME')
 
-// Use provided version if available, otherwise use openlist version (without timestamp for cleaner version)
-def version = providedVersion ?: openlistVersion
+// Use provided version if available, otherwise use a default app version
+// DO NOT use openlistVersion as fallback - it's the library version, not the app version
+def version = providedVersion ?: "1.0.0"
 
 // 获取 git commit 数量，如果失败则使用默认值
 def gitCommits = 1

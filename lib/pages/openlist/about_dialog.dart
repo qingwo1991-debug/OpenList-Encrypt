@@ -42,9 +42,8 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    // 当前项目链接
+    // 当前项目链接 - 直接链接到项目主页，不指定特定release版本
     const projectUrl = "https://github.com/qingwo1991-debug/OpenList-Encrypt";
-    final releaseUrl = "$projectUrl/releases/tag/v$_version";
 
     // 上游项目链接（鸣谢）
     final openlistUrl =
@@ -110,7 +109,7 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
                   subtitle: Text(_version.isNotEmpty ? "v$_version" : ""),
                   trailing: const Icon(Icons.open_in_new, size: 20),
                   onTap: () {
-                    IntentUtils.getUrlIntent(releaseUrl).launchChooser("OpenList-Encrypt");
+                    IntentUtils.getUrlIntent(projectUrl).launchChooser("OpenList-Encrypt");
                   },
                   onLongPress: () {
                     Clipboard.setData(ClipboardData(text: projectUrl));

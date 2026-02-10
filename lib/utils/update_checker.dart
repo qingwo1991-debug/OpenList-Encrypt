@@ -53,13 +53,12 @@ class UpdateChecker {
     final latestVersion = getTag();
     final currentVersion = _versionName;
 
-    final latestNum = _extractNumbers(latestVersion);
-    final currentNum = _extractNumbers(currentVersion);
+    final result = _compareVersions(latestVersion, currentVersion);
 
-    log('UpdateChecker: latestVersion=$latestVersion ($latestNum), currentVersion=$currentVersion ($currentNum)');
-    log('UpdateChecker: hasNewVersion=${latestNum > currentNum}');
+    log('UpdateChecker: latestVersion=$latestVersion, currentVersion=$currentVersion');
+    log('UpdateChecker: compare result=$result, hasNewVersion=${result > 0}');
 
-    return latestNum > currentNum;
+    return result > 0;
   }
 
   String getApkDownloadUrl() {
@@ -81,9 +80,28 @@ class UpdateChecker {
     return data['html_url'];
   }
 
-  // 1.24.011609 to Int
-  static int _extractNumbers(String input) {
-    final s = input.replaceAll(RegExp(r'[^0-9]'), '');
-    return int.parse(s);
+  /// Compare two semantic version strings
+  /// Returns: positive if v1 > v2, negative if v1 < v2, 0 if equal
+  /// Supports versions with 'v' prefix (e.g., "v1.2.3")
+  static int _compareVersions(String v1, String v2) {
+    // Remove 'v' or 'V' prefix if present
+    final version1 = v1.toLowerCase().startsWith('v') ? v1.substring(1) : v1;
+    final version2 = v2.toLowerCase().startsWith('v') ? v2.substring(1) : v2;
+
+    // Split by dots and convert to integers
+    final parts1 = version1.split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    final parts2 = version2.split('.').map((s) => int.tryParse(s) ?? 0).toList();
+
+    // Compare each part
+    final maxLength = parts1.length > parts2.length ? parts1.length : parts2.length;
+    for (int i = 0; i < maxLength; i++) {
+      final p1 = i < parts1.length ? parts1[i] : 0;
+      final p2 = i < parts2.length ? parts2[i] : 0;
+      if (p1 != p2) {
+        return p1 - p2;
+      }
+    }
+
+    return 0;
   }
 }
