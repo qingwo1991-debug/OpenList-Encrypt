@@ -145,6 +145,15 @@ flutter build apk --split-per-abi
 flutter build appbundle
 ```
 
+## 测试（可选）
+
+部分测试依赖 SQLite CGO 或 aria2 RPC 服务。若当前环境不需要这些依赖，可跳过对应包：
+
+```bash
+cd openlist-lib
+go test $(go list ./... | grep -v '/internal/op$' | grep -v '/pkg/aria2/rpc$')
+```
+
 ## iOS 构建（macOS 环境）
 
 ### 1. 安装依赖

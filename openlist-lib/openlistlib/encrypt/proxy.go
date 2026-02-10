@@ -784,8 +784,8 @@ func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
 }
 
 // loadFileCache 从缓存加载文件信息（检查 TTL）
-func (p *ProxyServer) loadFileCache(path string) (*FileInfo, bool) {
-	key := normalizeCacheKey(path)
+func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
+	key := normalizeCacheKey(filePath)
 	if value, ok := p.fileCache.Load(key); ok {
 		if cached, ok := value.(*CachedFileInfo); ok {
 			if time.Now().Before(cached.ExpireAt) {
@@ -796,22 +796,22 @@ func (p *ProxyServer) loadFileCache(path string) (*FileInfo, bool) {
 		}
 	}
 	// 回退尝试原始 key
-	if key != path {
-		if value, ok := p.fileCache.Load(path); ok {
+	if key != filePath {
+		if value, ok := p.fileCache.Load(filePath); ok {
 			if cached, ok := value.(*CachedFileInfo); ok {
 				if time.Now().Before(cached.ExpireAt) {
 					return cached.Info, true
 				}
-				p.fileCache.Delete(path)
+				p.fileCache.Delete(filePath)
 			}
 		}
 	}
 	if entry, ok := p.getSizeMap(key); ok {
 		info := &FileInfo{
-			Name:  path.Base(path),
+			Name:  path.Base(filePath),
 			Size:  entry.Size,
 			IsDir: false,
-			Path:  path,
+			Path:  filePath,
 		}
 		return info, true
 	}
@@ -2967,6 +2967,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
 		statusCode = http.StatusPartialContent
 	}
+	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
 
 	// 复制响应头
 	for key, values := range resp.Header {
