@@ -12,7 +12,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -27,8 +29,6 @@ import (
 
 // 流式传输优化常量
 const (
-	// streamBufferSize 流传输缓冲区大小 (512KB)，优化大文件播放
-	streamBufferSize = 512 * 1024
 	// mediumBufferSize 中等文件缓冲区 (128KB)
 	mediumBufferSize = 128 * 1024
 	// smallBufferSize 小文件/API响应缓冲区 (32KB)
@@ -49,6 +49,19 @@ const (
 	maxParallelDecryptLimit = 32
 )
 
+// streamBufferSize 流传输缓冲区大小 (默认 512KB)
+var streamBufferSize = 512 * 1024
+
+func clampStreamBufferKB(kb int) int {
+	if kb < 32 {
+		return 32
+	}
+	if kb > 4096 {
+		return 4096
+	}
+	return kb
+}
+
 // 动态计算的并行解密数，根据 CPU 核心数自动调整
 var maxParallelDecrypt = func() int {
 	numCPU := runtime.NumCPU()
@@ -67,6 +80,20 @@ var maxParallelDecrypt = func() int {
 	log.Infof("[%s] Auto-detected %d CPU cores, using %d parallel decrypt workers", internal.TagServer, numCPU, parallel)
 	return parallel
 }()
+
+func (p *ProxyServer) parallelDecryptLimit() int {
+	limit := maxParallelDecrypt
+	if p != nil && p.config != nil && p.config.ParallelDecryptConcurrency > 0 {
+		limit = p.config.ParallelDecryptConcurrency
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > maxParallelDecryptLimit {
+		limit = maxParallelDecryptLimit
+	}
+	return limit
+}
 
 // 常见视频封面文件扩展名
 var coverExtensions = map[string]bool{
@@ -101,6 +128,20 @@ var (
 
 // ErrStopRedirect 用于停止自动重定向跟随
 var ErrStopRedirect = errors.New("redirect stopped")
+
+var startTime = time.Now()
+
+func syncMapLen(m *sync.Map) int {
+	if m == nil {
+		return 0
+	}
+	count := 0
+	m.Range(func(_, _ interface{}) bool {
+		count++
+		return true
+	})
+	return count
+}
 
 // ProbeMethod 探测方法类型
 type ProbeMethod string
@@ -174,6 +215,12 @@ type CachedRedirectInfo struct {
 	ExpireAt time.Time
 }
 
+// SizeMapEntry represents a persistent file size mapping
+type SizeMapEntry struct {
+	Size      int64     `json:"size"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // EncryptPath 加密路径配置
 type EncryptPath struct {
 	Path     string         `json:"path"`     // 路径正则表达式
@@ -200,6 +247,22 @@ type ProxyConfig struct {
 	FileCacheTTL int `json:"fileCacheTTL,omitempty"`
 	// ProbeStrategy: 文件大小探测策略 "range"(默认，兼容性更好) 或 "head"(传统方式)
 	ProbeStrategy string `json:"probeStrategy,omitempty"`
+	// EnableSizeMap: 启用长期文件大小映射缓存
+	EnableSizeMap bool `json:"enableSizeMap"`
+	// SizeMapTTL: 文件大小映射缓存时间（分钟）
+	SizeMapTTL int `json:"sizeMapTtlMinutes,omitempty"`
+	// EnableRangeCompatCache: 记录不支持 Range 的上游
+	EnableRangeCompatCache bool `json:"enableRangeCompatCache"`
+	// RangeCompatTTL: Range 兼容缓存时间（分钟）
+	RangeCompatTTL int `json:"rangeCompatTtlMinutes,omitempty"`
+	// EnableParallelDecrypt: 启用并行解密（大文件）
+	EnableParallelDecrypt bool `json:"enableParallelDecrypt"`
+	// ParallelDecryptConcurrency: 并行解密并发数
+	ParallelDecryptConcurrency int `json:"parallelDecryptConcurrency,omitempty"`
+	// StreamBufferKB: 流式解密缓冲区大小（KB）
+	StreamBufferKB int `json:"streamBufferKb,omitempty"`
+	// ConfigPath: 配置文件路径（运行时注入，不序列化）
+	ConfigPath string `json:"-"`
 }
 
 // ProxyServer 加密代理服务器
@@ -215,6 +278,13 @@ type ProxyServer struct {
 	fileCache      sync.Map // 文件信息缓存 (path -> *CachedFileInfo)
 	fileCacheCount int64    // 缓存条目计数
 	redirectCache  sync.Map // 重定向缓存 (key -> *CachedRedirectInfo)
+	sizeMapMu      sync.RWMutex
+	sizeMap        map[string]SizeMapEntry
+	sizeMapPath    string
+	sizeMapDirty   bool
+	sizeMapDone    chan struct{}
+	rangeCompatMu  sync.RWMutex
+	rangeCompat    map[string]time.Time
 	cleanupTicker  *time.Ticker
 	cleanupDone    chan struct{}
 }
@@ -312,6 +382,10 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	}
 
 	// ProbeOnDownload is controlled by configuration / frontend; do not override here.
+	if config.StreamBufferKB > 0 {
+		effectiveKB := clampStreamBufferKB(config.StreamBufferKB)
+		streamBufferSize = effectiveKB * 1024
+	}
 
 	// 创建 Transport，支持 HTTP/2 over TLS
 	transport := &http.Transport{
@@ -422,6 +496,8 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 
 	// 启动缓存清理协程
 	server.startCacheCleanup()
+	server.initSizeMap()
+	server.initRangeCompat()
 
 	return server, nil
 }
@@ -449,6 +525,195 @@ func (p *ProxyServer) stopCacheCleanup() {
 	if p.cleanupDone != nil {
 		close(p.cleanupDone)
 	}
+}
+
+func (p *ProxyServer) initSizeMap() {
+	if p.config == nil || !p.config.EnableSizeMap {
+		return
+	}
+	if p.config.ConfigPath == "" {
+		return
+	}
+	mapDir := filepath.Dir(p.config.ConfigPath)
+	p.sizeMapPath = filepath.Join(mapDir, "size_map.json")
+	p.sizeMap = make(map[string]SizeMapEntry)
+	p.sizeMapDone = make(chan struct{})
+	p.loadSizeMap()
+	go p.sizeMapLoop()
+}
+
+func (p *ProxyServer) sizeMapLoop() {
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			p.flushSizeMap(false)
+		case <-p.sizeMapDone:
+			p.flushSizeMap(true)
+			return
+		}
+	}
+}
+
+func (p *ProxyServer) loadSizeMap() {
+	if p.sizeMapPath == "" {
+		return
+	}
+	data, err := os.ReadFile(p.sizeMapPath)
+	if err != nil {
+		return
+	}
+	var raw map[string]SizeMapEntry
+	if err := json.Unmarshal(data, &raw); err != nil {
+		log.Warnf("[%s] Failed to load size map: %v", internal.TagCache, err)
+		return
+	}
+	p.sizeMapMu.Lock()
+	for k, v := range raw {
+		p.sizeMap[k] = v
+	}
+	p.sizeMapMu.Unlock()
+}
+
+func (p *ProxyServer) flushSizeMap(force bool) {
+	if p.sizeMapPath == "" {
+		return
+	}
+	p.sizeMapMu.RLock()
+	if !force && !p.sizeMapDirty {
+		p.sizeMapMu.RUnlock()
+		return
+	}
+	copyMap := make(map[string]SizeMapEntry, len(p.sizeMap))
+	for k, v := range p.sizeMap {
+		copyMap[k] = v
+	}
+	p.sizeMapMu.RUnlock()
+
+	data, err := json.MarshalIndent(copyMap, "", "  ")
+	if err != nil {
+		log.Warnf("[%s] Failed to marshal size map: %v", internal.TagCache, err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(p.sizeMapPath), 0755); err != nil {
+		log.Warnf("[%s] Failed to create size map dir: %v", internal.TagCache, err)
+		return
+	}
+	if err := os.WriteFile(p.sizeMapPath, data, 0644); err != nil {
+		log.Warnf("[%s] Failed to write size map: %v", internal.TagCache, err)
+		return
+	}
+	p.sizeMapMu.Lock()
+	p.sizeMapDirty = false
+	p.sizeMapMu.Unlock()
+}
+
+func (p *ProxyServer) updateSizeMap(path string, size int64) {
+	if p.config == nil || !p.config.EnableSizeMap || size <= 0 || p.sizeMap == nil {
+		return
+	}
+	key := normalizeCacheKey(path)
+	p.sizeMapMu.Lock()
+	p.sizeMap[key] = SizeMapEntry{Size: size, UpdatedAt: time.Now()}
+	p.sizeMapDirty = true
+	p.sizeMapMu.Unlock()
+}
+
+func (p *ProxyServer) getSizeMap(path string) (SizeMapEntry, bool) {
+	if p.config == nil || !p.config.EnableSizeMap || p.sizeMap == nil {
+		return SizeMapEntry{}, false
+	}
+	key := normalizeCacheKey(path)
+	p.sizeMapMu.RLock()
+	entry, ok := p.sizeMap[key]
+	p.sizeMapMu.RUnlock()
+	if !ok || entry.Size <= 0 {
+		return SizeMapEntry{}, false
+	}
+	if p.config.SizeMapTTL > 0 {
+		if time.Since(entry.UpdatedAt) > time.Duration(p.config.SizeMapTTL)*time.Minute {
+			p.sizeMapMu.Lock()
+			delete(p.sizeMap, key)
+			p.sizeMapDirty = true
+			p.sizeMapMu.Unlock()
+			return SizeMapEntry{}, false
+		}
+	}
+	return entry, true
+}
+
+func (p *ProxyServer) initRangeCompat() {
+	if p.config == nil || !p.config.EnableRangeCompatCache {
+		return
+	}
+	p.rangeCompatMu.Lock()
+	if p.rangeCompat == nil {
+		p.rangeCompat = make(map[string]time.Time)
+	}
+	p.rangeCompatMu.Unlock()
+}
+
+func (p *ProxyServer) rangeCompatKey(targetURL string) string {
+	parsed, err := url.Parse(targetURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
+}
+
+func (p *ProxyServer) rangeCompatTTL() time.Duration {
+	if p.config == nil || p.config.RangeCompatTTL <= 0 {
+		return 0
+	}
+	return time.Duration(p.config.RangeCompatTTL) * time.Minute
+}
+
+func (p *ProxyServer) shouldSkipRange(targetURL string) bool {
+	if p.config == nil || !p.config.EnableRangeCompatCache {
+		return false
+	}
+	ttl := p.rangeCompatTTL()
+	if ttl <= 0 {
+		return false
+	}
+	key := p.rangeCompatKey(targetURL)
+	if key == "" {
+		return false
+	}
+	p.rangeCompatMu.RLock()
+	expireAt, ok := p.rangeCompat[key]
+	p.rangeCompatMu.RUnlock()
+	if !ok {
+		return false
+	}
+	if time.Now().After(expireAt) {
+		p.rangeCompatMu.Lock()
+		delete(p.rangeCompat, key)
+		p.rangeCompatMu.Unlock()
+		return false
+	}
+	return true
+}
+
+func (p *ProxyServer) markRangeIncompatible(targetURL string) {
+	if p.config == nil || !p.config.EnableRangeCompatCache {
+		return
+	}
+	ttl := p.rangeCompatTTL()
+	if ttl <= 0 {
+		return
+	}
+	key := p.rangeCompatKey(targetURL)
+	if key == "" {
+		return
+	}
+	p.rangeCompatMu.Lock()
+	if p.rangeCompat == nil {
+		p.rangeCompat = make(map[string]time.Time)
+	}
+	p.rangeCompat[key] = time.Now().Add(ttl)
+	p.rangeCompatMu.Unlock()
 }
 
 // cleanupExpiredCache 清理过期的缓存条目
@@ -510,6 +775,12 @@ func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
 	if key != path {
 		p.fileCache.Store(path, entry)
 	}
+	if info != nil && !info.IsDir && info.Size > 0 {
+		p.updateSizeMap(key, info.Size)
+		if key != path {
+			p.updateSizeMap(path, info.Size)
+		}
+	}
 }
 
 // loadFileCache 从缓存加载文件信息（检查 TTL）
@@ -534,6 +805,15 @@ func (p *ProxyServer) loadFileCache(path string) (*FileInfo, bool) {
 				p.fileCache.Delete(path)
 			}
 		}
+	}
+	if entry, ok := p.getSizeMap(key); ok {
+		info := &FileInfo{
+			Name:  path.Base(path),
+			Size:  entry.Size,
+			IsDir: false,
+			Path:  path,
+		}
+		return info, true
 	}
 	return nil, false
 }
@@ -576,8 +856,10 @@ func (p *ProxyServer) Start() error {
 	// 加密配置 API（供 App 前端的加密 tab 使用）
 	mux.HandleFunc("/enc-api/getAlistConfig", p.handleConfig)
 	mux.HandleFunc("/enc-api/saveAlistConfig", p.handleConfig)
+	mux.HandleFunc("/enc-api/getStats", p.handleStats)
 	mux.HandleFunc("/enc-api/getUserInfo", p.handleUserInfo)
 	mux.HandleFunc("/api/encrypt/config", p.handleConfig)
+	mux.HandleFunc("/api/encrypt/stats", p.handleStats)
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
 	// 文件操作相关 - 包装以支持全链路追踪
 	mux.HandleFunc("/redirect/", internal.WrapHandler(p.handleRedirect))
@@ -622,6 +904,10 @@ func (p *ProxyServer) Stop() error {
 
 	// 停止缓存清理协程
 	p.stopCacheCleanup()
+	if p.sizeMapDone != nil {
+		close(p.sizeMapDone)
+		p.sizeMapDone = nil
+	}
 
 	if p.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1202,6 +1488,84 @@ func (p *ProxyServer) handlePing(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleStats returns runtime stats for caches and config toggles
+func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	probeCount := 0
+	probeStrategyCache.Range(func(_, _ interface{}) bool {
+		probeCount++
+		return true
+	})
+
+	sizeMapCount := 0
+	sizeMapDirty := false
+	if p.sizeMap != nil {
+		p.sizeMapMu.RLock()
+		sizeMapCount = len(p.sizeMap)
+		sizeMapDirty = p.sizeMapDirty
+		p.sizeMapMu.RUnlock()
+	}
+
+	rangeCompatCount := 0
+	if p.rangeCompat != nil {
+		p.rangeCompatMu.RLock()
+		rangeCompatCount = len(p.rangeCompat)
+		p.rangeCompatMu.RUnlock()
+	}
+
+	data := map[string]interface{}{
+		"status": "ok",
+		"uptime": time.Since(startTime).Round(time.Second).String(),
+		"cache": map[string]interface{}{
+			"file_cache_entries":     syncMapLen(&p.fileCache),
+			"redirect_cache_entries": syncMapLen(&p.redirectCache),
+			"probe_strategy_entries": probeCount,
+		},
+		"size_map": map[string]interface{}{
+			"enabled": p.config != nil && p.config.EnableSizeMap,
+			"entries": sizeMapCount,
+			"dirty":   sizeMapDirty,
+			"ttl_minutes": func() int {
+				if p.config != nil {
+					return p.config.SizeMapTTL
+				}
+				return 0
+			}(),
+		},
+		"range_compat_cache": map[string]interface{}{
+			"enabled": p.config != nil && p.config.EnableRangeCompatCache,
+			"entries": rangeCompatCount,
+			"ttl_minutes": func() int {
+				if p.config != nil {
+					return p.config.RangeCompatTTL
+				}
+				return 0
+			}(),
+		},
+		"parallel_decrypt": map[string]interface{}{
+			"enabled": p.config != nil && p.config.EnableParallelDecrypt,
+			"concurrency": func() int {
+				if p.config != nil {
+					return p.config.ParallelDecryptConcurrency
+				}
+				return 0
+			}(),
+			"auto_detected": maxParallelDecrypt,
+		},
+		"stream_buffer_kb": func() int {
+			if p.config != nil {
+				return p.config.StreamBufferKB
+			}
+			return 0
+		}(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"code": 200,
+		"data": data,
+	})
+}
+
 // handleRestart 处理重启请求
 func (p *ProxyServer) handleRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1282,12 +1646,19 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 200,
 			"data": map[string]interface{}{
-				"alistHost":       p.config.AlistHost,
-				"alistPort":       p.config.AlistPort,
-				"https":           p.config.AlistHttps,
-				"proxyPort":       p.config.ProxyPort,
-				"passwdList":      passwdList,
-				"probeOnDownload": p.config.ProbeOnDownload,
+				"alistHost":                  p.config.AlistHost,
+				"alistPort":                  p.config.AlistPort,
+				"https":                      p.config.AlistHttps,
+				"proxyPort":                  p.config.ProxyPort,
+				"passwdList":                 passwdList,
+				"probeOnDownload":            p.config.ProbeOnDownload,
+				"enableSizeMap":              p.config.EnableSizeMap,
+				"sizeMapTtlMinutes":          p.config.SizeMapTTL,
+				"enableRangeCompatCache":     p.config.EnableRangeCompatCache,
+				"rangeCompatTtlMinutes":      p.config.RangeCompatTTL,
+				"enableParallelDecrypt":      p.config.EnableParallelDecrypt,
+				"parallelDecryptConcurrency": p.config.ParallelDecryptConcurrency,
+				"streamBufferKb":             p.config.StreamBufferKB,
 			},
 		})
 		return
@@ -1307,6 +1678,83 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				p.mutex.Lock()
 				p.config.ProbeOnDownload = b
 				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["enableSizeMap"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.EnableSizeMap = b
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["sizeMapTtlMinutes"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.SizeMapTTL = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.SizeMapTTL = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["enableRangeCompatCache"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.EnableRangeCompatCache = b
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["rangeCompatTtlMinutes"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.RangeCompatTTL = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.RangeCompatTTL = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["enableParallelDecrypt"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.EnableParallelDecrypt = b
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["parallelDecryptConcurrency"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.ParallelDecryptConcurrency = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.ParallelDecryptConcurrency = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["streamBufferKb"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.StreamBufferKB = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.StreamBufferKB = val
+					p.mutex.Unlock()
+				}
 			}
 		}
 
@@ -1606,6 +2054,9 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 			req.Header.Add(key, value)
 		}
 	}
+	if rangeHeader != "" && p.shouldSkipRange(info.RedirectURL) {
+		req.Header.Del("Range")
+	}
 
 	// 百度云盘需要特殊的 User-Agent
 	if strings.Contains(info.RedirectURL, "baidupcs.com") {
@@ -1628,6 +2079,10 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	statusCode := resp.StatusCode
 	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
 		statusCode = http.StatusPartialContent
+	}
+	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+	if rangeHeader != "" && !upstreamIsRange {
+		p.markRangeIncompatible(info.RedirectURL)
 	}
 
 	// 复制响应头
@@ -1797,6 +2252,9 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		}
 
 		upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+		if rangeHeader != "" && !upstreamIsRange {
+			p.markRangeIncompatible(info.RedirectURL)
+		}
 		if startPos > 0 {
 			if upstreamIsRange {
 				encryptor.SetPosition(startPos)
@@ -1912,7 +2370,8 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 
 					// 并行解密文件名（当文件数超过阈值时）
 					if len(decryptTasks) > 0 {
-						if len(decryptTasks) >= parallelDecryptThreshold {
+						useParallel := p.config != nil && p.config.EnableParallelDecrypt && len(decryptTasks) >= parallelDecryptThreshold
+						if useParallel {
 							// 使用并行解密
 							p.parallelDecryptFileNamesV2(decryptTasks)
 						} else {
@@ -1959,7 +2418,7 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 // parallelDecryptFileNames 并行解密文件名（旧版本，使用统一的 encPath）
 func (p *ProxyServer) parallelDecryptFileNames(tasks []fileDecryptTask, encPath *EncryptPath) {
 	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, maxParallelDecrypt)
+	semaphore := make(chan struct{}, p.parallelDecryptLimit())
 
 	for _, task := range tasks {
 		wg.Add(1)
@@ -1986,7 +2445,7 @@ func (p *ProxyServer) parallelDecryptFileNames(tasks []fileDecryptTask, encPath 
 // parallelDecryptFileNamesV2 并行解密文件名（新版本，每个文件使用自己的 encPath）
 func (p *ProxyServer) parallelDecryptFileNamesV2(tasks []fileDecryptTask) {
 	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, maxParallelDecrypt)
+	semaphore := make(chan struct{}, p.parallelDecryptLimit())
 
 	for _, task := range tasks {
 		wg.Add(1)
@@ -2331,6 +2790,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		filePath = strings.TrimPrefix(filePath, "/p/")
 	}
 	filePath = "/" + filePath
+	rangeHeader := r.Header.Get("Range")
 
 	// 检查是否需要解密
 	encPath := p.findEncryptPath(filePath)
@@ -2454,7 +2914,6 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// 如果缓存中没有文件大小，尝试从响应头获取；如果仍然未知，探测远程总大小（HEAD 或 Range=0-0）
 	if fileSize == 0 && encPath != nil {
 		// Range 请求下 Content-Length 只是分片大小，不能用作总大小
-		rangeHeader := r.Header.Get("Range")
 		if rangeHeader == "" {
 			if cl := resp.Header.Get("Content-Length"); cl != "" {
 				if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
@@ -2545,7 +3004,6 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	// 获取 Range 信息
 	var startPos int64 = 0
-	rangeHeader := r.Header.Get("Range")
 	if rangeHeader != "" {
 		if strings.HasPrefix(rangeHeader, "bytes=") {
 			rangeParts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
@@ -2575,7 +3033,6 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
 		if startPos > 0 {
 			if upstreamIsRange {
 				encryptor.SetPosition(startPos)
@@ -2618,6 +3075,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	if encPath == nil && matchPath != filePath {
 		encPath = p.findEncryptPath(filePath)
 	}
+	rangeHeader := r.Header.Get("Range")
 
 	// 记录 WebDAV 请求关键日志
 	if encPath != nil {
@@ -2789,6 +3247,9 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			newDest := p.getAlistURL() + destPath
 			req.Header.Set("Destination", newDest)
 		}
+	}
+	if r.Method == "GET" && rangeHeader != "" && p.shouldSkipRange(targetURL) {
+		req.Header.Del("Range")
 	}
 
 	// 备份 Body 以便可能的重试 (针对 PROPFIND)
@@ -3053,7 +3514,6 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Range 请求下 Content-Length 只是分片大小，不能用作总大小
-		rangeHeader := r.Header.Get("Range")
 		if fileSize == 0 && rangeHeader == "" {
 			if cl := resp.Header.Get("Content-Length"); cl != "" {
 				fileSize, _ = strconv.ParseInt(cl, 10, 64)
@@ -3107,6 +3567,9 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			}
 
 			upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+			if rangeHeader != "" && !upstreamIsRange {
+				p.markRangeIncompatible(targetURL)
+			}
 			if startPos > 0 {
 				if upstreamIsRange {
 					encryptor.SetPosition(startPos)

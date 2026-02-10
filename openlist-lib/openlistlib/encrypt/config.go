@@ -22,12 +22,19 @@ type ConfigManager struct {
 // DefaultConfig 默认配置
 func DefaultConfig() *ProxyConfig {
 	return &ProxyConfig{
-		AlistHost:       "127.0.0.1",
-		AlistPort:       5244,
-		AlistHttps:      false,
-		ProxyPort:       5344,
-		ProbeOnDownload: true,  // 默认开启，确保能正确获取文件大小以解密
-		EnableH2C:       false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
+		AlistHost:                  "127.0.0.1",
+		AlistPort:                  5244,
+		AlistHttps:                 false,
+		ProxyPort:                  5344,
+		ProbeOnDownload:            true,  // 默认开启，确保能正确获取文件大小以解密
+		EnableH2C:                  false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
+		EnableSizeMap:              true,
+		SizeMapTTL:                 1440,
+		EnableRangeCompatCache:     true,
+		RangeCompatTTL:             60,
+		EnableParallelDecrypt:      false,
+		ParallelDecryptConcurrency: 4,
+		StreamBufferKB:             512,
 		EncryptPaths: []*EncryptPath{
 			{
 				Path:     "encrypt_folder/*",
@@ -129,6 +136,7 @@ func (m *ConfigManager) GetConfig() *ProxyConfig {
 		pathsCopy[i] = &pathCopy
 	}
 	configCopy.EncryptPaths = pathsCopy
+	configCopy.ConfigPath = m.configPath
 
 	return &configCopy
 }
