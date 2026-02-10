@@ -287,6 +287,7 @@ type ProxyServer struct {
 	rangeCompat    map[string]time.Time
 	cleanupTicker  *time.Ticker
 	cleanupDone    chan struct{}
+	localStore     *localStore
 }
 
 // FileInfo 文件信息
@@ -498,6 +499,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	server.startCacheCleanup()
 	server.initSizeMap()
 	server.initRangeCompat()
+	server.initLocalStore()
 
 	return server, nil
 }
@@ -531,15 +533,8 @@ func (p *ProxyServer) initSizeMap() {
 	if p.config == nil || !p.config.EnableSizeMap {
 		return
 	}
-	if p.config.ConfigPath == "" {
-		return
-	}
-	mapDir := filepath.Dir(p.config.ConfigPath)
-	p.sizeMapPath = filepath.Join(mapDir, "size_map.json")
 	p.sizeMap = make(map[string]SizeMapEntry)
-	p.sizeMapDone = make(chan struct{})
-	p.loadSizeMap()
-	go p.sizeMapLoop()
+	p.sizeMapDone = nil
 }
 
 func (p *ProxyServer) sizeMapLoop() {
@@ -858,8 +853,14 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/enc-api/saveAlistConfig", p.handleConfig)
 	mux.HandleFunc("/enc-api/getStats", p.handleStats)
 	mux.HandleFunc("/enc-api/getUserInfo", p.handleUserInfo)
+	mux.HandleFunc("/enc-api/localState", p.handleLocalState)
+	mux.HandleFunc("/enc-api/localExport", p.handleLocalExport)
+	mux.HandleFunc("/enc-api/localImport", p.handleLocalImport)
 	mux.HandleFunc("/api/encrypt/config", p.handleConfig)
 	mux.HandleFunc("/api/encrypt/stats", p.handleStats)
+	mux.HandleFunc("/api/encrypt/localState", p.handleLocalState)
+	mux.HandleFunc("/api/encrypt/localExport", p.handleLocalExport)
+	mux.HandleFunc("/api/encrypt/localImport", p.handleLocalImport)
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
 	// 文件操作相关 - 包装以支持全链路追踪
 	mux.HandleFunc("/redirect/", internal.WrapHandler(p.handleRedirect))
@@ -928,6 +929,8 @@ func (p *ProxyServer) Stop() error {
 	if p.h2cTransport != nil {
 		p.h2cTransport.CloseIdleConnections()
 	}
+
+	p.closeLocalStore()
 
 	p.running = false
 	log.Info("[" + internal.TagServer + "] Encrypt proxy server stopped")
@@ -1512,6 +1515,15 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 		p.rangeCompatMu.RUnlock()
 	}
 
+	localSizeCount := 0
+	localStrategyCount := 0
+	if p.localStore != nil {
+		if sizeCount, strategyCount, err := p.localStore.Counts(); err == nil {
+			localSizeCount = sizeCount
+			localStrategyCount = strategyCount
+		}
+	}
+
 	data := map[string]interface{}{
 		"status": "ok",
 		"uptime": time.Since(startTime).Round(time.Second).String(),
@@ -1541,6 +1553,11 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 				return 0
 			}(),
 		},
+		"local_store": map[string]interface{}{
+			"enabled":          p.localStore != nil,
+			"size_entries":     localSizeCount,
+			"strategy_entries": localStrategyCount,
+		},
 		"parallel_decrypt": map[string]interface{}{
 			"enabled": p.config != nil && p.config.EnableParallelDecrypt,
 			"concurrency": func() int {
@@ -1563,6 +1580,125 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"code": 200,
 		"data": data,
+	})
+}
+
+// handleLocalState returns local SQLite state for a key or provider/path.
+func (p *ProxyServer) handleLocalState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if p.localStore == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"code": 200,
+			"data": map[string]interface{}{
+				"found": false,
+			},
+		})
+		return
+	}
+
+	query := r.URL.Query()
+	key := query.Get("key")
+	providerURL := query.Get("providerUrl")
+	originalURL := query.Get("originalUrl")
+	if key == "" {
+		if providerHost, originalPath, ok := parseProviderAndPath(providerURL, originalURL); ok {
+			key = buildLocalKey(providerHost, originalPath)
+		}
+	}
+	if key == "" {
+		http.Error(w, "missing key or providerUrl/originalUrl", http.StatusBadRequest)
+		return
+	}
+
+	sizeRec, strategies, err := p.localStore.GetSnapshot(key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data := map[string]interface{}{
+		"found":         sizeRec != nil,
+		"key":           key,
+		"network_state": string(GetNetworkState()),
+	}
+	if sizeRec != nil {
+		data["size"] = sizeRec
+		data["strategies"] = strategies
+	} else {
+		data["strategies"] = []LocalStrategyRecord{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"code": 200,
+		"data": data,
+	})
+}
+
+// handleLocalExport dumps local SQLite data for migration.
+func (p *ProxyServer) handleLocalExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if p.localStore == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"code": 200,
+			"data": &LocalExport{},
+		})
+		return
+	}
+
+	data, err := p.localStore.ExportAll()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"code": 200,
+		"data": data,
+	})
+}
+
+// handleLocalImport imports local SQLite data from a JSON payload.
+func (p *ProxyServer) handleLocalImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if p.localStore == nil {
+		http.Error(w, "local store not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	const maxImportBytes = 10 << 20
+	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes)
+	var payload LocalExport
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := p.localStore.Import(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	counts := map[string]int{
+		"sizes":      len(payload.Sizes),
+		"strategies": len(payload.Strategies),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"code": 200,
+		"data": counts,
 	})
 }
 
@@ -2028,6 +2164,13 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		log.Infof("%s handleRedirect: Range header=%s, startPos=%d", internal.LogPrefix(ctx, internal.TagDownload), rangeHeader, startPos)
 	}
 
+	rangeSuppressedByStrategy := false
+	if rangeHeader != "" {
+		if strategy, ok := p.lookupLocalStrategy(info.RedirectURL, info.OriginalURL); ok && strategy == StreamStrategyChunked {
+			rangeSuppressedByStrategy = true
+		}
+	}
+
 	// 创建到实际资源的请求
 	req, err := http.NewRequest("GET", info.RedirectURL, nil)
 	if err != nil {
@@ -2054,8 +2197,12 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 			req.Header.Add(key, value)
 		}
 	}
-	if rangeHeader != "" && p.shouldSkipRange(info.RedirectURL) {
-		req.Header.Del("Range")
+	if rangeHeader != "" {
+		if rangeSuppressedByStrategy {
+			req.Header.Del("Range")
+		} else if p.shouldSkipRange(info.RedirectURL) {
+			req.Header.Del("Range")
+		}
 	}
 
 	// 百度云盘需要特殊的 User-Agent
@@ -2081,7 +2228,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusPartialContent
 	}
 	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
-	if rangeHeader != "" && !upstreamIsRange {
+	if rangeHeader != "" && !upstreamIsRange && !rangeSuppressedByStrategy {
 		p.markRangeIncompatible(info.RedirectURL)
 	}
 
@@ -2126,6 +2273,11 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		fileSize := info.FileSize
 
 		// 如果 fileSize 为 0，尝试多种方式获取（修复 WebDAV 播放问题）
+		if fileSize == 0 {
+			if size, ok := p.lookupLocalSize(info.RedirectURL, info.OriginalURL); ok {
+				fileSize = size
+			}
+		}
 		if fileSize == 0 {
 			// 1. 首先尝试从缓存中查找（使用多种路径变体）
 			if info.OriginalURL != "" {
@@ -2234,6 +2386,12 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+
+		observedStrategy := StreamStrategyChunked
+		if upstreamIsRange {
+			observedStrategy = StreamStrategyRange
+		}
+		p.recordLocalObservation(info.RedirectURL, info.OriginalURL, fileSize, resp.StatusCode, resp.Header.Get("Content-Type"), observedStrategy)
 
 		// 如果仍然为 0，跳过解密直接代理（记录更详细的警告信息）
 		if fileSize == 0 {
@@ -2831,6 +2989,19 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 			log.Debugf("%s handleDownload: got fileSize from enc cache: %d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, encPathFull)
 		}
 	}
+	if fileSize == 0 {
+		if size, ok := p.lookupLocalSize(p.getAlistURL()+actualURLPath, filePath); ok {
+			fileSize = size
+			log.Debugf("%s handleDownload: got fileSize from local store: %d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
+		}
+	}
+
+	rangeSuppressedByStrategy := false
+	if rangeHeader != "" {
+		if strategy, ok := p.lookupLocalStrategy(p.getAlistURL()+actualURLPath, filePath); ok && strategy == StreamStrategyChunked {
+			rangeSuppressedByStrategy = true
+		}
+	}
 
 	// 创建到 Alist 的请求
 	req, err := http.NewRequest(r.Method, p.getAlistURL()+actualURLPath, nil)
@@ -2846,6 +3017,9 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 				req.Header.Add(key, value)
 			}
 		}
+	}
+	if rangeHeader != "" && rangeSuppressedByStrategy {
+		req.Header.Del("Range")
 	}
 
 	resp, err := p.httpClient.Do(req)
@@ -2968,6 +3142,12 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusPartialContent
 	}
 	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+
+	observedStrategy := StreamStrategyChunked
+	if upstreamIsRange {
+		observedStrategy = StreamStrategyRange
+	}
+	p.recordLocalObservation(p.getAlistURL()+actualURLPath, filePath, fileSize, resp.StatusCode, resp.Header.Get("Content-Type"), observedStrategy)
 
 	// 复制响应头
 	for key, values := range resp.Header {
@@ -3146,6 +3326,13 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		targetURL += "?" + r.URL.RawQuery
 	}
 
+	rangeSuppressedByStrategy := false
+	if r.Method == "GET" && rangeHeader != "" {
+		if strategy, ok := p.lookupLocalStrategy(targetURL, filePath); ok && strategy == StreamStrategyChunked {
+			rangeSuppressedByStrategy = true
+		}
+	}
+
 	var body io.Reader = nil
 	if r.Body != nil {
 		body = r.Body
@@ -3249,8 +3436,12 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			req.Header.Set("Destination", newDest)
 		}
 	}
-	if r.Method == "GET" && rangeHeader != "" && p.shouldSkipRange(targetURL) {
-		req.Header.Del("Range")
+	if r.Method == "GET" && rangeHeader != "" {
+		if rangeSuppressedByStrategy {
+			req.Header.Del("Range")
+		} else if p.shouldSkipRange(targetURL) {
+			req.Header.Del("Range")
+		}
 	}
 
 	// 备份 Body 以便可能的重试 (针对 PROPFIND)
@@ -3392,6 +3583,12 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			if fileSize == 0 {
+				if size, ok := p.lookupLocalSize(location, filePath); ok {
+					fileSize = size
+				}
+			}
+
 			// 如果缓存中没有 fileSize，尝试通过 PROPFIND 获取（修复 WebDAV 播放问题）
 			if fileSize == 0 {
 				propfindURL := targetURL
@@ -3501,6 +3698,11 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if fileSize == 0 {
+			if size, ok := p.lookupLocalSize(targetURL, filePath); ok {
+				fileSize = size
+			}
+		}
 
 		// 尝试获取文件大小
 		contentRange := resp.Header.Get("Content-Range")
@@ -3568,9 +3770,14 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			}
 
 			upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
-			if rangeHeader != "" && !upstreamIsRange {
+			if rangeHeader != "" && !upstreamIsRange && !rangeSuppressedByStrategy {
 				p.markRangeIncompatible(targetURL)
 			}
+			observedStrategy := StreamStrategyChunked
+			if upstreamIsRange {
+				observedStrategy = StreamStrategyRange
+			}
+			p.recordLocalObservation(targetURL, filePath, fileSize, resp.StatusCode, resp.Header.Get("Content-Type"), observedStrategy)
 			if startPos > 0 {
 				if upstreamIsRange {
 					encryptor.SetPosition(startPos)

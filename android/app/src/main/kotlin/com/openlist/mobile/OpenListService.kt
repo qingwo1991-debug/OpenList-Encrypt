@@ -11,10 +11,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import android.net.wifi.WifiManager
 import android.os.PowerManager
+import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.openlist.mobile.config.AppConfig
@@ -65,6 +69,8 @@ class OpenListService : Service(), OpenList.Listener {
     private var mWifiLock: WifiManager.WifiLock? = null
     private var mLocalAddress: String = ""
     private var mDbSyncJob: Job? = null
+    private var mConnectivityManager: ConnectivityManager? = null
+    private var mNetworkCallback: ConnectivityManager.NetworkCallback? = null
 
     // Database sync interval in milliseconds (5 minutes)
     private val DB_SYNC_INTERVAL = 5 * 60 * 1000L
@@ -120,6 +126,8 @@ class OpenListService : Service(), OpenList.Listener {
 
         // Add OpenList listener
         OpenList.addListener(this)
+
+        startNetworkMonitoring()
 
         // Acquire wake lock if enabled
         if (AppConfig.isWakeLockEnabled) {
@@ -197,6 +205,8 @@ class OpenListService : Service(), OpenList.Listener {
         
         // Stop database sync task
         stopDatabaseSyncTask()
+
+        stopNetworkMonitoring()
     }
 
     override fun onShutdown(type: String) {
@@ -238,6 +248,94 @@ class OpenListService : Service(), OpenList.Listener {
         mDbSyncJob?.cancel()
         mDbSyncJob = null
         Log.d(TAG, "Database sync task stopped")
+    }
+
+    private fun startNetworkMonitoring() {
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        mConnectivityManager = connectivityManager
+
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                updateNetworkStateFromActive()
+            }
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                updateNetworkStateFromCapabilities(networkCapabilities)
+            }
+
+            override fun onLost(network: Network) {
+                updateNetworkStateFromActive()
+            }
+        }
+        mNetworkCallback = callback
+
+        try {
+            connectivityManager.registerDefaultNetworkCallback(callback)
+            updateNetworkStateFromActive()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register network callback", e)
+        }
+    }
+
+    private fun stopNetworkMonitoring() {
+        val connectivityManager = mConnectivityManager ?: return
+        val callback = mNetworkCallback ?: return
+        try {
+            connectivityManager.unregisterNetworkCallback(callback)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to unregister network callback", e)
+        }
+        mNetworkCallback = null
+        mConnectivityManager = null
+    }
+
+    private fun updateNetworkStateFromActive() {
+        val connectivityManager = mConnectivityManager ?: return
+        val activeNetwork = connectivityManager.activeNetwork
+        if (activeNetwork == null) {
+            OpenList.setNetworkState("offline")
+            return
+        }
+        val caps = connectivityManager.getNetworkCapabilities(activeNetwork)
+        if (caps == null) {
+            OpenList.setNetworkState("offline")
+            return
+        }
+        updateNetworkStateFromCapabilities(caps)
+    }
+
+    private fun updateNetworkStateFromCapabilities(caps: NetworkCapabilities) {
+        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+            OpenList.setNetworkState("offline")
+            return
+        }
+        val state = when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> resolveCellularGeneration()
+            else -> "wifi"
+        }
+        OpenList.setNetworkState(state)
+    }
+
+    private fun resolveCellularGeneration(): String {
+        return try {
+            val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            val networkType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                telephonyManager.dataNetworkType
+            } else {
+                @Suppress("DEPRECATION")
+                telephonyManager.networkType
+            }
+            when (networkType) {
+                TelephonyManager.NETWORK_TYPE_NR -> "5g"
+                TelephonyManager.NETWORK_TYPE_LTE,
+                TelephonyManager.NETWORK_TYPE_LTE_CA -> "4g"
+                else -> "cellular"
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to resolve cellular generation", e)
+            "cellular"
+        }
     }
 
     /**

@@ -107,6 +107,14 @@ object OpenList : Event, LogCallback {
         }
     }
 
+    fun setNetworkState(state: String) {
+        runCatching {
+            Openlistlib.setNetworkState(state)
+        }.onFailure { e ->
+            Log.e(TAG, "Failed to set network state", e)
+        }
+    }
+
     @SuppressLint("SdCardPath")
     @Synchronized
     fun startup() {
