@@ -60,6 +60,8 @@ class OpenListService : Service(), OpenList.Listener {
         @Volatile
         var serviceInstance: OpenListService? = null
             private set
+
+        private const val NETWORK_TYPE_LTE_CA = 19
     }
 
     private val mScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -329,7 +331,7 @@ class OpenListService : Service(), OpenList.Listener {
             when (networkType) {
                 TelephonyManager.NETWORK_TYPE_NR -> "5g"
                 TelephonyManager.NETWORK_TYPE_LTE,
-                TelephonyManager.NETWORK_TYPE_LTE_CA -> "4g"
+                NETWORK_TYPE_LTE_CA -> "4g"
                 else -> "cellular"
             }
         } catch (e: Exception) {
