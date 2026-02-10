@@ -1796,8 +1796,16 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
 		if startPos > 0 {
-			encryptor.SetPosition(startPos)
+			if upstreamIsRange {
+				encryptor.SetPosition(startPos)
+			} else {
+				if _, err := io.CopyN(io.Discard, resp.Body, startPos); err != nil {
+					log.Warnf("%s handleRedirect: skip encrypted prefix failed: %v", internal.LogPrefix(ctx, internal.TagDecrypt), err)
+				}
+				encryptor.SetPosition(startPos)
+			}
 		}
 
 		// 创建解密读取器
@@ -1912,7 +1920,7 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 							for _, task := range decryptTasks {
 								showName := ConvertShowName(task.encPath.Password, task.encPath.EncType, task.name)
 								if showName != task.name && !strings.HasPrefix(showName, "orig_") {
-										log.Debugf("%s Decrypt filename: %s -> %s", internal.LogPrefix(ctx, internal.TagDecrypt), task.name, showName)
+									log.Debugf("%s Decrypt filename: %s -> %s", internal.LogPrefix(ctx, internal.TagDecrypt), task.name, showName)
 								}
 								task.fileMap["name"] = showName
 								// 同步更新 path，避免客户端使用密文 path
@@ -2567,8 +2575,16 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
 		if startPos > 0 {
-			encryptor.SetPosition(startPos)
+			if upstreamIsRange {
+				encryptor.SetPosition(startPos)
+			} else {
+				if _, err := io.CopyN(io.Discard, resp.Body, startPos); err != nil {
+					log.Warnf("%s handleDownload: skip encrypted prefix failed: %v", internal.LogPrefix(ctx, internal.TagDecrypt), err)
+				}
+				encryptor.SetPosition(startPos)
+			}
 		}
 
 		decryptReader := NewDecryptReader(resp.Body, encryptor)
@@ -3090,8 +3106,16 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
+			upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
 			if startPos > 0 {
-				encryptor.SetPosition(startPos)
+				if upstreamIsRange {
+					encryptor.SetPosition(startPos)
+				} else {
+					if _, err := io.CopyN(io.Discard, resp.Body, startPos); err != nil {
+						log.Warnf("WebDAV decrypt: skip encrypted prefix failed: %v", err)
+					}
+					encryptor.SetPosition(startPos)
+				}
 			}
 
 			decryptReader := NewDecryptReader(resp.Body, encryptor)
