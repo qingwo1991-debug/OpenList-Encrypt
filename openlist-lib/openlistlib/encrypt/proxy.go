@@ -2964,7 +2964,6 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	filePath = "/" + filePath
 	clientRangeHeader := r.Header.Get("Range")
-	upstreamRangeHeader := clientRangeHeader
 
 	// 检查是否需要解密
 	encPath := p.findEncryptPath(filePath)
@@ -3013,7 +3012,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rangeSuppressedByStrategy := false
-	if rangeHeader != "" {
+	if clientRangeHeader != "" {
 		if strategy, ok := p.lookupLocalStrategy(p.getAlistURL()+actualURLPath, filePath); ok && strategy == StreamStrategyChunked {
 			rangeSuppressedByStrategy = true
 		}
@@ -3034,7 +3033,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if rangeHeader != "" && rangeSuppressedByStrategy {
+	if clientRangeHeader != "" && rangeSuppressedByStrategy {
 		req.Header.Del("Range")
 	}
 
@@ -3104,7 +3103,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// 如果缓存中没有文件大小，尝试从响应头获取；如果仍然未知，探测远程总大小（HEAD 或 Range=0-0）
 	if fileSize == 0 && encPath != nil {
 		// Range 请求下 Content-Length 只是分片大小，不能用作总大小
-		if rangeHeader == "" {
+		if clientRangeHeader == "" {
 			if cl := resp.Header.Get("Content-Length"); cl != "" {
 				if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
 					fileSize = size
@@ -3201,9 +3200,9 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	// 获取 Range 信息
 	var startPos int64 = 0
-	if rangeHeader != "" {
-		if strings.HasPrefix(rangeHeader, "bytes=") {
-			rangeParts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
+	if clientRangeHeader != "" {
+		if strings.HasPrefix(clientRangeHeader, "bytes=") {
+			rangeParts := strings.Split(strings.TrimPrefix(clientRangeHeader, "bytes="), "-")
 			if len(rangeParts) >= 1 {
 				startPos, _ = strconv.ParseInt(rangeParts[0], 10, 64)
 			}
@@ -3273,6 +3272,8 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		encPath = p.findEncryptPath(filePath)
 	}
 	rangeHeader := r.Header.Get("Range")
+	clientRangeHeader := rangeHeader
+	upstreamRangeHeader := clientRangeHeader
 
 	// 记录 WebDAV 请求关键日志
 	if encPath != nil {
