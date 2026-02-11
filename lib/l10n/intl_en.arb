@@ -10,6 +10,7 @@
   "cancel": "Cancel",
   "releasePage": "Release Page",
   "downloadApk": "Download APK",
+  "updateFailed": "Update check failed",
   "about": "About",
   "general": "General",
   "autoCheckForUpdates": "Auto check for updates",

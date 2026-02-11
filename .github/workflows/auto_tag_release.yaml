@@ -1,0 +1,42 @@
+name: Auto Tag Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Generate tag
+        id: version
+        run: |
+          VERSION_DATE="$(date +%Y.%m.%d)"
+          VERSION_NAME="${VERSION_DATE}.${GITHUB_RUN_NUMBER}"
+          TAG="v${VERSION_NAME}"
+          echo "TAG=$TAG" >> $GITHUB_OUTPUT
+          echo "TAG=$TAG"
+
+      - name: Create and push tag
+        run: |
+          TAG="${{ steps.version.outputs.TAG }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag already exists: $TAG"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "CI release $TAG"
+          git push origin "$TAG"

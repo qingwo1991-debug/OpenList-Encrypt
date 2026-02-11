@@ -10,6 +10,7 @@
   "cancel": "取消",
   "releasePage": "发布页面",
   "downloadApk": "下载APK",
+  "updateFailed": "更新检查失败",
   "about": "关于",
   "general": "通用",
   "autoCheckForUpdates": "自动检查更新",

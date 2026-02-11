@@ -21,24 +21,31 @@ class AppUpdateDialog extends StatelessWidget {
   static checkUpdateAndShowDialog(
       BuildContext context, ValueChanged<bool>? checkFinished) async {
     final checker = UpdateChecker(owner: "qingwo1991-debug", repo: "OpenList-Encrypt");
-    await checker.downloadData();
-    final hasNewVersion = await checker.hasNewVersion();
-    
-    checkFinished?.call(hasNewVersion);
-    
-    if (hasNewVersion) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        barrierColor: Colors.black.withOpacity(0.5),
-        builder: (context) {
-          return AppUpdateDialog(
-            content: checker.getUpdateContent(),
-            apkUrl: checker.getApkDownloadUrl(),
-            htmlUrl: checker.getHtmlUrl(),
-            version: checker.getTag(),
-          );
-        },
+    try {
+      await checker.downloadData();
+      final hasNewVersion = await checker.hasNewVersion();
+
+      checkFinished?.call(hasNewVersion);
+
+      if (hasNewVersion) {
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          barrierColor: Colors.black.withOpacity(0.5),
+          builder: (context) {
+            return AppUpdateDialog(
+              content: checker.getUpdateContent(),
+              apkUrl: checker.getApkDownloadUrl(),
+              htmlUrl: checker.getHtmlUrl(),
+              version: checker.getDisplayVersion(),
+            );
+          },
+        );
+      }
+    } catch (e) {
+      checkFinished?.call(false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${S.of(context).updateFailed}: $e')),
       );
     }
   }

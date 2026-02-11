@@ -2152,23 +2152,27 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		internal.LogPrefix(ctx, internal.TagDownload), key, info.FileSize, info.PasswdInfo.EncType, info.RedirectURL)
 
 	// 获取 Range 头
-	rangeHeader := r.Header.Get("Range")
+	clientRangeHeader := r.Header.Get("Range")
+	upstreamRangeHeader := clientRangeHeader
 	var startPos int64 = 0
-	if rangeHeader != "" {
-		if strings.HasPrefix(rangeHeader, "bytes=") {
-			rangeParts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
+	if clientRangeHeader != "" {
+		if strings.HasPrefix(clientRangeHeader, "bytes=") {
+			rangeParts := strings.Split(strings.TrimPrefix(clientRangeHeader, "bytes="), "-")
 			if len(rangeParts) >= 1 {
 				startPos, _ = strconv.ParseInt(rangeParts[0], 10, 64)
 			}
 		}
-		log.Infof("%s handleRedirect: Range header=%s, startPos=%d", internal.LogPrefix(ctx, internal.TagDownload), rangeHeader, startPos)
+		log.Infof("%s handleRedirect: Range header=%s, startPos=%d", internal.LogPrefix(ctx, internal.TagDownload), clientRangeHeader, startPos)
 	}
 
 	rangeSuppressedByStrategy := false
-	if rangeHeader != "" {
+	if clientRangeHeader != "" {
 		if strategy, ok := p.lookupLocalStrategy(info.RedirectURL, info.OriginalURL); ok && strategy == StreamStrategyChunked {
 			rangeSuppressedByStrategy = true
 		}
+	}
+	if clientRangeHeader != "" && (rangeSuppressedByStrategy || p.shouldSkipRange(info.RedirectURL)) {
+		upstreamRangeHeader = ""
 	}
 
 	// 创建到实际资源的请求
@@ -2197,12 +2201,10 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 			req.Header.Add(key, value)
 		}
 	}
-	if rangeHeader != "" {
-		if rangeSuppressedByStrategy {
-			req.Header.Del("Range")
-		} else if p.shouldSkipRange(info.RedirectURL) {
-			req.Header.Del("Range")
-		}
+	if upstreamRangeHeader == "" {
+		req.Header.Del("Range")
+	} else {
+		req.Header.Set("Range", upstreamRangeHeader)
 	}
 
 	// 百度云盘需要特殊的 User-Agent
@@ -2228,7 +2230,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusPartialContent
 	}
 	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
-	if rangeHeader != "" && !upstreamIsRange && !rangeSuppressedByStrategy {
+	if clientRangeHeader != "" && !upstreamIsRange {
 		p.markRangeIncompatible(info.RedirectURL)
 	}
 
@@ -2319,7 +2321,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// 3. 如果 Content-Range 没有总大小，尝试 Content-Length（仅当没有 Range 请求时有效）
-			if fileSize == 0 && rangeHeader == "" {
+			if fileSize == 0 && clientRangeHeader == "" {
 				if cl := resp.Header.Get("Content-Length"); cl != "" {
 					if parsedSize, err := strconv.ParseInt(cl, 10, 64); err == nil && parsedSize > 0 {
 						fileSize = parsedSize
@@ -2387,6 +2389,19 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if clientRangeHeader != "" && !upstreamIsRange && startPos > 0 && fileSize > 0 {
+			// Upstream ignored Range; serve a local range with correct headers.
+			endPos := fileSize - 1
+			if endPos >= startPos {
+				statusCode = http.StatusPartialContent
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, endPos, fileSize))
+				w.Header().Set("Content-Length", strconv.FormatInt(fileSize-startPos, 10))
+				w.Header().Set("Accept-Ranges", "bytes")
+			} else {
+				startPos = 0
+			}
+		}
+
 		observedStrategy := StreamStrategyChunked
 		if upstreamIsRange {
 			observedStrategy = StreamStrategyRange
@@ -2410,7 +2425,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		}
 
 		upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
-		if rangeHeader != "" && !upstreamIsRange {
+		if clientRangeHeader != "" && !upstreamIsRange {
 			p.markRangeIncompatible(info.RedirectURL)
 		}
 		if startPos > 0 {
@@ -2948,7 +2963,8 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		filePath = strings.TrimPrefix(filePath, "/p/")
 	}
 	filePath = "/" + filePath
-	rangeHeader := r.Header.Get("Range")
+	clientRangeHeader := r.Header.Get("Range")
+	upstreamRangeHeader := clientRangeHeader
 
 	// 检查是否需要解密
 	encPath := p.findEncryptPath(filePath)
@@ -3327,10 +3343,13 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rangeSuppressedByStrategy := false
-	if r.Method == "GET" && rangeHeader != "" {
+	if r.Method == "GET" && clientRangeHeader != "" {
 		if strategy, ok := p.lookupLocalStrategy(targetURL, filePath); ok && strategy == StreamStrategyChunked {
 			rangeSuppressedByStrategy = true
 		}
+	}
+	if r.Method == "GET" && clientRangeHeader != "" && (rangeSuppressedByStrategy || p.shouldSkipRange(targetURL)) {
+		upstreamRangeHeader = ""
 	}
 
 	var body io.Reader = nil
@@ -3436,11 +3455,11 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			req.Header.Set("Destination", newDest)
 		}
 	}
-	if r.Method == "GET" && rangeHeader != "" {
-		if rangeSuppressedByStrategy {
+	if r.Method == "GET" && clientRangeHeader != "" {
+		if upstreamRangeHeader == "" {
 			req.Header.Del("Range")
-		} else if p.shouldSkipRange(targetURL) {
-			req.Header.Del("Range")
+		} else {
+			req.Header.Set("Range", upstreamRangeHeader)
 		}
 	}
 
@@ -3717,7 +3736,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Range 请求下 Content-Length 只是分片大小，不能用作总大小
-		if fileSize == 0 && rangeHeader == "" {
+		if fileSize == 0 && clientRangeHeader == "" {
 			if cl := resp.Header.Get("Content-Length"); cl != "" {
 				fileSize, _ = strconv.ParseInt(cl, 10, 64)
 			}
@@ -3748,9 +3767,9 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		// 只有当服务端返回了内容，且知道大小，才解密
 		if fileSize > 0 {
 			var startPos int64 = 0
-			if rangeHeader != "" {
-				if strings.HasPrefix(rangeHeader, "bytes=") {
-					rangeParts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
+			if clientRangeHeader != "" {
+				if strings.HasPrefix(clientRangeHeader, "bytes=") {
+					rangeParts := strings.Split(strings.TrimPrefix(clientRangeHeader, "bytes="), "-")
 					if len(rangeParts) >= 1 {
 						startPos, _ = strconv.ParseInt(rangeParts[0], 10, 64)
 					}
@@ -3758,7 +3777,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			}
 
 			log.Infof("WebDAV decrypt: path=%s range=%q content-range=%q content-length=%q fileSize=%d start=%d",
-				filePath, rangeHeader, resp.Header.Get("Content-Range"), resp.Header.Get("Content-Length"), fileSize, startPos)
+				filePath, clientRangeHeader, resp.Header.Get("Content-Range"), resp.Header.Get("Content-Length"), fileSize, startPos)
 
 			encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
 			if err != nil {
@@ -3770,8 +3789,19 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			}
 
 			upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
-			if rangeHeader != "" && !upstreamIsRange && !rangeSuppressedByStrategy {
+			if clientRangeHeader != "" && !upstreamIsRange {
 				p.markRangeIncompatible(targetURL)
+			}
+			if clientRangeHeader != "" && !upstreamIsRange && startPos > 0 {
+				endPos := fileSize - 1
+				if endPos >= startPos {
+					statusCode = http.StatusPartialContent
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, endPos, fileSize))
+					w.Header().Set("Content-Length", strconv.FormatInt(fileSize-startPos, 10))
+					w.Header().Set("Accept-Ranges", "bytes")
+				} else {
+					startPos = 0
+				}
 			}
 			observedStrategy := StreamStrategyChunked
 			if upstreamIsRange {

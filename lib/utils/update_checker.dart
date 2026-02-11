@@ -8,16 +8,26 @@ import 'package:openlist_encrypt/contant/native_bridge.dart';
 class UpdateChecker {
   String owner;
   String repo;
+  final bool includePrerelease;
+  final Duration timeout;
 
   Map<String, dynamic>? _data;
 
-  UpdateChecker({required this.owner, required this.repo});
+  UpdateChecker({
+    required this.owner,
+    required this.repo,
+    this.includePrerelease = false,
+    this.timeout = const Duration(seconds: 10),
+  });
 
   String _versionName = "";
   String _systemABI = "";
 
   downloadData() async {
-    _data = await _getLatestRelease(owner, repo);
+    _data = await _getLatestRelease(owner, repo, timeout: timeout);
+    if (_data?['prerelease'] == true && !includePrerelease) {
+      throw Exception('Latest release is a prerelease');
+    }
     _versionName = await NativeBridge.common.getVersionName();
     _systemABI = await NativeBridge.common.getDeviceCPUABI();
   }
@@ -30,14 +40,16 @@ class UpdateChecker {
   }
 
   static Future<Map<String, dynamic>> _getLatestRelease(
-      String owner, String repo) async {
-    HttpClient client = HttpClient();
+      String owner, String repo, {required Duration timeout}) async {
+    final client = HttpClient()..connectionTimeout = timeout;
     final req = await client.getUrl(
         Uri.parse('https://api.github.com/repos/$owner/$repo/releases/latest'));
-    final response = await req.close();
+    req.headers.set('Accept', 'application/vnd.github+json');
+    req.headers.set('User-Agent', 'OpenList-Encrypt');
+    final response = await req.close().timeout(timeout);
 
     if (response.statusCode == HttpStatus.ok) {
-      final body = await response.transform(utf8.decoder).join();
+      final body = await response.transform(utf8.decoder).join().timeout(timeout);
       return json.decode(body);
     } else {
       throw Exception(
@@ -47,6 +59,10 @@ class UpdateChecker {
 
   String getTag() {
     return data['tag_name'];
+  }
+
+  String getDisplayVersion() {
+    return _normalizeVersion(getTag());
   }
 
   Future<bool> hasNewVersion() async {
@@ -69,7 +85,7 @@ class UpdateChecker {
       }
     }
 
-    throw Exception('Failed to get apk download url');
+    throw Exception('Failed to get apk download url for ABI: $_systemABI');
   }
 
   String getUpdateContent() {
@@ -84,9 +100,8 @@ class UpdateChecker {
   /// Returns: positive if v1 > v2, negative if v1 < v2, 0 if equal
   /// Supports versions with 'v' prefix (e.g., "v1.2.3")
   static int _compareVersions(String v1, String v2) {
-    // Remove 'v' or 'V' prefix if present
-    final version1 = v1.toLowerCase().startsWith('v') ? v1.substring(1) : v1;
-    final version2 = v2.toLowerCase().startsWith('v') ? v2.substring(1) : v2;
+    final version1 = _normalizeVersion(v1);
+    final version2 = _normalizeVersion(v2);
 
     // Split by dots and convert to integers
     final parts1 = version1.split('.').map((s) => int.tryParse(s) ?? 0).toList();
@@ -103,5 +118,21 @@ class UpdateChecker {
     }
 
     return 0;
+  }
+
+  static String _normalizeVersion(String version) {
+    var v = version.trim();
+    if (v.toLowerCase().startsWith('v')) {
+      v = v.substring(1);
+    }
+    final dashIndex = v.indexOf('-');
+    if (dashIndex != -1) {
+      v = v.substring(0, dashIndex);
+    }
+    final plusIndex = v.indexOf('+');
+    if (plusIndex != -1) {
+      v = v.substring(0, plusIndex);
+    }
+    return v;
   }
 }

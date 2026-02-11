@@ -237,26 +237,7 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.VERSION }}
           name: OpenList-Encrypt ${{ steps.version.outputs.VERSION }}
-          body: |
-            ## OpenList-Encrypt ${{ steps.version.outputs.VERSION }}
-
-            ### 功能特性
-            - ✅ 内置 OpenList 服务器
-            - ✅ 加密代理服务（AES-CTR, RC4）
-            - ✅ 在线播放加密视频
-            - ✅ WebDAV 加解密支持
-
-            ### 下载说明
-            - `OpenList-Encrypt-xxx.apk` - 通用版本（包含所有架构）
-            - `OpenList-Encrypt-xxx-arm64-v8a.apk` - ARM64 版本（推荐，适合大多数现代手机）
-            - `OpenList-Encrypt-xxx-armeabi-v7a.apk` - ARM32 版本（老设备）
-            - `OpenList-Encrypt-xxx-x86_64.apk` - x86_64 版本（模拟器/部分平板）
-
-            ### 使用方法
-            1. 安装 APK
-            2. 启动应用，OpenList 服务会自动启动
-            3. 进入「加密」页面配置加密代理
-            4. 通过代理地址访问 Alist，加密路径下的文件会自动加解密
+          generate_release_notes: true
           draft: false
           prerelease: false
           files: |
