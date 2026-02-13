@@ -24,6 +24,14 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   
   // H2C 开关（HTTP/2 Cleartext）
   bool _enableH2C = false;
+
+  // DB_EXPORT 元数据同步配置
+  bool _enableDbExportSync = false;
+  final _dbExportBaseUrlController = TextEditingController(text: '');
+  final _dbExportSyncIntervalController = TextEditingController(text: '300');
+  bool _dbExportAuthEnabled = false;
+  final _dbExportUsernameController = TextEditingController(text: 'admin');
+  final _dbExportPasswordController = TextEditingController();
   
   // 加密路径列表
   List<EncryptPathConfig> _encryptPaths = [];
@@ -75,6 +83,13 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           _alistHttps = config['alistHttps'] ?? false;
           _proxyPortController.text = (config['proxyPort'] ?? 5344).toString();
           _enableH2C = config['enableH2C'] ?? false;
+          _enableDbExportSync = config['enableDbExportSync'] ?? false;
+          _dbExportBaseUrlController.text = config['dbExportBaseUrl'] ?? '';
+          _dbExportSyncIntervalController.text =
+              (config['dbExportSyncIntervalSeconds'] ?? 300).toString();
+          _dbExportAuthEnabled = config['dbExportAuthEnabled'] ?? false;
+          _dbExportUsernameController.text = config['dbExportUsername'] ?? 'admin';
+          _dbExportPasswordController.text = config['dbExportPassword'] ?? '';
           
           // 解析加密路径列表
           final paths = config['encryptPaths'] as List<dynamic>?;
@@ -105,6 +120,31 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
 
   Future<void> _saveConfig() async {
     if (!_formKey.currentState!.validate()) return;
+
+    if (_enableDbExportSync && _dbExportBaseUrlController.text.trim().isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请填写 DB_EXPORT API 地址')),
+        );
+      }
+      return;
+    }
+    if (_enableDbExportSync &&
+        _dbExportAuthEnabled &&
+        _dbExportUsernameController.text.trim().isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请填写鉴权账号')),
+        );
+      }
+      return;
+    }
+
+    int syncInterval = 300;
+    final parsedSyncInterval = int.tryParse(_dbExportSyncIntervalController.text.trim());
+    if (parsedSyncInterval != null && parsedSyncInterval > 0) {
+      syncInterval = parsedSyncInterval;
+    }
     
     try {
       // 保存 Alist 主机配置
@@ -117,6 +157,16 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
       // 保存代理端口
       await NativeBridge.encryptProxy.setEncryptProxyPort(
         int.parse(_proxyPortController.text),
+      );
+
+      // 保存 DB_EXPORT 同步配置
+      await NativeBridge.encryptProxy.setEncryptDbExportSyncConfig(
+        _enableDbExportSync,
+        _dbExportBaseUrlController.text.trim(),
+        syncInterval,
+        _dbExportAuthEnabled,
+        _dbExportUsernameController.text.trim(),
+        _dbExportPasswordController.text,
       );
       
       if (mounted) {
@@ -375,6 +425,10 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     _alistHostController.dispose();
     _alistPortController.dispose();
     _proxyPortController.dispose();
+    _dbExportBaseUrlController.dispose();
+    _dbExportSyncIntervalController.dispose();
+    _dbExportUsernameController.dispose();
+    _dbExportPasswordController.dispose();
     super.dispose();
   }
 
@@ -509,6 +563,82 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         }
                       },
                     ),
+
+                    const SizedBox(height: 24),
+
+                    // DB_EXPORT API 同步配置
+                    Text(
+                      'DB_EXPORT 同步',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    SwitchListTile(
+                      title: const Text('启用 DB_EXPORT 元数据同步'),
+                      subtitle: const Text('从远端 exportFileMeta 增量拉取元数据到本地数据库'),
+                      value: _enableDbExportSync,
+                      onChanged: (value) => setState(() => _enableDbExportSync = value),
+                    ),
+                    if (_enableDbExportSync) ...[
+                      TextFormField(
+                        controller: _dbExportBaseUrlController,
+                        decoration: const InputDecoration(
+                          labelText: 'API 地址',
+                          hintText: 'http://127.0.0.1:5344',
+                        ),
+                        validator: (value) {
+                          if (!_enableDbExportSync) return null;
+                          if (value == null || value.trim().isEmpty) {
+                            return '请输入 API 地址';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      TextFormField(
+                        controller: _dbExportSyncIntervalController,
+                        decoration: const InputDecoration(
+                          labelText: '同步间隔（秒）',
+                          hintText: '300',
+                        ),
+                        keyboardType: TextInputType.number,
+                        validator: (value) {
+                          if (!_enableDbExportSync) return null;
+                          final interval = int.tryParse(value ?? '');
+                          if (interval == null || interval <= 0) {
+                            return '请输入有效同步间隔';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      SwitchListTile(
+                        title: const Text('启用鉴权'),
+                        subtitle: const Text('开启后使用 /enc-api/login 获取 token'),
+                        value: _dbExportAuthEnabled,
+                        onChanged: (value) => setState(() => _dbExportAuthEnabled = value),
+                      ),
+                    ],
+                    if (_enableDbExportSync && _dbExportAuthEnabled) ...[
+                      TextFormField(
+                        controller: _dbExportUsernameController,
+                        decoration: const InputDecoration(
+                          labelText: '账号',
+                          hintText: 'admin',
+                        ),
+                        validator: (value) {
+                          if (!_enableDbExportSync || !_dbExportAuthEnabled) return null;
+                          if (value == null || value.trim().isEmpty) {
+                            return '请输入账号';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      _PasswordInput(
+                        controller: _dbExportPasswordController,
+                        labelText: '密码（留空保持不变）',
+                      ),
+                    ],
                     
                     const SizedBox(height: 24),
                     

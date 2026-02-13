@@ -261,6 +261,18 @@ type ProxyConfig struct {
 	ParallelDecryptConcurrency int `json:"parallelDecryptConcurrency,omitempty"`
 	// StreamBufferKB: 流式解密缓冲区大小（KB）
 	StreamBufferKB int `json:"streamBufferKb,omitempty"`
+	// EnableDBExportSync: 启用通过 DB_EXPORT_API 拉取元数据到本地数据库
+	EnableDBExportSync bool `json:"enableDbExportSync,omitempty"`
+	// DBExportBaseURL: 远端加密服务地址，例如 http://127.0.0.1:5344
+	DBExportBaseURL string `json:"dbExportBaseUrl,omitempty"`
+	// DBExportSyncIntervalSeconds: 增量同步轮询间隔（秒）
+	DBExportSyncIntervalSeconds int `json:"dbExportSyncIntervalSeconds,omitempty"`
+	// DBExportAuthEnabled: 是否启用登录鉴权
+	DBExportAuthEnabled bool `json:"dbExportAuthEnabled,omitempty"`
+	// DBExportUsername: 登录用户名
+	DBExportUsername string `json:"dbExportUsername,omitempty"`
+	// DBExportPassword: 登录密码
+	DBExportPassword string `json:"dbExportPassword,omitempty"`
 	// ConfigPath: 配置文件路径（运行时注入，不序列化）
 	ConfigPath string `json:"-"`
 }
@@ -288,6 +300,8 @@ type ProxyServer struct {
 	cleanupTicker  *time.Ticker
 	cleanupDone    chan struct{}
 	localStore     *localStore
+	metaSyncDone   chan struct{}
+	metaSyncWG     sync.WaitGroup
 }
 
 // FileInfo 文件信息
@@ -493,6 +507,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		httpClient:   httpClient,
 		streamClient: streamClient,
 		cleanupDone:  make(chan struct{}),
+		metaSyncDone: make(chan struct{}),
 	}
 
 	// 启动缓存清理协程
@@ -500,6 +515,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	server.initSizeMap()
 	server.initRangeCompat()
 	server.initLocalStore()
+	server.startDBExportSyncLoop()
 
 	return server, nil
 }
@@ -905,6 +921,7 @@ func (p *ProxyServer) Stop() error {
 
 	// 停止缓存清理协程
 	p.stopCacheCleanup()
+	p.stopDBExportSyncLoop()
 	if p.sizeMapDone != nil {
 		close(p.sizeMapDone)
 		p.sizeMapDone = nil
@@ -1141,6 +1158,16 @@ func (p *ProxyServer) probeWithRange(targetURL string, headers http.Header) int6
 		}
 	}
 	return 0
+}
+
+// forceProbeRemoteFileSize 强制探测远程文件大小（不受 ProbeOnDownload 配置限制）
+// 用于加密文件解密场景：没有 fileSize 就无法生成密钥，解密必然失败
+func (p *ProxyServer) forceProbeRemoteFileSize(targetURL string, headers http.Header) int64 {
+	size := p.probeWithRange(targetURL, headers)
+	if size > 0 {
+		return size
+	}
+	return p.probeWithHead(targetURL, headers)
 }
 
 // probeRemoteFileSize 尝试通过 HEAD 或 Range 请求获取远程文件总大小
@@ -1517,10 +1544,16 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	localSizeCount := 0
 	localStrategyCount := 0
+	dbExportSince := int64(0)
+	dbExportCursor := ""
 	if p.localStore != nil {
 		if sizeCount, strategyCount, err := p.localStore.Counts(); err == nil {
 			localSizeCount = sizeCount
 			localStrategyCount = strategyCount
+		}
+		if since, cursor, err := p.localStore.GetSyncCheckpoint(dbExportCheckpointName); err == nil {
+			dbExportSince = since
+			dbExportCursor = cursor
 		}
 	}
 
@@ -1557,6 +1590,34 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 			"enabled":          p.localStore != nil,
 			"size_entries":     localSizeCount,
 			"strategy_entries": localStrategyCount,
+		},
+		"db_export_sync": map[string]interface{}{
+			"enabled": func() bool {
+				if p.config != nil {
+					return p.config.EnableDBExportSync
+				}
+				return false
+			}(),
+			"base_url": func() string {
+				if p.config != nil {
+					return p.config.DBExportBaseURL
+				}
+				return ""
+			}(),
+			"interval_seconds": func() int {
+				if p.config != nil {
+					return p.config.DBExportSyncIntervalSeconds
+				}
+				return 0
+			}(),
+			"auth_enabled": func() bool {
+				if p.config != nil {
+					return p.config.DBExportAuthEnabled
+				}
+				return false
+			}(),
+			"checkpoint_since":  dbExportSince,
+			"checkpoint_cursor": dbExportCursor,
 		},
 		"parallel_decrypt": map[string]interface{}{
 			"enabled": p.config != nil && p.config.EnableParallelDecrypt,
@@ -1782,19 +1843,25 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 200,
 			"data": map[string]interface{}{
-				"alistHost":                  p.config.AlistHost,
-				"alistPort":                  p.config.AlistPort,
-				"https":                      p.config.AlistHttps,
-				"proxyPort":                  p.config.ProxyPort,
-				"passwdList":                 passwdList,
-				"probeOnDownload":            p.config.ProbeOnDownload,
-				"enableSizeMap":              p.config.EnableSizeMap,
-				"sizeMapTtlMinutes":          p.config.SizeMapTTL,
-				"enableRangeCompatCache":     p.config.EnableRangeCompatCache,
-				"rangeCompatTtlMinutes":      p.config.RangeCompatTTL,
-				"enableParallelDecrypt":      p.config.EnableParallelDecrypt,
-				"parallelDecryptConcurrency": p.config.ParallelDecryptConcurrency,
-				"streamBufferKb":             p.config.StreamBufferKB,
+				"alistHost":                   p.config.AlistHost,
+				"alistPort":                   p.config.AlistPort,
+				"https":                       p.config.AlistHttps,
+				"proxyPort":                   p.config.ProxyPort,
+				"passwdList":                  passwdList,
+				"probeOnDownload":             p.config.ProbeOnDownload,
+				"enableSizeMap":               p.config.EnableSizeMap,
+				"sizeMapTtlMinutes":           p.config.SizeMapTTL,
+				"enableRangeCompatCache":      p.config.EnableRangeCompatCache,
+				"rangeCompatTtlMinutes":       p.config.RangeCompatTTL,
+				"enableParallelDecrypt":       p.config.EnableParallelDecrypt,
+				"parallelDecryptConcurrency":  p.config.ParallelDecryptConcurrency,
+				"streamBufferKb":              p.config.StreamBufferKB,
+				"enableDbExportSync":          p.config.EnableDBExportSync,
+				"dbExportBaseUrl":             p.config.DBExportBaseURL,
+				"dbExportSyncIntervalSeconds": p.config.DBExportSyncIntervalSeconds,
+				"dbExportAuthEnabled":         p.config.DBExportAuthEnabled,
+				"dbExportUsername":            p.config.DBExportUsername,
+				"dbExportPassword":            p.config.DBExportPassword,
 			},
 		})
 		return
@@ -1891,6 +1958,57 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 					p.config.StreamBufferKB = val
 					p.mutex.Unlock()
 				}
+			}
+		}
+		if v, ok := bodyMap["enableDbExportSync"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.EnableDBExportSync = b
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["dbExportBaseUrl"]; ok {
+			if s, ok2 := v.(string); ok2 {
+				p.mutex.Lock()
+				p.config.DBExportBaseURL = strings.TrimSpace(s)
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["dbExportSyncIntervalSeconds"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.DBExportSyncIntervalSeconds = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.DBExportSyncIntervalSeconds = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["dbExportAuthEnabled"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.DBExportAuthEnabled = b
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["dbExportUsername"]; ok {
+			if s, ok2 := v.(string); ok2 {
+				p.mutex.Lock()
+				p.config.DBExportUsername = s
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["dbExportPassword"]; ok {
+			if s, ok2 := v.(string); ok2 {
+				p.mutex.Lock()
+				if strings.TrimSpace(s) != "" {
+					p.config.DBExportPassword = s
+				}
+				p.mutex.Unlock()
 			}
 		}
 
@@ -2348,9 +2466,9 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			// 5. 如果仍然为 0，尝试探测远程文件大小（即使 ProbeOnDownload 未开启也尝试）
+			// 5. 如果仍然为 0，强制探测远程文件大小（加密文件没有 fileSize 无法解密）
 			if fileSize == 0 {
-				probed := p.probeRemoteFileSize(info.RedirectURL, req.Header)
+				probed := p.forceProbeRemoteFileSize(info.RedirectURL, req.Header)
 				if probed > 0 {
 					fileSize = probed
 					log.Infof("%s handleRedirect: probed remote fileSize=%d", internal.LogPrefix(ctx, internal.TagFileSize), fileSize)
@@ -3127,8 +3245,8 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if fileSize == 0 {
-			// try probe
-			probed := p.probeRemoteFileSize(p.getAlistURL()+actualURLPath, req.Header)
+			// 强制探测：加密文件没有 fileSize 无法解密
+			probed := p.forceProbeRemoteFileSize(p.getAlistURL()+actualURLPath, req.Header)
 			if probed > 0 {
 				fileSize = probed
 				log.Infof("%s handleDownload: probed remote fileSize=%d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
@@ -3624,9 +3742,9 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			// 如果 PROPFIND 也获取不到，尝试探测远程文件大小
+			// 如果 PROPFIND 也获取不到，强制探测远程文件大小（加密文件没有 fileSize 无法解密）
 			if fileSize == 0 {
-				probed := p.probeRemoteFileSize(location, r.Header)
+				probed := p.forceProbeRemoteFileSize(location, r.Header)
 				if probed > 0 {
 					fileSize = probed
 					log.Infof("WebDAV redirect: probed remote fileSize: %d for %s", fileSize, filePath)
@@ -3756,9 +3874,9 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// 如果仍然未知，尝试探测远程总大小
-		if fileSize == 0 && p.config != nil && p.config.ProbeOnDownload {
-			probed := p.probeRemoteFileSize(targetURL, req.Header)
+		// 如果仍然未知，强制探测远程总大小（加密文件没有 fileSize 无法解密）
+		if fileSize == 0 {
+			probed := p.forceProbeRemoteFileSize(targetURL, req.Header)
 			if probed > 0 {
 				fileSize = probed
 				log.Infof("handleWebDAV: probed remote fileSize=%d for %s", fileSize, targetURL)

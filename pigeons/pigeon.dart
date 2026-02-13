@@ -102,6 +102,16 @@ abstract class EncryptProxy {
   
   /// 获取 H2C 开关状态
   bool getEncryptEnableH2C();
+
+  /// 设置 DB_EXPORT 同步配置
+  void setEncryptDbExportSyncConfig(
+    bool enable,
+    String baseUrl,
+    int intervalSeconds,
+    bool authEnabled,
+    String username,
+    String password,
+  );
   
   /// 添加加密路径
   void addEncryptPath(String path, String password, String encType, bool encName);

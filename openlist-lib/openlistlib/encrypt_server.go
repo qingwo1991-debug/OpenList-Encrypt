@@ -194,6 +194,21 @@ func (m *EncryptProxyManager) SetEnableH2C(enable bool) error {
 	return err
 }
 
+// SetDBExportSyncConfig 设置 DB_EXPORT 同步配置
+func (m *EncryptProxyManager) SetDBExportSyncConfig(enable bool, baseURL string, intervalSeconds int, authEnabled bool, username, password string) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	err := m.configManager.SetDBExportSyncConfig(enable, baseURL, intervalSeconds, authEnabled, username, password)
+	if err == nil {
+		m.updateProxyServerConfig()
+	}
+	return err
+}
+
 // AddEncryptPath 添加加密路径
 func (m *EncryptProxyManager) AddEncryptPath(path, password string, encType string, encName bool) error {
 	m.mutex.Lock()
@@ -327,6 +342,11 @@ func SetEncryptEnableH2C(enable bool) error {
 	return GetEncryptManager().SetEnableH2C(enable)
 }
 
+// SetEncryptDbExportSyncConfig 设置 DB_EXPORT 同步配置（供 gomobile 调用）
+func SetEncryptDbExportSyncConfig(enable bool, baseURL string, intervalSeconds int64, authEnabled bool, username, password string) error {
+	return GetEncryptManager().SetDBExportSyncConfig(enable, baseURL, int(intervalSeconds), authEnabled, username, password)
+}
+
 // GetEncryptEnableH2C 获取 H2C 开关状态（供 gomobile 调用）
 func GetEncryptEnableH2C() bool {
 	config := GetEncryptManager().GetConfig()
@@ -402,12 +422,18 @@ func GetEncryptConfigJson() string {
 	}
 
 	type ConfigInfo struct {
-		AlistHost    string     `json:"alistHost"`
-		AlistPort    int        `json:"alistPort"`
-		AlistHttps   bool       `json:"alistHttps"`
-		ProxyPort    int        `json:"proxyPort"`
-		EnableH2C    bool       `json:"enableH2C"`
-		EncryptPaths []PathInfo `json:"encryptPaths"`
+		AlistHost                string     `json:"alistHost"`
+		AlistPort                int        `json:"alistPort"`
+		AlistHttps               bool       `json:"alistHttps"`
+		ProxyPort                int        `json:"proxyPort"`
+		EnableH2C                bool       `json:"enableH2C"`
+		EnableDbExportSync       bool       `json:"enableDbExportSync"`
+		DbExportBaseUrl          string     `json:"dbExportBaseUrl"`
+		DbExportSyncIntervalSecs int        `json:"dbExportSyncIntervalSeconds"`
+		DbExportAuthEnabled      bool       `json:"dbExportAuthEnabled"`
+		DbExportUsername         string     `json:"dbExportUsername"`
+		DbExportPassword         string     `json:"dbExportPassword"`
+		EncryptPaths             []PathInfo `json:"encryptPaths"`
 	}
 
 	paths := make([]PathInfo, len(config.EncryptPaths))
@@ -421,12 +447,18 @@ func GetEncryptConfigJson() string {
 	}
 
 	info := ConfigInfo{
-		AlistHost:    config.AlistHost,
-		AlistPort:    config.AlistPort,
-		AlistHttps:   config.AlistHttps,
-		ProxyPort:    config.ProxyPort,
-		EnableH2C:    config.EnableH2C,
-		EncryptPaths: paths,
+		AlistHost:                config.AlistHost,
+		AlistPort:                config.AlistPort,
+		AlistHttps:               config.AlistHttps,
+		ProxyPort:                config.ProxyPort,
+		EnableH2C:                config.EnableH2C,
+		EnableDbExportSync:       config.EnableDBExportSync,
+		DbExportBaseUrl:          config.DBExportBaseURL,
+		DbExportSyncIntervalSecs: config.DBExportSyncIntervalSeconds,
+		DbExportAuthEnabled:      config.DBExportAuthEnabled,
+		DbExportUsername:         config.DBExportUsername,
+		DbExportPassword:         config.DBExportPassword,
+		EncryptPaths:             paths,
 	}
 
 	data, err := json.Marshal(info)

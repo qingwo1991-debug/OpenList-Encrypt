@@ -999,6 +999,45 @@ class EncryptProxy {
     }
   }
 
+  /// 设置 DB_EXPORT 同步配置
+  Future<void> setEncryptDbExportSyncConfig(
+    bool enable,
+    String baseUrl,
+    int intervalSeconds,
+    bool authEnabled,
+    String username,
+    String password,
+  ) async {
+    const String __pigeon_channelName =
+        'dev.flutter.pigeon.openlist_mobile.EncryptProxy.setEncryptDbExportSyncConfig';
+    final BasicMessageChannel<Object?> __pigeon_channel =
+        BasicMessageChannel<Object?>(
+      __pigeon_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: __pigeon_binaryMessenger,
+    );
+    final List<Object?>? __pigeon_replyList =
+        await __pigeon_channel.send(<Object?>[
+      enable,
+      baseUrl,
+      intervalSeconds,
+      authEnabled,
+      username,
+      password
+    ]) as List<Object?>?;
+    if (__pigeon_replyList == null) {
+      throw _createConnectionError(__pigeon_channelName);
+    } else if (__pigeon_replyList.length > 1) {
+      throw PlatformException(
+        code: __pigeon_replyList[0]! as String,
+        message: __pigeon_replyList[1] as String?,
+        details: __pigeon_replyList[2],
+      );
+    } else {
+      return;
+    }
+  }
+
   /// 添加加密路径
   Future<void> addEncryptPath(String path, String password, String encType, bool encName) async {
     const String __pigeon_channelName = 'dev.flutter.pigeon.openlist_mobile.EncryptProxy.addEncryptPath';

@@ -22,19 +22,25 @@ type ConfigManager struct {
 // DefaultConfig 默认配置
 func DefaultConfig() *ProxyConfig {
 	return &ProxyConfig{
-		AlistHost:                  "127.0.0.1",
-		AlistPort:                  5244,
-		AlistHttps:                 false,
-		ProxyPort:                  5344,
-		ProbeOnDownload:            true,  // 默认开启，确保能正确获取文件大小以解密
-		EnableH2C:                  false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
-		EnableSizeMap:              true,
-		SizeMapTTL:                 1440,
-		EnableRangeCompatCache:     true,
-		RangeCompatTTL:             60,
-		EnableParallelDecrypt:      false,
-		ParallelDecryptConcurrency: 4,
-		StreamBufferKB:             512,
+		AlistHost:                   "127.0.0.1",
+		AlistPort:                   5244,
+		AlistHttps:                  false,
+		ProxyPort:                   5344,
+		ProbeOnDownload:             true,  // 默认开启，确保能正确获取文件大小以解密
+		EnableH2C:                   false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
+		EnableSizeMap:               true,
+		SizeMapTTL:                  1440,
+		EnableRangeCompatCache:      true,
+		RangeCompatTTL:              60,
+		EnableParallelDecrypt:       false,
+		ParallelDecryptConcurrency:  4,
+		StreamBufferKB:              512,
+		EnableDBExportSync:          false,
+		DBExportBaseURL:             "",
+		DBExportSyncIntervalSeconds: defaultDBExportSyncIntervalSecs,
+		DBExportAuthEnabled:         false,
+		DBExportUsername:            "admin",
+		DBExportPassword:            "",
 		EncryptPaths: []*EncryptPath{
 			{
 				Path:     "encrypt_folder/*",
@@ -86,6 +92,15 @@ func (m *ConfigManager) Load() error {
 	if err := json.Unmarshal(data, &config); err != nil {
 		log.Errorf("[%s] Failed to parse config: %v", internal.TagConfig, err)
 		return err
+	}
+
+	// 旧配置兼容：ProbeOnDownload 对加密文件解密至关重要，确保默认开启
+	// JSON 中 bool 缺失会被解析为 false，通过检查多个新增字段是否全为零值来判断旧配置
+	if !config.ProbeOnDownload && config.ProbeStrategy == "" && config.SizeMapTTL == 0 {
+		config.ProbeOnDownload = true
+	}
+	if config.DBExportSyncIntervalSeconds <= 0 {
+		config.DBExportSyncIntervalSeconds = defaultDBExportSyncIntervalSecs
 	}
 
 	m.config = &config
@@ -172,6 +187,30 @@ func (m *ConfigManager) SetEnableH2C(enable bool) error {
 	defer m.mutex.Unlock()
 
 	m.config.EnableH2C = enable
+	return m.saveConfigLocked()
+}
+
+// SetDBExportSyncConfig 设置 DB_EXPORT 同步配置
+func (m *ConfigManager) SetDBExportSyncConfig(enable bool, baseURL string, intervalSeconds int, authEnabled bool, username, password string) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if intervalSeconds <= 0 {
+		intervalSeconds = defaultDBExportSyncIntervalSecs
+	}
+	if intervalSeconds < minDBExportSyncIntervalSecs {
+		intervalSeconds = minDBExportSyncIntervalSecs
+	}
+
+	m.config.EnableDBExportSync = enable
+	m.config.DBExportBaseURL = normalizeDBExportBaseURL(baseURL)
+	m.config.DBExportSyncIntervalSeconds = intervalSeconds
+	m.config.DBExportAuthEnabled = authEnabled
+	m.config.DBExportUsername = strings.TrimSpace(username)
+	if strings.TrimSpace(password) != "" {
+		m.config.DBExportPassword = password
+	}
+
 	return m.saveConfigLocked()
 }
 

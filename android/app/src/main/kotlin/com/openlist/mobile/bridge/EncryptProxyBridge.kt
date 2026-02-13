@@ -117,6 +117,33 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
             false
         }
     }
+
+    override fun setEncryptDbExportSyncConfig(
+        enable: Boolean,
+        baseUrl: String,
+        intervalSeconds: Long,
+        authEnabled: Boolean,
+        username: String,
+        password: String
+    ) {
+        Log.d(
+            TAG,
+            "setEncryptDbExportSyncConfig: enable=$enable, baseUrl=$baseUrl, intervalSeconds=$intervalSeconds, authEnabled=$authEnabled, username=$username"
+        )
+        try {
+            Openlistlib.setEncryptDbExportSyncConfig(
+                enable,
+                baseUrl,
+                intervalSeconds,
+                authEnabled,
+                username,
+                password
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set DB_EXPORT sync config", e)
+            throw e
+        }
+    }
     
     override fun addEncryptPath(path: String, password: String, encType: String, encName: Boolean) {
         Log.d(TAG, "addEncryptPath: path=$path, encType=$encType, encName=$encName")

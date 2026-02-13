@@ -125,6 +125,12 @@ func initLocalSchema(db *sql.DB) error {
             PRIMARY KEY (key, network_type)
         );`,
 		`CREATE INDEX IF NOT EXISTS idx_local_media_strategy_accessed ON local_media_strategy(last_accessed);`,
+		`CREATE TABLE IF NOT EXISTS local_sync_checkpoint (
+            name TEXT PRIMARY KEY,
+            since INTEGER NOT NULL,
+            cursor TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL
+        );`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -547,4 +553,36 @@ func (s *localStore) Counts() (int, int, error) {
 		return sizeCount, 0, err
 	}
 	return sizeCount, strategyCount, nil
+}
+
+func (s *localStore) GetSyncCheckpoint(name string) (int64, string, error) {
+	if s == nil || s.db == nil || name == "" {
+		return 0, "", nil
+	}
+	row := s.db.QueryRow("SELECT since, cursor FROM local_sync_checkpoint WHERE name = ?", name)
+	var since int64
+	var cursor string
+	if err := row.Scan(&since, &cursor); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, "", nil
+		}
+		return 0, "", err
+	}
+	return since, cursor, nil
+}
+
+func (s *localStore) SaveSyncCheckpoint(name string, since int64, cursor string) error {
+	if s == nil || s.db == nil || name == "" {
+		return nil
+	}
+	if since < 0 {
+		since = 0
+	}
+	_, err := s.db.Exec(`INSERT INTO local_sync_checkpoint (name, since, cursor, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+        since=excluded.since,
+        cursor=excluded.cursor,
+        updated_at=excluded.updated_at`, name, since, cursor, time.Now().Unix())
+	return err
 }
