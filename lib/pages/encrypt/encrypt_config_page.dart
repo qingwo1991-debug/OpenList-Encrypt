@@ -27,7 +27,6 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   final _probeTimeoutController = TextEditingController(text: '3');
   final _probeBudgetController = TextEditingController(text: '5');
   final _upstreamBackoffController = TextEditingController(text: '20');
-  bool _enableLocalBypass = true;
   
   // H2C 开关（HTTP/2 Cleartext）
   bool _enableH2C = false;
@@ -97,7 +96,6 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
               (config['probeBudgetSeconds'] ?? 5).toString();
           _upstreamBackoffController.text =
               (config['upstreamBackoffSeconds'] ?? 20).toString();
-          _enableLocalBypass = config['enableLocalBypass'] ?? true;
           _enableH2C = config['enableH2C'] ?? false;
           _enableDbExportSync = config['enableDbExportSync'] ?? false;
           _dbExportBaseUrlController.text = config['dbExportBaseUrl'] ?? '';
@@ -191,7 +189,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
         int.tryParse(_probeTimeoutController.text) ?? 3,
         int.tryParse(_probeBudgetController.text) ?? 5,
         int.tryParse(_upstreamBackoffController.text) ?? 20,
-        _enableLocalBypass,
+        true, // keep bridge signature compatible; backend is direct-connect now
       );
       
       if (mounted) {
@@ -754,13 +752,6 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         ),
                       ],
                     ),
-                    SwitchListTile(
-                      title: const Text('局域网/本地地址绕过代理'),
-                      subtitle: const Text('对 localhost/私网地址强制直连'),
-                      value: _enableLocalBypass,
-                      onChanged: (value) => setState(() => _enableLocalBypass = value),
-                    ),
-                    
                     const SizedBox(height: 24),
                     
                     // 加密路径配置
