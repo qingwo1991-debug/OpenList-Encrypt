@@ -57,3 +57,28 @@ local.properties
 
 android/app/.cxx
 android/app/build
+
+# Local privacy/sensitive artifacts
+openlist_logs_*.txt
+*logs*.txt
+encrypt_config*.json
+*password*.txt
+*password*.json
+*password*.yaml
+*password*.yml
+*password*.env
+*passwd*.txt
+*passwd*.json
+*passwd*.yaml
+*passwd*.yml
+*passwd*.env
+*secret*.txt
+*secret*.json
+*secret*.yaml
+*secret*.yml
+*secret*.env
+*token*.txt
+*token*.json
+*token*.yaml
+*token*.yml
+*token*.env

@@ -36,10 +36,18 @@ func DefaultConfig() *ProxyConfig {
 		EnableSizeMap:               true,
 		SizeMapTTL:                  1440,
 		EnableRangeCompatCache:      true,
-		RangeCompatTTL:              60,
+		RangeCompatTTL:              10,
+		RangeCompatMinFailures:      2,
+		RangeSkipMaxBytes:           8 * 1024 * 1024,
+		RedirectCacheTTLMinutes:     1440,
 		EnableParallelDecrypt:       false,
 		ParallelDecryptConcurrency:  4,
 		StreamBufferKB:              512,
+		DebugEnabled:                false,
+		DebugLevel:                  "info",
+		DebugMaskSensitive:          true,
+		DebugSampleRate:             100,
+		DebugLogBodyBytes:           0,
 		EnableDBExportSync:          false,
 		DBExportBaseURL:             "",
 		DBExportSyncIntervalSeconds: defaultDBExportSyncIntervalSecs,
@@ -109,13 +117,13 @@ func (m *ConfigManager) Load() error {
 	rawProbeBudget := config.ProbeBudgetSeconds
 	rawBackoff := config.UpstreamBackoffSeconds
 	if config.UpstreamTimeoutSeconds <= 0 {
-		config.UpstreamTimeoutSeconds = 8
+		config.UpstreamTimeoutSeconds = 15
 	}
 	if config.ProbeTimeoutSeconds <= 0 {
-		config.ProbeTimeoutSeconds = 3
+		config.ProbeTimeoutSeconds = 5
 	}
 	if config.ProbeBudgetSeconds <= 0 {
-		config.ProbeBudgetSeconds = 5
+		config.ProbeBudgetSeconds = 10
 	}
 	if config.UpstreamBackoffSeconds <= 0 {
 		config.UpstreamBackoffSeconds = 20
@@ -129,6 +137,27 @@ func (m *ConfigManager) Load() error {
 	}
 	if config.DBExportSyncIntervalSeconds <= 0 {
 		config.DBExportSyncIntervalSeconds = defaultDBExportSyncIntervalSecs
+	}
+	if config.RangeCompatTTL <= 0 {
+		config.RangeCompatTTL = 10
+	}
+	if config.RangeCompatMinFailures <= 0 {
+		config.RangeCompatMinFailures = 2
+	}
+	if config.RangeSkipMaxBytes <= 0 {
+		config.RangeSkipMaxBytes = 8 * 1024 * 1024
+	}
+	if config.RedirectCacheTTLMinutes <= 0 {
+		config.RedirectCacheTTLMinutes = 1440
+	}
+	if config.DebugLevel == "" {
+		config.DebugLevel = "info"
+	}
+	if config.DebugSampleRate <= 0 || config.DebugSampleRate > 100 {
+		config.DebugSampleRate = 100
+	}
+	if !config.DebugMaskSensitive && !config.DebugEnabled && config.DebugLogBodyBytes == 0 {
+		config.DebugMaskSensitive = true
 	}
 
 	m.config = &config
@@ -224,13 +253,13 @@ func (m *ConfigManager) SetNetworkPolicy(upstreamTimeoutSeconds, probeTimeoutSec
 	defer m.mutex.Unlock()
 
 	if upstreamTimeoutSeconds <= 0 {
-		upstreamTimeoutSeconds = 8
+		upstreamTimeoutSeconds = 15
 	}
 	if probeTimeoutSeconds <= 0 {
-		probeTimeoutSeconds = 3
+		probeTimeoutSeconds = 5
 	}
 	if probeBudgetSeconds <= 0 {
-		probeBudgetSeconds = 5
+		probeBudgetSeconds = 10
 	}
 	if upstreamBackoffSeconds <= 0 {
 		upstreamBackoffSeconds = 20

@@ -293,3 +293,34 @@ func TestConvertRealNameBehavior(t *testing.T) {
 		})
 	}
 }
+
+func TestStripExternalSuffixVariants(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantStripped string
+		wantSuffix   string
+	}{
+		{
+			name:         "space parenthesized suffix",
+			input:        "video (1)",
+			wantStripped: "video",
+			wantSuffix:   " (1)",
+		},
+		{
+			name:         "parenthesized suffix without space",
+			input:        "video(1)",
+			wantStripped: "video",
+			wantSuffix:   "(1)",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotName, gotSuffix := stripExternalSuffix(tc.input)
+			if gotName != tc.wantStripped || gotSuffix != tc.wantSuffix {
+				t.Fatalf("stripExternalSuffix(%q) = (%q, %q), want (%q, %q)", tc.input, gotName, gotSuffix, tc.wantStripped, tc.wantSuffix)
+			}
+		})
+	}
+}
