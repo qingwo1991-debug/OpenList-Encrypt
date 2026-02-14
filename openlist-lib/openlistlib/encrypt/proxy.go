@@ -190,10 +190,11 @@ func isLocalOrPrivateHost(host string) bool {
 
 func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error) {
 	return func(req *http.Request) (*url.URL, error) {
-		if config != nil && config.EnableLocalBypass && req != nil && req.URL != nil && isLocalOrPrivateHost(req.URL.Hostname()) {
-			return nil, nil
-		}
-		return http.ProxyFromEnvironment(req)
+		// Keep behavior aligned with alist-encrypt node proxy:
+		// always connect upstream directly and do not inherit system proxy env.
+		_ = config
+		_ = req
+		return nil, nil
 	}
 }
 
@@ -1151,6 +1152,11 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/api/fs/list", internal.WrapHandler(p.handleFsList))
 	mux.HandleFunc("/api/fs/get", internal.WrapHandler(p.handleFsGet))
 	mux.HandleFunc("/api/fs/put", internal.WrapHandler(p.handleFsPut))
+	mux.HandleFunc("/api/fs/put-back", internal.WrapHandler(p.handleFsPutBack))
+	mux.HandleFunc("/api/fs/remove", internal.WrapHandler(p.handleFsRemove))
+	mux.HandleFunc("/api/fs/move", internal.WrapHandler(p.handleFsMove))
+	mux.HandleFunc("/api/fs/copy", internal.WrapHandler(p.handleFsCopy))
+	mux.HandleFunc("/api/fs/rename", internal.WrapHandler(p.handleFsRename))
 	// 下载和 WebDAV - 包装以支持全链路追踪
 	mux.HandleFunc("/d/", internal.WrapHandler(p.handleDownload))
 	mux.HandleFunc("/p/", internal.WrapHandler(p.handleDownload))
@@ -2243,6 +2249,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				"alistHost":                   p.config.AlistHost,
 				"alistPort":                   p.config.AlistPort,
 				"https":                       p.config.AlistHttps,
+				"alistHttps":                  p.config.AlistHttps,
 				"proxyPort":                   p.config.ProxyPort,
 				"upstreamTimeoutSeconds":      p.config.UpstreamTimeoutSeconds,
 				"probeTimeoutSeconds":         p.config.ProbeTimeoutSeconds,
@@ -2563,6 +2570,13 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				p.mutex.Unlock()
 			}
 		}
+		if v, ok := bodyMap["https"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.AlistHttps = b
+				p.mutex.Unlock()
+			}
+		}
 		if v, ok := bodyMap["proxyPort"]; ok {
 			switch vt := v.(type) {
 			case float64:
@@ -2576,68 +2590,68 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 					p.mutex.Unlock()
 				}
 			}
-			if v, ok := bodyMap["upstreamTimeoutSeconds"]; ok {
-				switch vt := v.(type) {
-				case float64:
+		}
+		if v, ok := bodyMap["upstreamTimeoutSeconds"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.UpstreamTimeoutSeconds = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
 					p.mutex.Lock()
-					p.config.UpstreamTimeoutSeconds = int(vt)
+					p.config.UpstreamTimeoutSeconds = val
 					p.mutex.Unlock()
-				case string:
-					if val, err := strconv.Atoi(vt); err == nil {
-						p.mutex.Lock()
-						p.config.UpstreamTimeoutSeconds = val
-						p.mutex.Unlock()
-					}
 				}
 			}
-			if v, ok := bodyMap["probeTimeoutSeconds"]; ok {
-				switch vt := v.(type) {
-				case float64:
+		}
+		if v, ok := bodyMap["probeTimeoutSeconds"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.ProbeTimeoutSeconds = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
 					p.mutex.Lock()
-					p.config.ProbeTimeoutSeconds = int(vt)
+					p.config.ProbeTimeoutSeconds = val
 					p.mutex.Unlock()
-				case string:
-					if val, err := strconv.Atoi(vt); err == nil {
-						p.mutex.Lock()
-						p.config.ProbeTimeoutSeconds = val
-						p.mutex.Unlock()
-					}
 				}
 			}
-			if v, ok := bodyMap["probeBudgetSeconds"]; ok {
-				switch vt := v.(type) {
-				case float64:
+		}
+		if v, ok := bodyMap["probeBudgetSeconds"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.ProbeBudgetSeconds = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
 					p.mutex.Lock()
-					p.config.ProbeBudgetSeconds = int(vt)
+					p.config.ProbeBudgetSeconds = val
 					p.mutex.Unlock()
-				case string:
-					if val, err := strconv.Atoi(vt); err == nil {
-						p.mutex.Lock()
-						p.config.ProbeBudgetSeconds = val
-						p.mutex.Unlock()
-					}
 				}
 			}
-			if v, ok := bodyMap["upstreamBackoffSeconds"]; ok {
-				switch vt := v.(type) {
-				case float64:
+		}
+		if v, ok := bodyMap["upstreamBackoffSeconds"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.UpstreamBackoffSeconds = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
 					p.mutex.Lock()
-					p.config.UpstreamBackoffSeconds = int(vt)
+					p.config.UpstreamBackoffSeconds = val
 					p.mutex.Unlock()
-				case string:
-					if val, err := strconv.Atoi(vt); err == nil {
-						p.mutex.Lock()
-						p.config.UpstreamBackoffSeconds = val
-						p.mutex.Unlock()
-					}
 				}
 			}
-			if v, ok := bodyMap["enableLocalBypass"]; ok {
-				if b, ok2 := v.(bool); ok2 {
-					p.mutex.Lock()
-					p.config.EnableLocalBypass = b
-					p.mutex.Unlock()
-				}
+		}
+		if v, ok := bodyMap["enableLocalBypass"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.EnableLocalBypass = b
+				p.mutex.Unlock()
 			}
 		}
 
@@ -3293,8 +3307,9 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 
-					// 封面自动隐藏：将与视频同名的图片设置为视频的 thumb
-					p.processCoverFiles(content)
+					// 封面自动隐藏：将与视频同名的图片设置为视频的 thumb，并从列表移除封面文件
+					content = p.processCoverFiles(content)
+					data["content"] = content
 
 					result["data"] = data
 					outBody, _ = json.Marshal(result)
@@ -3390,7 +3405,7 @@ var videoExtensions = map[string]bool{
 }
 
 // processCoverFiles 处理封面文件：将与视频同名的图片隐藏并设置为视频的 thumb
-func (p *ProxyServer) processCoverFiles(content []interface{}) {
+func (p *ProxyServer) processCoverFiles(content []interface{}) []interface{} {
 	// 构建视频文件名映射（不含扩展名 -> 文件信息）
 	videoMap := make(map[string]map[string]interface{})
 	coverFiles := make([]int, 0)
@@ -3435,15 +3450,17 @@ func (p *ProxyServer) processCoverFiles(content []interface{}) {
 	}
 
 	// 从列表中移除被隐藏的封面（从后向前删除以保持索引正确）
-	if len(omitIndices) > 0 {
-		// 注意：由于 content 是 []interface{}，我们不能直接修改切片长度
-		// 但可以将隐藏的文件标记为 hidden
-		for idx := range omitIndices {
-			if fileMap, ok := content[idx].(map[string]interface{}); ok {
-				fileMap["hidden"] = true
-			}
-		}
+	if len(omitIndices) == 0 {
+		return content
 	}
+	filtered := make([]interface{}, 0, len(content)-len(omitIndices))
+	for i, item := range content {
+		if omitIndices[i] {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
 }
 
 // handleFsGet 处理获取文件信息
@@ -3594,16 +3611,186 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 	w.Write(respBody)
 }
 
+func anyToStringSlice(v interface{}) []string {
+	switch vt := v.(type) {
+	case []string:
+		return vt
+	case []interface{}:
+		out := make([]string, 0, len(vt))
+		for _, item := range vt {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func (p *ProxyServer) proxyFSJSON(w http.ResponseWriter, r *http.Request, apiPath string, body []byte) {
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, p.getAlistURL()+apiPath, bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for key, values := range r.Header {
+		if strings.EqualFold(key, "Host") || strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	copyWithBuffer(w, resp.Body)
+}
+
+func (p *ProxyServer) handleFsRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var reqData map[string]interface{}
+	if err := json.Unmarshal(body, &reqData); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	dir, _ := reqData["dir"].(string)
+	encPath := p.findEncryptPath(dir)
+	if encPath != nil && encPath.EncName {
+		names := anyToStringSlice(reqData["names"])
+		seen := make(map[string]bool, len(names)*2)
+		converted := make([]string, 0, len(names)*2)
+		for _, name := range names {
+			if name == "" {
+				continue
+			}
+			if !seen[name] {
+				converted = append(converted, name)
+				seen[name] = true
+			}
+			realName := ConvertRealName(encPath.Password, encPath.EncType, name)
+			if realName != "" && !seen[realName] {
+				converted = append(converted, realName)
+				seen[realName] = true
+			}
+		}
+		reqData["names"] = converted
+		body, _ = json.Marshal(reqData)
+	}
+	p.proxyFSJSON(w, r, "/api/fs/remove", body)
+}
+
+func (p *ProxyServer) handleFsMove(w http.ResponseWriter, r *http.Request) {
+	p.handleFsMoveCopy(w, r, "/api/fs/move")
+}
+
+func (p *ProxyServer) handleFsCopy(w http.ResponseWriter, r *http.Request) {
+	p.handleFsMoveCopy(w, r, "/api/fs/copy")
+}
+
+func (p *ProxyServer) handleFsMoveCopy(w http.ResponseWriter, r *http.Request, apiPath string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var reqData map[string]interface{}
+	if err := json.Unmarshal(body, &reqData); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	srcDir, _ := reqData["src_dir"].(string)
+	encPath := p.findEncryptPath(srcDir)
+	if encPath != nil && encPath.EncName {
+		names := anyToStringSlice(reqData["names"])
+		converted := make([]string, 0, len(names))
+		for _, name := range names {
+			if name == "" {
+				continue
+			}
+			realName := ConvertRealName(encPath.Password, encPath.EncType, name)
+			if realName == "" {
+				realName = name
+			}
+			converted = append(converted, realName)
+		}
+		reqData["names"] = converted
+		body, _ = json.Marshal(reqData)
+	}
+	p.proxyFSJSON(w, r, apiPath, body)
+}
+
+func (p *ProxyServer) handleFsRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var reqData map[string]interface{}
+	if err := json.Unmarshal(body, &reqData); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	filePath, _ := reqData["path"].(string)
+	name, _ := reqData["name"].(string)
+	encPath := p.findEncryptPath(filePath)
+	if encPath != nil && encPath.EncName {
+		if cached, ok := p.loadFileCache(filePath); ok && !cached.IsDir {
+			reqData["path"] = ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			reqData["name"] = ConvertRealName(encPath.Password, encPath.EncType, name)
+			body, _ = json.Marshal(reqData)
+		}
+	}
+	p.proxyFSJSON(w, r, "/api/fs/rename", body)
+}
+
+func (p *ProxyServer) handleFsPutBack(w http.ResponseWriter, r *http.Request) {
+	p.handleFsPutCommon(w, r, "/api/fs/put-back")
+}
+
 // handleFsPut 处理文件上传请求
 func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
+	p.handleFsPutCommon(w, r, "/api/fs/put")
+}
+
+func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, apiPath string) {
 	ctx := r.Context()
-	log.Infof("%s Proxy handling fs put request", internal.LogPrefix(ctx, internal.TagUpload))
+	log.Infof("%s Proxy handling fs put request: %s", internal.LogPrefix(ctx, internal.TagUpload), apiPath)
 	if r.Method != http.MethodPut {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	targetURL := p.getAlistURL() + r.URL.Path
+	targetURL := p.getAlistURL() + apiPath
 	var body io.Reader = r.Body
 
 	// 获取上传路径
@@ -3642,7 +3829,7 @@ func (p *ProxyServer) handleFsPut(w http.ResponseWriter, r *http.Request) {
 			r.Header.Set("File-Path", url.PathEscape(newFilePath))
 
 			// 更新 targetURL
-			targetURL = p.getAlistURL() + "/api/fs/put"
+			targetURL = p.getAlistURL() + apiPath
 		}
 	}
 
@@ -4038,10 +4225,6 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 // handleWebDAV 处理 WebDAV 请求
 func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
-	if p.shouldFastFailUpstream() {
-		p.writeUpstreamUnavailable(w)
-		return
-	}
 	ctx := r.Context()
 	// 1. 查找加密配置
 	filePath := r.URL.Path
@@ -4676,10 +4859,6 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 // handleProxy 处理通用代理请求
 func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
-	if p.shouldFastFailUpstream() {
-		p.writeUpstreamUnavailable(w)
-		return
-	}
 	targetURL := p.getAlistURL() + r.URL.Path
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery

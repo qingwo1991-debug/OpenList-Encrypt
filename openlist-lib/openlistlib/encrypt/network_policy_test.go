@@ -2,6 +2,11 @@ package encrypt
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	neturl "net/url"
+	"os"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -51,3 +56,52 @@ func TestUpstreamBackoffState(t *testing.T) {
 	}
 }
 
+func TestProxyResolverAlwaysDirect(t *testing.T) {
+	t.Setenv("http_proxy", "http://127.0.0.1:9999")
+	t.Setenv("https_proxy", "http://127.0.0.1:9999")
+	_ = os.Setenv("HTTP_PROXY", "http://127.0.0.1:9999")
+	_ = os.Setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)
+	resolver := newProxyResolver(&ProxyConfig{})
+	proxyURL, err := resolver(req)
+	if err != nil {
+		t.Fatalf("resolver returned err: %v", err)
+	}
+	if proxyURL != nil {
+		t.Fatalf("expected direct connection, got proxy=%s", proxyURL.String())
+	}
+}
+
+func TestHandleProxyDoesNotFastFailOnBackoff(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	parsed, err := neturl.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend url: %v", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatalf("parse backend port: %v", err)
+	}
+	p := &ProxyServer{
+		config: &ProxyConfig{
+			AlistHost:              parsed.Hostname(),
+			AlistPort:              port,
+			AlistHttps:             parsed.Scheme == "https",
+			UpstreamBackoffSeconds: 20,
+		},
+		httpClient: &http.Client{Timeout: 3 * time.Second},
+	}
+	p.markUpstreamFailure(errors.New("boom"))
+
+	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/any/path", nil)
+	rr := httptest.NewRecorder()
+	p.handleProxy(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected %d from upstream, got %d body=%s", http.StatusNoContent, rr.Code, rr.Body.String())
+	}
+}
