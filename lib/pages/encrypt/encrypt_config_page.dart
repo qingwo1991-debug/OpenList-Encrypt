@@ -21,6 +21,13 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   
   // 代理端口
   final _proxyPortController = TextEditingController(text: '5344');
+
+  // 网络策略
+  final _upstreamTimeoutController = TextEditingController(text: '8');
+  final _probeTimeoutController = TextEditingController(text: '3');
+  final _probeBudgetController = TextEditingController(text: '5');
+  final _upstreamBackoffController = TextEditingController(text: '20');
+  bool _enableLocalBypass = true;
   
   // H2C 开关（HTTP/2 Cleartext）
   bool _enableH2C = false;
@@ -82,6 +89,15 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           _alistPortController.text = (config['alistPort'] ?? 5244).toString();
           _alistHttps = config['alistHttps'] ?? false;
           _proxyPortController.text = (config['proxyPort'] ?? 5344).toString();
+          _upstreamTimeoutController.text =
+              (config['upstreamTimeoutSeconds'] ?? 8).toString();
+          _probeTimeoutController.text =
+              (config['probeTimeoutSeconds'] ?? 3).toString();
+          _probeBudgetController.text =
+              (config['probeBudgetSeconds'] ?? 5).toString();
+          _upstreamBackoffController.text =
+              (config['upstreamBackoffSeconds'] ?? 20).toString();
+          _enableLocalBypass = config['enableLocalBypass'] ?? true;
           _enableH2C = config['enableH2C'] ?? false;
           _enableDbExportSync = config['enableDbExportSync'] ?? false;
           _dbExportBaseUrlController.text = config['dbExportBaseUrl'] ?? '';
@@ -167,6 +183,15 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
         _dbExportAuthEnabled,
         _dbExportUsernameController.text.trim(),
         _dbExportPasswordController.text,
+      );
+
+      // 保存网络策略
+      await NativeBridge.encryptProxy.setEncryptNetworkPolicy(
+        int.tryParse(_upstreamTimeoutController.text) ?? 8,
+        int.tryParse(_probeTimeoutController.text) ?? 3,
+        int.tryParse(_probeBudgetController.text) ?? 5,
+        int.tryParse(_upstreamBackoffController.text) ?? 20,
+        _enableLocalBypass,
       );
       
       if (mounted) {
@@ -425,6 +450,10 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     _alistHostController.dispose();
     _alistPortController.dispose();
     _proxyPortController.dispose();
+    _upstreamTimeoutController.dispose();
+    _probeTimeoutController.dispose();
+    _probeBudgetController.dispose();
+    _upstreamBackoffController.dispose();
     _dbExportBaseUrlController.dispose();
     _dbExportSyncIntervalController.dispose();
     _dbExportUsernameController.dispose();
@@ -665,6 +694,71 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         }
                         return null;
                       },
+                    ),
+
+                    const SizedBox(height: 24),
+
+                    Text(
+                      '网络策略',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextFormField(
+                            controller: _upstreamTimeoutController,
+                            decoration: const InputDecoration(
+                              labelText: '上游超时（秒）',
+                              hintText: '8',
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextFormField(
+                            controller: _probeTimeoutController,
+                            decoration: const InputDecoration(
+                              labelText: '单次探测超时（秒）',
+                              hintText: '3',
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextFormField(
+                            controller: _probeBudgetController,
+                            decoration: const InputDecoration(
+                              labelText: '探测总预算（秒）',
+                              hintText: '5',
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextFormField(
+                            controller: _upstreamBackoffController,
+                            decoration: const InputDecoration(
+                              labelText: '失败退避（秒）',
+                              hintText: '20',
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                      ],
+                    ),
+                    SwitchListTile(
+                      title: const Text('局域网/本地地址绕过代理'),
+                      subtitle: const Text('对 localhost/私网地址强制直连'),
+                      value: _enableLocalBypass,
+                      onChanged: (value) => setState(() => _enableLocalBypass = value),
                     ),
                     
                     const SizedBox(height: 24),

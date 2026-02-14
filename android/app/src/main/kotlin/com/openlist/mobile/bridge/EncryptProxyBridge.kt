@@ -144,6 +144,31 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
             throw e
         }
     }
+
+    override fun setEncryptNetworkPolicy(
+        upstreamTimeoutSeconds: Long,
+        probeTimeoutSeconds: Long,
+        probeBudgetSeconds: Long,
+        upstreamBackoffSeconds: Long,
+        enableLocalBypass: Boolean
+    ) {
+        Log.d(
+            TAG,
+            "setEncryptNetworkPolicy: upstreamTimeout=$upstreamTimeoutSeconds, probeTimeout=$probeTimeoutSeconds, probeBudget=$probeBudgetSeconds, upstreamBackoff=$upstreamBackoffSeconds, enableLocalBypass=$enableLocalBypass"
+        )
+        try {
+            Openlistlib.setEncryptNetworkPolicy(
+                upstreamTimeoutSeconds,
+                probeTimeoutSeconds,
+                probeBudgetSeconds,
+                upstreamBackoffSeconds,
+                enableLocalBypass
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set network policy", e)
+            throw e
+        }
+    }
     
     override fun addEncryptPath(path: String, password: String, encType: String, encName: Boolean) {
         Log.d(TAG, "addEncryptPath: path=$path, encType=$encType, encName=$encName")

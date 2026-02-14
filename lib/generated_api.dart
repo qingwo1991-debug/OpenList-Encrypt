@@ -1038,6 +1038,43 @@ class EncryptProxy {
     }
   }
 
+  /// 设置网络策略
+  Future<void> setEncryptNetworkPolicy(
+    int upstreamTimeoutSeconds,
+    int probeTimeoutSeconds,
+    int probeBudgetSeconds,
+    int upstreamBackoffSeconds,
+    bool enableLocalBypass,
+  ) async {
+    const String __pigeon_channelName =
+        'dev.flutter.pigeon.openlist_mobile.EncryptProxy.setEncryptNetworkPolicy';
+    final BasicMessageChannel<Object?> __pigeon_channel =
+        BasicMessageChannel<Object?>(
+      __pigeon_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: __pigeon_binaryMessenger,
+    );
+    final List<Object?>? __pigeon_replyList =
+        await __pigeon_channel.send(<Object?>[
+      upstreamTimeoutSeconds,
+      probeTimeoutSeconds,
+      probeBudgetSeconds,
+      upstreamBackoffSeconds,
+      enableLocalBypass,
+    ]) as List<Object?>?;
+    if (__pigeon_replyList == null) {
+      throw _createConnectionError(__pigeon_channelName);
+    } else if (__pigeon_replyList.length > 1) {
+      throw PlatformException(
+        code: __pigeon_replyList[0]! as String,
+        message: __pigeon_replyList[1] as String?,
+        details: __pigeon_replyList[2],
+      );
+    } else {
+      return;
+    }
+  }
+
   /// 添加加密路径
   Future<void> addEncryptPath(String path, String password, String encType, bool encName) async {
     const String __pigeon_channelName = 'dev.flutter.pigeon.openlist_mobile.EncryptProxy.addEncryptPath';

@@ -26,6 +26,11 @@ func DefaultConfig() *ProxyConfig {
 		AlistPort:                   5244,
 		AlistHttps:                  false,
 		ProxyPort:                   5344,
+		UpstreamTimeoutSeconds:      8,
+		ProbeTimeoutSeconds:         3,
+		ProbeBudgetSeconds:          5,
+		UpstreamBackoffSeconds:      20,
+		EnableLocalBypass:           true,
 		ProbeOnDownload:             true,  // 默认开启，确保能正确获取文件大小以解密
 		EnableH2C:                   false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
 		EnableSizeMap:               true,
@@ -98,6 +103,29 @@ func (m *ConfigManager) Load() error {
 	// JSON 中 bool 缺失会被解析为 false，通过检查多个新增字段是否全为零值来判断旧配置
 	if !config.ProbeOnDownload && config.ProbeStrategy == "" && config.SizeMapTTL == 0 {
 		config.ProbeOnDownload = true
+	}
+	rawUpstreamTimeout := config.UpstreamTimeoutSeconds
+	rawProbeTimeout := config.ProbeTimeoutSeconds
+	rawProbeBudget := config.ProbeBudgetSeconds
+	rawBackoff := config.UpstreamBackoffSeconds
+	if config.UpstreamTimeoutSeconds <= 0 {
+		config.UpstreamTimeoutSeconds = 8
+	}
+	if config.ProbeTimeoutSeconds <= 0 {
+		config.ProbeTimeoutSeconds = 3
+	}
+	if config.ProbeBudgetSeconds <= 0 {
+		config.ProbeBudgetSeconds = 5
+	}
+	if config.UpstreamBackoffSeconds <= 0 {
+		config.UpstreamBackoffSeconds = 20
+	}
+	if !config.EnableLocalBypass &&
+		rawUpstreamTimeout == 0 &&
+		rawProbeTimeout == 0 &&
+		rawProbeBudget == 0 &&
+		rawBackoff == 0 {
+		config.EnableLocalBypass = true
 	}
 	if config.DBExportSyncIntervalSeconds <= 0 {
 		config.DBExportSyncIntervalSeconds = defaultDBExportSyncIntervalSecs
@@ -187,6 +215,33 @@ func (m *ConfigManager) SetEnableH2C(enable bool) error {
 	defer m.mutex.Unlock()
 
 	m.config.EnableH2C = enable
+	return m.saveConfigLocked()
+}
+
+// SetNetworkPolicy 设置网络策略参数
+func (m *ConfigManager) SetNetworkPolicy(upstreamTimeoutSeconds, probeTimeoutSeconds, probeBudgetSeconds, upstreamBackoffSeconds int, enableLocalBypass bool) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if upstreamTimeoutSeconds <= 0 {
+		upstreamTimeoutSeconds = 8
+	}
+	if probeTimeoutSeconds <= 0 {
+		probeTimeoutSeconds = 3
+	}
+	if probeBudgetSeconds <= 0 {
+		probeBudgetSeconds = 5
+	}
+	if upstreamBackoffSeconds <= 0 {
+		upstreamBackoffSeconds = 20
+	}
+
+	m.config.UpstreamTimeoutSeconds = upstreamTimeoutSeconds
+	m.config.ProbeTimeoutSeconds = probeTimeoutSeconds
+	m.config.ProbeBudgetSeconds = probeBudgetSeconds
+	m.config.UpstreamBackoffSeconds = upstreamBackoffSeconds
+	m.config.EnableLocalBypass = enableLocalBypass
+
 	return m.saveConfigLocked()
 }
 

@@ -112,6 +112,15 @@ abstract class EncryptProxy {
     String username,
     String password,
   );
+
+  /// 设置网络策略
+  void setEncryptNetworkPolicy(
+    int upstreamTimeoutSeconds,
+    int probeTimeoutSeconds,
+    int probeBudgetSeconds,
+    int upstreamBackoffSeconds,
+    bool enableLocalBypass,
+  );
   
   /// 添加加密路径
   void addEncryptPath(String path, String password, String encType, bool encName);

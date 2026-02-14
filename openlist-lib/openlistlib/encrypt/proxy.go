@@ -62,6 +62,78 @@ func clampStreamBufferKB(kb int) int {
 	return kb
 }
 
+func clampSeconds(v, def, minV, maxV int) int {
+	if v <= 0 {
+		v = def
+	}
+	if v < minV {
+		v = minV
+	}
+	if v > maxV {
+		v = maxV
+	}
+	return v
+}
+
+func (p *ProxyServer) upstreamTimeout() time.Duration {
+	secs := 8
+	if p != nil && p.config != nil {
+		secs = clampSeconds(p.config.UpstreamTimeoutSeconds, 8, 2, 120)
+	}
+	return time.Duration(secs) * time.Second
+}
+
+func (p *ProxyServer) probeTimeout() time.Duration {
+	secs := 3
+	if p != nil && p.config != nil {
+		secs = clampSeconds(p.config.ProbeTimeoutSeconds, 3, 1, 30)
+	}
+	return time.Duration(secs) * time.Second
+}
+
+func (p *ProxyServer) probeBudget() time.Duration {
+	secs := 5
+	if p != nil && p.config != nil {
+		secs = clampSeconds(p.config.ProbeBudgetSeconds, 5, 1, 60)
+	}
+	return time.Duration(secs) * time.Second
+}
+
+func (p *ProxyServer) upstreamBackoff() time.Duration {
+	secs := 20
+	if p != nil && p.config != nil {
+		secs = clampSeconds(p.config.UpstreamBackoffSeconds, 20, 1, 300)
+	}
+	return time.Duration(secs) * time.Second
+}
+
+func isLocalOrPrivateHost(host string) bool {
+	h := strings.TrimSpace(strings.ToLower(host))
+	if h == "" {
+		return false
+	}
+	if h == "localhost" || strings.HasSuffix(h, ".local") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	return false
+}
+
+func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error) {
+	return func(req *http.Request) (*url.URL, error) {
+		if config != nil && config.EnableLocalBypass && req != nil && req.URL != nil && isLocalOrPrivateHost(req.URL.Hostname()) {
+			return nil, nil
+		}
+		return http.ProxyFromEnvironment(req)
+	}
+}
+
 // 动态计算的并行解密数，根据 CPU 核心数自动调整
 var maxParallelDecrypt = func() int {
 	numCPU := runtime.NumCPU()
@@ -237,6 +309,16 @@ type ProxyConfig struct {
 	AlistPort     int            `json:"alistPort"`     // Alist 服务端口
 	AlistHttps    bool           `json:"alistHttps"`    // 是否使用 HTTPS
 	ProxyPort     int            `json:"proxyPort"`     // 代理服务端口
+	// UpstreamTimeoutSeconds: UI/API 转发超时（秒）
+	UpstreamTimeoutSeconds int `json:"upstreamTimeoutSeconds,omitempty"`
+	// ProbeTimeoutSeconds: 单次探测请求超时（秒）
+	ProbeTimeoutSeconds int `json:"probeTimeoutSeconds,omitempty"`
+	// ProbeBudgetSeconds: 单次文件大小探测总预算（秒）
+	ProbeBudgetSeconds int `json:"probeBudgetSeconds,omitempty"`
+	// UpstreamBackoffSeconds: 上游失败后快速失败窗口（秒）
+	UpstreamBackoffSeconds int `json:"upstreamBackoffSeconds,omitempty"`
+	// EnableLocalBypass: 对 localhost/私网地址绕过环境代理
+	EnableLocalBypass bool `json:"enableLocalBypass,omitempty"`
 	EncryptPaths  []*EncryptPath `json:"encryptPaths"`  // 加密路径配置
 	AdminPassword string         `json:"adminPassword"` // 管理密码
 	// ProbeOnDownload: attempt HEAD or Range=0-0 to discover remote file size when missing
@@ -281,6 +363,7 @@ type ProxyConfig struct {
 type ProxyServer struct {
 	config         *ProxyConfig
 	httpClient     *http.Client
+	probeClient    *http.Client
 	streamClient   *http.Client
 	transport      *http.Transport
 	h2cTransport   *http2.Transport // H2C Transport (如果启用)
@@ -302,6 +385,9 @@ type ProxyServer struct {
 	localStore     *localStore
 	metaSyncDone   chan struct{}
 	metaSyncWG     sync.WaitGroup
+	upstreamMu     sync.RWMutex
+	upstreamDownAt time.Time
+	upstreamError  string
 }
 
 // FileInfo 文件信息
@@ -402,19 +488,25 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		streamBufferSize = effectiveKB * 1024
 	}
 
+	upstreamTimeout := time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 8, 2, 120)) * time.Second
+	probeTimeout := time.Duration(clampSeconds(config.ProbeTimeoutSeconds, 3, 1, 30)) * time.Second
+
+	proxyFunc := newProxyResolver(config)
+
 	// 创建 Transport，支持 HTTP/2 over TLS
 	transport := &http.Transport{
+		Proxy:                 proxyFunc,
 		MaxIdleConns:          200,               // 增加最大空闲连接
 		MaxIdleConnsPerHost:   100,               // 增加每主机空闲连接（从50提升）
 		MaxConnsPerHost:       200,               // 增加每主机最大连接（从100提升）
 		IdleConnTimeout:       300 * time.Second, // 延长空闲超时（从120s提升到5分钟）
 		DisableCompression:    true,              // 禁用压缩，减少 CPU 开销（视频流通常已压缩）
-		ResponseHeaderTimeout: 60 * time.Second,  // 响应头超时（从30s提升）
+		ResponseHeaderTimeout: upstreamTimeout + 2*time.Second,
 		ForceAttemptHTTP2:     true,              // 启用 HTTP/2 (HTTPS)
 		TLSClientConfig:       &tls.Config{},
 		// 连接建立优化
 		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second, // 连接超时
+			Timeout:   upstreamTimeout,
 			KeepAlive: 60 * time.Second, // TCP KeepAlive，防止连接被中间设备断开
 		}).DialContext,
 	}
@@ -424,80 +516,58 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		log.Warnf("[%s] Failed to configure HTTP/2: %v, falling back to HTTP/1.1", internal.TagServer, err)
 	}
 
-	var httpClient, streamClient *http.Client
+	var httpClient, probeClient, streamClient *http.Client
 	var h2cTransport *http2.Transport
 
-	// 如果启用 H2C，创建支持 H2C 的客户端
 	if config.EnableH2C {
 		log.Info("[" + internal.TagServer + "] H2C (HTTP/2 Cleartext) enabled for backend connections")
-		// H2C Transport - 用于明文 HTTP/2
 		h2cTransport = &http2.Transport{
-			AllowHTTP: true, // 允许明文 HTTP
+			AllowHTTP: true,
 			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-				// 对于 H2C，我们实际上是做普通的 TCP 连接
 				var d net.Dialer
 				return d.DialContext(ctx, network, addr)
 			},
 		}
 
-		// 测试 H2C 连接是否可用
 		testClient := &http.Client{Timeout: 5 * time.Second, Transport: h2cTransport}
 		testURL := fmt.Sprintf("http://%s:%d/ping", config.AlistHost, config.AlistPort)
 		resp, err := testClient.Get(testURL)
 		if err != nil {
 			log.Warnf("[%s] H2C connection test failed: %v, falling back to HTTP/1.1", internal.TagServer, err)
-			// H2C 连接失败，回退到 HTTP/1.1
 			h2cTransport = nil
-			httpClient = &http.Client{
-				Timeout:   30 * time.Second,
-				Transport: transport,
-				// 禁用自动重定向跟随，手动处理 302/303 重定向
-				CheckRedirect: func(req *http.Request, via []*http.Request) error {
-					return http.ErrUseLastResponse
-				},
-			}
-			streamClient = &http.Client{
-				Timeout:   0,
-				Transport: transport,
-				CheckRedirect: func(req *http.Request, via []*http.Request) error {
-					return http.ErrUseLastResponse
-				},
-			}
 		} else {
 			resp.Body.Close()
 			log.Info("[" + internal.TagServer + "] H2C connection test successful")
-			httpClient = &http.Client{
-				Timeout:   30 * time.Second,
-				Transport: h2cTransport,
-				CheckRedirect: func(req *http.Request, via []*http.Request) error {
-					return http.ErrUseLastResponse
-				},
-			}
-			streamClient = &http.Client{
-				Timeout:   0,
-				Transport: h2cTransport,
-				CheckRedirect: func(req *http.Request, via []*http.Request) error {
-					return http.ErrUseLastResponse
-				},
-			}
 		}
+	}
+
+	httpClient = &http.Client{
+		Timeout: upstreamTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	probeClient = &http.Client{
+		Timeout: probeTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	streamClient = &http.Client{
+		Timeout: 0,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	if h2cTransport != nil {
+		httpClient.Transport = h2cTransport
+		probeClient.Transport = h2cTransport
+		streamClient.Transport = h2cTransport
 	} else {
-		// 标准 HTTP/1.1 或 HTTP/2 over TLS
-		// 禁用自动重定向跟随，手动处理 302/303 重定向
-		httpClient = &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
-		streamClient = &http.Client{
-			Timeout:   0,
-			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
+		httpClient.Transport = transport
+		probeClient.Transport = transport
+		streamClient.Transport = transport
 	}
 
 	server := &ProxyServer{
@@ -505,6 +575,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		transport:    transport,
 		h2cTransport: h2cTransport,
 		httpClient:   httpClient,
+		probeClient:  probeClient,
 		streamClient: streamClient,
 		cleanupDone:  make(chan struct{}),
 		metaSyncDone: make(chan struct{}),
@@ -851,6 +922,63 @@ func (p *ProxyServer) loadRedirectCache(key string) (*RedirectInfo, bool) {
 	return nil, false
 }
 
+func (p *ProxyServer) markUpstreamFailure(err error) {
+	if p == nil {
+		return
+	}
+	p.upstreamMu.Lock()
+	defer p.upstreamMu.Unlock()
+	p.upstreamDownAt = time.Now().Add(p.upstreamBackoff())
+	if err != nil {
+		p.upstreamError = err.Error()
+	}
+}
+
+func (p *ProxyServer) markUpstreamSuccess() {
+	if p == nil {
+		return
+	}
+	p.upstreamMu.Lock()
+	defer p.upstreamMu.Unlock()
+	p.upstreamDownAt = time.Time{}
+	p.upstreamError = ""
+}
+
+func (p *ProxyServer) upstreamBackoffState() (active bool, remain time.Duration, reason string) {
+	if p == nil {
+		return false, 0, ""
+	}
+	p.upstreamMu.RLock()
+	defer p.upstreamMu.RUnlock()
+	reason = p.upstreamError
+	if p.upstreamDownAt.IsZero() {
+		return false, 0, reason
+	}
+	remain = time.Until(p.upstreamDownAt)
+	if remain <= 0 {
+		return false, 0, reason
+	}
+	return true, remain, reason
+}
+
+func (p *ProxyServer) shouldFastFailUpstream() bool {
+	active, _, _ := p.upstreamBackoffState()
+	return active
+}
+
+func (p *ProxyServer) writeUpstreamUnavailable(w http.ResponseWriter) {
+	active, remain, reason := p.upstreamBackoffState()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"code":                    http.StatusServiceUnavailable,
+		"message":                 "upstream unavailable",
+		"upstream_backoff_active": active,
+		"backoff_remaining_ms":    remain.Milliseconds(),
+		"reason":                  reason,
+	})
+}
+
 // Start 启动代理服务器
 func (p *ProxyServer) Start() error {
 	p.mutex.Lock()
@@ -864,6 +992,7 @@ func (p *ProxyServer) Start() error {
 
 	// 路由配置 - 使用 WrapHandler 注入日志上下文实现全链路追踪
 	mux.HandleFunc("/ping", p.handlePing)
+	mux.HandleFunc("/healthz", p.handleHealthz)
 	// 加密配置 API（供 App 前端的加密 tab 使用）
 	mux.HandleFunc("/enc-api/getAlistConfig", p.handleConfig)
 	mux.HandleFunc("/enc-api/saveAlistConfig", p.handleConfig)
@@ -1024,6 +1153,16 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.config = config
+	if p.httpClient != nil {
+		p.httpClient.Timeout = p.upstreamTimeout()
+	}
+	if p.probeClient != nil {
+		p.probeClient.Timeout = p.probeTimeout()
+	}
+	if p.transport != nil {
+		p.transport.ResponseHeaderTimeout = p.upstreamTimeout() + 2*time.Second
+		p.transport.Proxy = newProxyResolver(config)
+	}
 	log.Infof("[%s] Proxy Config updated successfully", internal.TagConfig)
 }
 
@@ -1077,8 +1216,8 @@ func ClearAllProbeStrategies() {
 }
 
 // probeWithHead 使用 HEAD 请求探测文件大小
-func (p *ProxyServer) probeWithHead(targetURL string, headers http.Header) int64 {
-	req, err := http.NewRequest("HEAD", targetURL, nil)
+func (p *ProxyServer) probeWithHeadCtx(ctx context.Context, targetURL string, headers http.Header) int64 {
+	req, err := http.NewRequestWithContext(ctx, "HEAD", targetURL, nil)
 	if err != nil {
 		return 0
 	}
@@ -1090,7 +1229,11 @@ func (p *ProxyServer) probeWithHead(targetURL string, headers http.Header) int64
 			req.Header.Add(key, v)
 		}
 	}
-	resp, err := p.streamClient.Do(req)
+	client := p.probeClient
+	if client == nil {
+		client = p.httpClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0
 	}
@@ -1116,9 +1259,15 @@ func (p *ProxyServer) probeWithHead(targetURL string, headers http.Header) int64
 	return 0
 }
 
+func (p *ProxyServer) probeWithHead(targetURL string, headers http.Header) int64 {
+	ctx, cancel := context.WithTimeout(context.Background(), p.probeTimeout())
+	defer cancel()
+	return p.probeWithHeadCtx(ctx, targetURL, headers)
+}
+
 // probeWithRange 使用 Range=0-0 请求探测文件大小
-func (p *ProxyServer) probeWithRange(targetURL string, headers http.Header) int64 {
-	req, err := http.NewRequest("GET", targetURL, nil)
+func (p *ProxyServer) probeWithRangeCtx(ctx context.Context, targetURL string, headers http.Header) int64 {
+	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return 0
 	}
@@ -1131,7 +1280,11 @@ func (p *ProxyServer) probeWithRange(targetURL string, headers http.Header) int6
 		}
 	}
 	req.Header.Set("Range", "bytes=0-0")
-	resp, err := p.streamClient.Do(req)
+	client := p.probeClient
+	if client == nil {
+		client = p.httpClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0
 	}
@@ -1160,14 +1313,25 @@ func (p *ProxyServer) probeWithRange(targetURL string, headers http.Header) int6
 	return 0
 }
 
+func (p *ProxyServer) probeWithRange(targetURL string, headers http.Header) int64 {
+	ctx, cancel := context.WithTimeout(context.Background(), p.probeTimeout())
+	defer cancel()
+	return p.probeWithRangeCtx(ctx, targetURL, headers)
+}
+
 // forceProbeRemoteFileSize 强制探测远程文件大小（不受 ProbeOnDownload 配置限制）
 // 用于加密文件解密场景：没有 fileSize 就无法生成密钥，解密必然失败
 func (p *ProxyServer) forceProbeRemoteFileSize(targetURL string, headers http.Header) int64 {
-	size := p.probeWithRange(targetURL, headers)
+	ctx, cancel := context.WithTimeout(context.Background(), p.probeBudget())
+	defer cancel()
+	size := p.probeWithRangeCtx(ctx, targetURL, headers)
 	if size > 0 {
 		return size
 	}
-	return p.probeWithHead(targetURL, headers)
+	if ctx.Err() != nil {
+		return 0
+	}
+	return p.probeWithHeadCtx(ctx, targetURL, headers)
 }
 
 // probeRemoteFileSize 尝试通过 HEAD 或 Range 请求获取远程文件总大小
@@ -1248,8 +1412,10 @@ func (p *ProxyServer) probeRemoteFileSizeWithPath(targetURL string, headers http
 
 // fetchWebDAVFileSize 通过 PROPFIND 获取文件大小（Depth: 0）
 func (p *ProxyServer) fetchWebDAVFileSize(targetURL string, headers http.Header) int64 {
+	ctx, cancel := context.WithTimeout(context.Background(), p.probeTimeout())
+	defer cancel()
 	body := `<?xml version="1.0" encoding="utf-8" ?><D:propfind xmlns:D="DAV:"><D:prop><D:getcontentlength/></D:prop></D:propfind>`
-	req, err := http.NewRequest("PROPFIND", targetURL, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "PROPFIND", targetURL, strings.NewReader(body))
 	if err != nil {
 		return 0
 	}
@@ -1264,7 +1430,11 @@ func (p *ProxyServer) fetchWebDAVFileSize(targetURL string, headers http.Header)
 	req.Header.Set("Depth", "0")
 	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
 
-	resp, err := p.httpClient.Do(req)
+	client := p.probeClient
+	if client == nil {
+		client = p.httpClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0
 	}
@@ -1515,6 +1685,39 @@ func (p *ProxyServer) handlePing(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"version": "1.0.0",
 		"time":    time.Now().Unix(),
+	})
+}
+
+func (p *ProxyServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	active, remain, reason := p.upstreamBackoffState()
+	reachable := false
+	ctx, cancel := context.WithTimeout(r.Context(), 1500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.getAlistURL()+"/ping", nil)
+	if err == nil {
+		if resp, reqErr := p.httpClient.Do(req); reqErr == nil {
+			reachable = resp.StatusCode >= 200 && resp.StatusCode < 500
+			resp.Body.Close()
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "ok",
+		"proxy": map[string]interface{}{
+			"running": p.IsRunning(),
+			"port":    p.config.ProxyPort,
+		},
+		"upstream": map[string]interface{}{
+			"url":                      p.getAlistURL(),
+			"reachable":                reachable,
+			"backoff_active":           active,
+			"backoff_remaining_seconds": int(remain.Seconds()),
+			"last_error":               reason,
+		},
 	})
 }
 
@@ -1846,8 +2049,13 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				"alistHost":                   p.config.AlistHost,
 				"alistPort":                   p.config.AlistPort,
 				"https":                       p.config.AlistHttps,
-				"proxyPort":                   p.config.ProxyPort,
-				"passwdList":                  passwdList,
+					"proxyPort":                   p.config.ProxyPort,
+					"upstreamTimeoutSeconds":      p.config.UpstreamTimeoutSeconds,
+					"probeTimeoutSeconds":         p.config.ProbeTimeoutSeconds,
+					"probeBudgetSeconds":          p.config.ProbeBudgetSeconds,
+					"upstreamBackoffSeconds":      p.config.UpstreamBackoffSeconds,
+					"enableLocalBypass":           p.config.EnableLocalBypass,
+					"passwdList":                  passwdList,
 				"probeOnDownload":             p.config.ProbeOnDownload,
 				"enableSizeMap":               p.config.EnableSizeMap,
 				"sizeMapTtlMinutes":           p.config.SizeMapTTL,
@@ -2041,7 +2249,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				p.mutex.Unlock()
 			}
 		}
-		if v, ok := bodyMap["proxyPort"]; ok {
+			if v, ok := bodyMap["proxyPort"]; ok {
 			switch vt := v.(type) {
 			case float64:
 				p.mutex.Lock()
@@ -2051,6 +2259,69 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				if port, err := strconv.Atoi(vt); err == nil {
 					p.mutex.Lock()
 					p.config.ProxyPort = port
+					p.mutex.Unlock()
+				}
+			}
+			if v, ok := bodyMap["upstreamTimeoutSeconds"]; ok {
+				switch vt := v.(type) {
+				case float64:
+					p.mutex.Lock()
+					p.config.UpstreamTimeoutSeconds = int(vt)
+					p.mutex.Unlock()
+				case string:
+					if val, err := strconv.Atoi(vt); err == nil {
+						p.mutex.Lock()
+						p.config.UpstreamTimeoutSeconds = val
+						p.mutex.Unlock()
+					}
+				}
+			}
+			if v, ok := bodyMap["probeTimeoutSeconds"]; ok {
+				switch vt := v.(type) {
+				case float64:
+					p.mutex.Lock()
+					p.config.ProbeTimeoutSeconds = int(vt)
+					p.mutex.Unlock()
+				case string:
+					if val, err := strconv.Atoi(vt); err == nil {
+						p.mutex.Lock()
+						p.config.ProbeTimeoutSeconds = val
+						p.mutex.Unlock()
+					}
+				}
+			}
+			if v, ok := bodyMap["probeBudgetSeconds"]; ok {
+				switch vt := v.(type) {
+				case float64:
+					p.mutex.Lock()
+					p.config.ProbeBudgetSeconds = int(vt)
+					p.mutex.Unlock()
+				case string:
+					if val, err := strconv.Atoi(vt); err == nil {
+						p.mutex.Lock()
+						p.config.ProbeBudgetSeconds = val
+						p.mutex.Unlock()
+					}
+				}
+			}
+			if v, ok := bodyMap["upstreamBackoffSeconds"]; ok {
+				switch vt := v.(type) {
+				case float64:
+					p.mutex.Lock()
+					p.config.UpstreamBackoffSeconds = int(vt)
+					p.mutex.Unlock()
+				case string:
+					if val, err := strconv.Atoi(vt); err == nil {
+						p.mutex.Lock()
+						p.config.UpstreamBackoffSeconds = val
+						p.mutex.Unlock()
+					}
+				}
+			}
+			if v, ok := bodyMap["enableLocalBypass"]; ok {
+				if b, ok2 := v.(bool); ok2 {
+					p.mutex.Lock()
+					p.config.EnableLocalBypass = b
 					p.mutex.Unlock()
 				}
 			}
@@ -3375,6 +3646,10 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 // handleWebDAV 处理 WebDAV 请求
 func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
+	if p.shouldFastFailUpstream() {
+		p.writeUpstreamUnavailable(w)
+		return
+	}
 	ctx := r.Context()
 	// 1. 查找加密配置
 	filePath := r.URL.Path
@@ -3522,7 +3797,13 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	req, err := http.NewRequest(r.Method, targetURL, body)
+	reqCtx := r.Context()
+	var cancel context.CancelFunc
+	if r.Method != http.MethodGet {
+		reqCtx, cancel = context.WithTimeout(r.Context(), p.upstreamTimeout())
+		defer cancel()
+	}
+	req, err := http.NewRequestWithContext(reqCtx, r.Method, targetURL, body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -3599,11 +3880,17 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, err := p.httpClient.Do(req)
+	client := p.httpClient
+	if r.Method == http.MethodGet {
+		client = p.streamClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
+		p.markUpstreamFailure(err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	p.markUpstreamSuccess()
 
 	// 添加调试日志：记录后端响应状态码和内容长度
 	log.Infof("%s WebDAV backend response: method=%s path=%s statusCode=%d contentLength=%s contentType=%s",
@@ -3635,7 +3922,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				retryBody = bytes.NewReader(reqBodyBytes)
 			}
 
-			retryReq, _ := http.NewRequest(r.Method, retryTargetURL, retryBody)
+				retryReq, _ := http.NewRequestWithContext(reqCtx, r.Method, retryTargetURL, retryBody)
 			// Copy headers
 			for key, values := range r.Header {
 				if key != "Host" {
@@ -3645,11 +3932,13 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			resp, err = p.httpClient.Do(retryReq)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
-				return
-			}
+				resp, err = client.Do(retryReq)
+				if err != nil {
+					p.markUpstreamFailure(err)
+					http.Error(w, err.Error(), http.StatusBadGateway)
+					return
+				}
+				p.markUpstreamSuccess()
 		}
 	}
 	defer resp.Body.Close()
@@ -3951,6 +4240,10 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 // handleProxy 处理通用代理请求
 func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
+	if p.shouldFastFailUpstream() {
+		p.writeUpstreamUnavailable(w)
+		return
+	}
 	targetURL := p.getAlistURL() + r.URL.Path
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
@@ -3958,7 +4251,9 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	log.Debugf("Proxying %s %s to %s", r.Method, r.URL.Path, targetURL)
 
-	req, err := http.NewRequest(r.Method, targetURL, r.Body)
+	ctx, cancel := context.WithTimeout(r.Context(), p.upstreamTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, r.Method, targetURL, r.Body)
 	if err != nil {
 		log.Errorf("Failed to create request: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -3977,9 +4272,11 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		log.Errorf("Proxy request failed: %v", err)
+		p.markUpstreamFailure(err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	p.markUpstreamSuccess()
 	defer resp.Body.Close()
 
 	log.Debugf("Proxy response status: %d", resp.StatusCode)

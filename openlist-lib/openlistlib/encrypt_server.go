@@ -194,6 +194,21 @@ func (m *EncryptProxyManager) SetEnableH2C(enable bool) error {
 	return err
 }
 
+// SetNetworkPolicy 设置网络策略
+func (m *EncryptProxyManager) SetNetworkPolicy(upstreamTimeoutSeconds, probeTimeoutSeconds, probeBudgetSeconds, upstreamBackoffSeconds int, enableLocalBypass bool) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	err := m.configManager.SetNetworkPolicy(upstreamTimeoutSeconds, probeTimeoutSeconds, probeBudgetSeconds, upstreamBackoffSeconds, enableLocalBypass)
+	if err == nil {
+		m.updateProxyServerConfig()
+	}
+	return err
+}
+
 // SetDBExportSyncConfig 设置 DB_EXPORT 同步配置
 func (m *EncryptProxyManager) SetDBExportSyncConfig(enable bool, baseURL string, intervalSeconds int, authEnabled bool, username, password string) error {
 	m.mutex.Lock()
@@ -347,6 +362,11 @@ func SetEncryptDbExportSyncConfig(enable bool, baseURL string, intervalSeconds i
 	return GetEncryptManager().SetDBExportSyncConfig(enable, baseURL, int(intervalSeconds), authEnabled, username, password)
 }
 
+// SetEncryptNetworkPolicy 设置网络策略（供 gomobile 调用）
+func SetEncryptNetworkPolicy(upstreamTimeoutSeconds, probeTimeoutSeconds, probeBudgetSeconds, upstreamBackoffSeconds int64, enableLocalBypass bool) error {
+	return GetEncryptManager().SetNetworkPolicy(int(upstreamTimeoutSeconds), int(probeTimeoutSeconds), int(probeBudgetSeconds), int(upstreamBackoffSeconds), enableLocalBypass)
+}
+
 // GetEncryptEnableH2C 获取 H2C 开关状态（供 gomobile 调用）
 func GetEncryptEnableH2C() bool {
 	config := GetEncryptManager().GetConfig()
@@ -426,6 +446,11 @@ func GetEncryptConfigJson() string {
 		AlistPort                int        `json:"alistPort"`
 		AlistHttps               bool       `json:"alistHttps"`
 		ProxyPort                int        `json:"proxyPort"`
+		UpstreamTimeoutSeconds   int        `json:"upstreamTimeoutSeconds"`
+		ProbeTimeoutSeconds      int        `json:"probeTimeoutSeconds"`
+		ProbeBudgetSeconds       int        `json:"probeBudgetSeconds"`
+		UpstreamBackoffSeconds   int        `json:"upstreamBackoffSeconds"`
+		EnableLocalBypass        bool       `json:"enableLocalBypass"`
 		EnableH2C                bool       `json:"enableH2C"`
 		EnableDbExportSync       bool       `json:"enableDbExportSync"`
 		DbExportBaseUrl          string     `json:"dbExportBaseUrl"`
@@ -451,6 +476,11 @@ func GetEncryptConfigJson() string {
 		AlistPort:                config.AlistPort,
 		AlistHttps:               config.AlistHttps,
 		ProxyPort:                config.ProxyPort,
+		UpstreamTimeoutSeconds:   config.UpstreamTimeoutSeconds,
+		ProbeTimeoutSeconds:      config.ProbeTimeoutSeconds,
+		ProbeBudgetSeconds:       config.ProbeBudgetSeconds,
+		UpstreamBackoffSeconds:   config.UpstreamBackoffSeconds,
+		EnableLocalBypass:        config.EnableLocalBypass,
 		EnableH2C:                config.EnableH2C,
 		EnableDbExportSync:       config.EnableDBExportSync,
 		DbExportBaseUrl:          config.DBExportBaseURL,

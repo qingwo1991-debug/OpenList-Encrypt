@@ -787,6 +787,13 @@ public class GeneratedApi {
         @NonNull String username,
         @NonNull String password);
 
+    void setEncryptNetworkPolicy(
+        @NonNull Long upstreamTimeoutSeconds,
+        @NonNull Long probeTimeoutSeconds,
+        @NonNull Long probeBudgetSeconds,
+        @NonNull Long upstreamBackoffSeconds,
+        @NonNull Boolean enableLocalBypass);
+
     void addEncryptPath(
         @NonNull String path,
         @NonNull String password,
@@ -1064,6 +1071,38 @@ public class GeneratedApi {
                       authEnabledArg,
                       usernameArg,
                       passwordArg);
+                  wrapped.add(0, null);
+                } catch (Throwable exception) {
+                  ArrayList<Object> wrappedError = wrapError(exception);
+                  wrapped = wrappedError;
+                }
+                reply.reply(wrapped);
+              });
+        } else {
+          channel.setMessageHandler(null);
+        }
+      }
+      {
+        BasicMessageChannel<Object> channel =
+            new BasicMessageChannel<>(
+                binaryMessenger, "dev.flutter.pigeon.openlist_mobile.EncryptProxy.setEncryptNetworkPolicy", getCodec());
+        if (api != null) {
+          channel.setMessageHandler(
+              (message, reply) -> {
+                ArrayList<Object> wrapped = new ArrayList<Object>();
+                ArrayList<Object> args = (ArrayList<Object>) message;
+                Long upstreamTimeoutSecondsArg = (Long) args.get(0);
+                Long probeTimeoutSecondsArg = (Long) args.get(1);
+                Long probeBudgetSecondsArg = (Long) args.get(2);
+                Long upstreamBackoffSecondsArg = (Long) args.get(3);
+                Boolean enableLocalBypassArg = (Boolean) args.get(4);
+                try {
+                  api.setEncryptNetworkPolicy(
+                      upstreamTimeoutSecondsArg,
+                      probeTimeoutSecondsArg,
+                      probeBudgetSecondsArg,
+                      upstreamBackoffSecondsArg,
+                      enableLocalBypassArg);
                   wrapped.add(0, null);
                 } catch (Throwable exception) {
                   ArrayList<Object> wrappedError = wrapError(exception);
