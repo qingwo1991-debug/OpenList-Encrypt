@@ -20,7 +20,15 @@ func (p *ProxyServer) initLocalStore() {
 	}
 	p.localStore = store
 	if p.localStore != nil {
-		if err := p.localStore.Cleanup(30 * 24 * time.Hour); err != nil {
+		sizeRetention := time.Duration(defaultLocalSizeRetentionDays) * 24 * time.Hour
+		if p.config.LocalSizeRetentionDays > 0 {
+			sizeRetention = time.Duration(p.config.LocalSizeRetentionDays) * 24 * time.Hour
+		}
+		strategyRetention := time.Duration(defaultLocalStrategyRetentionDays) * 24 * time.Hour
+		if p.config.LocalStrategyRetentionDays > 0 {
+			strategyRetention = time.Duration(p.config.LocalStrategyRetentionDays) * 24 * time.Hour
+		}
+		if err := p.localStore.Cleanup(sizeRetention, strategyRetention); err != nil {
 			log.Warnf("[%s] Local store cleanup failed: %v", internal.TagCache, err)
 		}
 	}

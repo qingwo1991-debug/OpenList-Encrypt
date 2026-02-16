@@ -154,6 +154,37 @@ func (p *ProxyServer) probeTimeout() time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
+func (p *ProxyServer) propfindRetryTimeout() time.Duration {
+	// Keep retry budget short to avoid long stalls on 404/misclassified paths.
+	base := p.probeTimeout()
+	if base <= 0 {
+		base = 1500 * time.Millisecond
+	}
+	if base > 1500*time.Millisecond {
+		base = 1500 * time.Millisecond
+	}
+	if base < 300*time.Millisecond {
+		base = 300 * time.Millisecond
+	}
+	return base
+}
+
+func shouldRetryPropfind404(depthHeader, filePath string) bool {
+	name := path.Base(filePath)
+	if name == "" || name == "/" || name == "." {
+		return false
+	}
+	depth := strings.TrimSpace(depthHeader)
+	if depth == "0" {
+		return true
+	}
+	// Some clients omit Depth for single-file probes; only retry if path shape is file-like.
+	if depth == "" && !strings.HasSuffix(filePath, "/") && path.Ext(name) != "" {
+		return true
+	}
+	return false
+}
+
 func (p *ProxyServer) probeBudget() time.Duration {
 	secs := 10
 	if p != nil && p.config != nil {
@@ -297,11 +328,20 @@ var probeStrategyCache sync.Map
 type ProbeStrategy struct {
 	Method       ProbeMethod // 成功的探测方法
 	SuccessCount int64       // 连续成功次数
+	FailCount    int64       // 连续失败次数
+	UpdatedAt    time.Time   // 最近更新（用于 TTL）
 	mutex        sync.Mutex
 }
 
-// probeStrategyStableThreshold 探测策略稳定阈值（连续成功多少次认为稳定）
-const probeStrategyStableThreshold = 3
+const (
+	defaultProbeStrategyTTLMinutes       = 30 * 24 * 60
+	defaultProbeStrategyStableThreshold  = 2
+	defaultProbeStrategyFailureThreshold = 2
+	defaultSizeMapTTLMinutes             = 365 * 24 * 60
+	defaultRangeCompatTTLMinutes         = 30 * 24 * 60
+	defaultLocalSizeRetentionDays        = 365
+	defaultLocalStrategyRetentionDays    = 30
+)
 
 // RedirectInfo 重定向信息，用于缓存和代理重定向
 type RedirectInfo struct {
@@ -393,6 +433,12 @@ type ProxyConfig struct {
 	FileCacheTTL int `json:"fileCacheTTL,omitempty"`
 	// ProbeStrategy: 文件大小探测策略 "range"(默认，兼容性更好) 或 "head"(传统方式)
 	ProbeStrategy string `json:"probeStrategy,omitempty"`
+	// ProbeStrategyTTLMinutes: 探测策略学习缓存有效期（分钟）
+	ProbeStrategyTTLMinutes int `json:"probeStrategyTtlMinutes,omitempty"`
+	// ProbeStrategyStableThreshold: 探测策略连续成功达到该阈值后视为稳定
+	ProbeStrategyStableThreshold int `json:"probeStrategyStableThreshold,omitempty"`
+	// ProbeStrategyFailureThreshold: 稳定策略连续失败达到该阈值后触发重学
+	ProbeStrategyFailureThreshold int `json:"probeStrategyFailureThreshold,omitempty"`
 	// EnableSizeMap: 启用长期文件大小映射缓存
 	EnableSizeMap bool `json:"enableSizeMap"`
 	// SizeMapTTL: 文件大小映射缓存时间（分钟）
@@ -437,6 +483,10 @@ type ProxyConfig struct {
 	DebugSampleRate int `json:"debugSampleRate,omitempty"`
 	// DebugLogBodyBytes: 调试时记录响应体前 N 字节（0=关闭）
 	DebugLogBodyBytes int `json:"debugLogBodyBytes,omitempty"`
+	// LocalSizeRetentionDays: 本地事实缓存（size）保留天数
+	LocalSizeRetentionDays int `json:"localSizeRetentionDays,omitempty"`
+	// LocalStrategyRetentionDays: 本地策略缓存（strategy）保留天数
+	LocalStrategyRetentionDays int `json:"localStrategyRetentionDays,omitempty"`
 	// ConfigPath: 配置文件路径（运行时注入，不序列化）
 	ConfigPath string `json:"-"`
 }
@@ -486,11 +536,39 @@ var (
 // 保留全局 redirectCache 以兼容现有代码，但新代码使用 ProxyServer.redirectCache
 )
 
+func applyLearningDefaults(cfg *ProxyConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.ProbeStrategyTTLMinutes <= 0 {
+		cfg.ProbeStrategyTTLMinutes = defaultProbeStrategyTTLMinutes
+	}
+	if cfg.ProbeStrategyStableThreshold <= 0 {
+		cfg.ProbeStrategyStableThreshold = int(defaultProbeStrategyStableThreshold)
+	}
+	if cfg.ProbeStrategyFailureThreshold <= 0 {
+		cfg.ProbeStrategyFailureThreshold = int(defaultProbeStrategyFailureThreshold)
+	}
+	if cfg.SizeMapTTL <= 0 {
+		cfg.SizeMapTTL = defaultSizeMapTTLMinutes
+	}
+	if cfg.RangeCompatTTL <= 0 {
+		cfg.RangeCompatTTL = defaultRangeCompatTTLMinutes
+	}
+	if cfg.LocalSizeRetentionDays <= 0 {
+		cfg.LocalSizeRetentionDays = defaultLocalSizeRetentionDays
+	}
+	if cfg.LocalStrategyRetentionDays <= 0 {
+		cfg.LocalStrategyRetentionDays = defaultLocalStrategyRetentionDays
+	}
+}
+
 // NewProxyServer 创建代理服务器
 func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	if config == nil {
 		return nil, errors.New("config cannot be nil")
 	}
+	applyLearningDefaults(config)
 
 	// 编译路径正则表达式
 	// 使用安全的通配符->正则转换：先 QuoteMeta 再恢复通配符
@@ -1239,6 +1317,7 @@ func (p *ProxyServer) IsRunning() bool {
 func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	// Compile regex BEFORE locking to avoid blocking reads too long?
 	// Or just do it all under lock but ensure assignment is last.
+	applyLearningDefaults(config)
 
 	log.Infof("[%s] Updating Proxy Config with %d paths", internal.TagConfig, len(config.EncryptPaths))
 
@@ -1321,18 +1400,57 @@ func (p *ProxyServer) getAlistURL() string {
 }
 
 // getProbeStrategy 获取加密路径的探测策略（如果已学习）
-func getProbeStrategy(encPathPattern string) *ProbeStrategy {
-	if val, ok := probeStrategyCache.Load(encPathPattern); ok {
-		return val.(*ProbeStrategy)
+func (p *ProxyServer) probeStrategyTTL() time.Duration {
+	if p != nil && p.config != nil && p.config.ProbeStrategyTTLMinutes > 0 {
+		return time.Duration(p.config.ProbeStrategyTTLMinutes) * time.Minute
 	}
-	return nil
+	return time.Duration(defaultProbeStrategyTTLMinutes) * time.Minute
+}
+
+func (p *ProxyServer) probeStrategyStableThreshold() int64 {
+	if p != nil && p.config != nil && p.config.ProbeStrategyStableThreshold > 0 {
+		return int64(p.config.ProbeStrategyStableThreshold)
+	}
+	return defaultProbeStrategyStableThreshold
+}
+
+func (p *ProxyServer) probeStrategyFailureThreshold() int64 {
+	if p != nil && p.config != nil && p.config.ProbeStrategyFailureThreshold > 0 {
+		return int64(p.config.ProbeStrategyFailureThreshold)
+	}
+	return defaultProbeStrategyFailureThreshold
+}
+
+// getProbeStrategy 获取加密路径的探测策略（如果已学习）
+func (p *ProxyServer) getProbeStrategy(encPathPattern string) *ProbeStrategy {
+	if encPathPattern == "" {
+		return nil
+	}
+	val, ok := probeStrategyCache.Load(encPathPattern)
+	if !ok {
+		return nil
+	}
+	strategy := val.(*ProbeStrategy)
+	strategy.mutex.Lock()
+	expired := strategy.UpdatedAt.IsZero() || time.Since(strategy.UpdatedAt) > p.probeStrategyTTL()
+	strategy.mutex.Unlock()
+	if expired {
+		probeStrategyCache.Delete(encPathPattern)
+		return nil
+	}
+	return strategy
 }
 
 // updateProbeStrategy 更新探测策略（学习成功的方法）
-func updateProbeStrategy(encPathPattern string, method ProbeMethod) {
+func (p *ProxyServer) updateProbeStrategy(encPathPattern string, method ProbeMethod) {
+	if encPathPattern == "" {
+		return
+	}
 	val, _ := probeStrategyCache.LoadOrStore(encPathPattern, &ProbeStrategy{
 		Method:       method,
 		SuccessCount: 0,
+		FailCount:    0,
+		UpdatedAt:    time.Now(),
 	})
 	strategy := val.(*ProbeStrategy)
 	strategy.mutex.Lock()
@@ -1344,10 +1462,36 @@ func updateProbeStrategy(encPathPattern string, method ProbeMethod) {
 		strategy.Method = method
 		strategy.SuccessCount = 1
 	}
+	strategy.FailCount = 0
+	strategy.UpdatedAt = time.Now()
+}
+
+func (p *ProxyServer) markProbeStrategyFailure(encPathPattern string, method ProbeMethod) {
+	if encPathPattern == "" {
+		return
+	}
+	val, ok := probeStrategyCache.Load(encPathPattern)
+	if !ok {
+		return
+	}
+	strategy := val.(*ProbeStrategy)
+	shouldDelete := false
+	strategy.mutex.Lock()
+	if strategy.Method == method {
+		strategy.FailCount++
+		strategy.UpdatedAt = time.Now()
+		if strategy.FailCount >= p.probeStrategyFailureThreshold() {
+			shouldDelete = true
+		}
+	}
+	strategy.mutex.Unlock()
+	if shouldDelete {
+		probeStrategyCache.Delete(encPathPattern)
+	}
 }
 
 // clearProbeStrategy 清除加密路径的探测策略缓存
-func clearProbeStrategy(encPathPattern string) {
+func (p *ProxyServer) clearProbeStrategy(encPathPattern string) {
 	probeStrategyCache.Delete(encPathPattern)
 }
 
@@ -1493,25 +1637,33 @@ func (p *ProxyServer) probeRemoteFileSizeWithPath(targetURL string, headers http
 
 	// 如果有学习到的策略，优先使用
 	if encPathPattern != "" {
-		if strategy := getProbeStrategy(encPathPattern); strategy != nil && strategy.SuccessCount >= probeStrategyStableThreshold {
+		if strategy := p.getProbeStrategy(encPathPattern); strategy != nil {
+			strategy.mutex.Lock()
+			method := strategy.Method
+			successCount := strategy.SuccessCount
+			strategy.mutex.Unlock()
+			if successCount < p.probeStrategyStableThreshold() {
+				goto FULL_PROBE_FLOW
+			}
 			var size int64
-			switch strategy.Method {
+			switch method {
 			case ProbeMethodHead:
 				size = p.probeWithHead(targetURL, headers)
 			case ProbeMethodRange:
 				size = p.probeWithRange(targetURL, headers)
 			}
 			if size > 0 {
-				updateProbeStrategy(encPathPattern, strategy.Method)
-				log.Debugf("[%s] Probe strategy cache hit: pattern=%s method=%s size=%d", internal.TagCache, encPathPattern, strategy.Method, size)
+				p.updateProbeStrategy(encPathPattern, method)
+				log.Debugf("[%s] Probe strategy cache hit: pattern=%s method=%s size=%d", internal.TagCache, encPathPattern, method, size)
 				return size
 			}
-			// 策略失败，清除缓存，走完整流程
-			log.Debugf("[%s] Probe strategy cache miss (method failed): pattern=%s method=%s", internal.TagCache, encPathPattern, strategy.Method)
-			clearProbeStrategy(encPathPattern)
+			// 策略失败，标记失败次数，达到阈值后清除并重学
+			log.Debugf("[%s] Probe strategy cache miss (method failed): pattern=%s method=%s", internal.TagCache, encPathPattern, method)
+			p.markProbeStrategyFailure(encPathPattern, method)
 		}
 	}
 
+FULL_PROBE_FLOW:
 	// 根据配置或默认策略决定尝试顺序
 	// 默认使用 Range 优先（兼容性更好，大多数网盘都支持）
 	rangeFirst := true
@@ -1548,7 +1700,7 @@ func (p *ProxyServer) probeRemoteFileSizeWithPath(targetURL string, headers http
 
 	// 学习成功的策略
 	if size > 0 && encPathPattern != "" {
-		updateProbeStrategy(encPathPattern, successMethod)
+		p.updateProbeStrategy(encPathPattern, successMethod)
 		log.Debugf("[%s] Probe strategy learned: pattern=%s method=%s size=%d", internal.TagCache, encPathPattern, successMethod, size)
 	}
 
@@ -1916,6 +2068,24 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 			"file_cache_entries":     syncMapLen(&p.fileCache),
 			"redirect_cache_entries": syncMapLen(&p.redirectCache),
 			"probe_strategy_entries": probeCount,
+			"probe_strategy_ttl_minutes": func() int {
+				if p.config != nil {
+					return p.config.ProbeStrategyTTLMinutes
+				}
+				return 0
+			}(),
+			"probe_strategy_stable_threshold": func() int {
+				if p.config != nil {
+					return p.config.ProbeStrategyStableThreshold
+				}
+				return 0
+			}(),
+			"probe_strategy_failure_threshold": func() int {
+				if p.config != nil {
+					return p.config.ProbeStrategyFailureThreshold
+				}
+				return 0
+			}(),
 		},
 		"size_map": map[string]interface{}{
 			"enabled": p.config != nil && p.config.EnableSizeMap,
@@ -1949,6 +2119,18 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 			"enabled":          p.localStore != nil,
 			"size_entries":     localSizeCount,
 			"strategy_entries": localStrategyCount,
+			"size_retention_days": func() int {
+				if p.config != nil {
+					return p.config.LocalSizeRetentionDays
+				}
+				return 0
+			}(),
+			"strategy_retention_days": func() int {
+				if p.config != nil {
+					return p.config.LocalStrategyRetentionDays
+				}
+				return 0
+			}(),
 		},
 		"db_export_sync": map[string]interface{}{
 			"enabled": func() bool {
@@ -2246,40 +2428,45 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 200,
 			"data": map[string]interface{}{
-				"alistHost":                   p.config.AlistHost,
-				"alistPort":                   p.config.AlistPort,
-				"https":                       p.config.AlistHttps,
-				"alistHttps":                  p.config.AlistHttps,
-				"proxyPort":                   p.config.ProxyPort,
-				"upstreamTimeoutSeconds":      p.config.UpstreamTimeoutSeconds,
-				"probeTimeoutSeconds":         p.config.ProbeTimeoutSeconds,
-				"probeBudgetSeconds":          p.config.ProbeBudgetSeconds,
-				"upstreamBackoffSeconds":      p.config.UpstreamBackoffSeconds,
-				"enableLocalBypass":           p.config.EnableLocalBypass,
-				"passwdList":                  passwdList,
-				"probeOnDownload":             p.config.ProbeOnDownload,
-				"enableSizeMap":               p.config.EnableSizeMap,
-				"sizeMapTtlMinutes":           p.config.SizeMapTTL,
-				"enableRangeCompatCache":      p.config.EnableRangeCompatCache,
-				"rangeCompatTtlMinutes":       p.config.RangeCompatTTL,
-				"rangeCompatMinFailures":      p.config.RangeCompatMinFailures,
-				"rangeSkipMaxBytes":           p.config.RangeSkipMaxBytes,
-				"redirectCacheTtlMinutes":     p.config.RedirectCacheTTLMinutes,
-				"enableParallelDecrypt":       p.config.EnableParallelDecrypt,
-				"parallelDecryptConcurrency":  p.config.ParallelDecryptConcurrency,
-				"streamBufferKb":              p.config.StreamBufferKB,
-				"debugEnabled":                p.config.DebugEnabled,
-				"debugLevel":                  p.config.DebugLevel,
-				"debugModules":                p.config.DebugModules,
-				"debugMaskSensitive":          p.config.DebugMaskSensitive,
-				"debugSampleRate":             p.config.DebugSampleRate,
-				"debugLogBodyBytes":           p.config.DebugLogBodyBytes,
-				"enableDbExportSync":          p.config.EnableDBExportSync,
-				"dbExportBaseUrl":             p.config.DBExportBaseURL,
-				"dbExportSyncIntervalSeconds": p.config.DBExportSyncIntervalSeconds,
-				"dbExportAuthEnabled":         p.config.DBExportAuthEnabled,
-				"dbExportUsername":            p.config.DBExportUsername,
-				"dbExportPassword":            p.config.DBExportPassword,
+				"alistHost":                     p.config.AlistHost,
+				"alistPort":                     p.config.AlistPort,
+				"https":                         p.config.AlistHttps,
+				"alistHttps":                    p.config.AlistHttps,
+				"proxyPort":                     p.config.ProxyPort,
+				"upstreamTimeoutSeconds":        p.config.UpstreamTimeoutSeconds,
+				"probeTimeoutSeconds":           p.config.ProbeTimeoutSeconds,
+				"probeBudgetSeconds":            p.config.ProbeBudgetSeconds,
+				"upstreamBackoffSeconds":        p.config.UpstreamBackoffSeconds,
+				"enableLocalBypass":             p.config.EnableLocalBypass,
+				"passwdList":                    passwdList,
+				"probeOnDownload":               p.config.ProbeOnDownload,
+				"probeStrategyTtlMinutes":       p.config.ProbeStrategyTTLMinutes,
+				"probeStrategyStableThreshold":  p.config.ProbeStrategyStableThreshold,
+				"probeStrategyFailureThreshold": p.config.ProbeStrategyFailureThreshold,
+				"enableSizeMap":                 p.config.EnableSizeMap,
+				"sizeMapTtlMinutes":             p.config.SizeMapTTL,
+				"enableRangeCompatCache":        p.config.EnableRangeCompatCache,
+				"rangeCompatTtlMinutes":         p.config.RangeCompatTTL,
+				"rangeCompatMinFailures":        p.config.RangeCompatMinFailures,
+				"rangeSkipMaxBytes":             p.config.RangeSkipMaxBytes,
+				"redirectCacheTtlMinutes":       p.config.RedirectCacheTTLMinutes,
+				"enableParallelDecrypt":         p.config.EnableParallelDecrypt,
+				"parallelDecryptConcurrency":    p.config.ParallelDecryptConcurrency,
+				"streamBufferKb":                p.config.StreamBufferKB,
+				"debugEnabled":                  p.config.DebugEnabled,
+				"debugLevel":                    p.config.DebugLevel,
+				"debugModules":                  p.config.DebugModules,
+				"debugMaskSensitive":            p.config.DebugMaskSensitive,
+				"debugSampleRate":               p.config.DebugSampleRate,
+				"debugLogBodyBytes":             p.config.DebugLogBodyBytes,
+				"localSizeRetentionDays":        p.config.LocalSizeRetentionDays,
+				"localStrategyRetentionDays":    p.config.LocalStrategyRetentionDays,
+				"enableDbExportSync":            p.config.EnableDBExportSync,
+				"dbExportBaseUrl":               p.config.DBExportBaseURL,
+				"dbExportSyncIntervalSeconds":   p.config.DBExportSyncIntervalSeconds,
+				"dbExportAuthEnabled":           p.config.DBExportAuthEnabled,
+				"dbExportUsername":              p.config.DBExportUsername,
+				"dbExportPassword":              p.config.DBExportPassword,
 			},
 		})
 		return
@@ -2299,6 +2486,48 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				p.mutex.Lock()
 				p.config.ProbeOnDownload = b
 				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["probeStrategyTtlMinutes"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.ProbeStrategyTTLMinutes = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.ProbeStrategyTTLMinutes = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["probeStrategyStableThreshold"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.ProbeStrategyStableThreshold = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.ProbeStrategyStableThreshold = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["probeStrategyFailureThreshold"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.ProbeStrategyFailureThreshold = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.ProbeStrategyFailureThreshold = val
+					p.mutex.Unlock()
+				}
 			}
 		}
 		if v, ok := bodyMap["enableSizeMap"]; ok {
@@ -2381,6 +2610,34 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				if val, err := strconv.Atoi(vt); err == nil {
 					p.mutex.Lock()
 					p.config.RedirectCacheTTLMinutes = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["localSizeRetentionDays"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.LocalSizeRetentionDays = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.LocalSizeRetentionDays = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["localStrategyRetentionDays"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.LocalStrategyRetentionDays = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.LocalStrategyRetentionDays = val
 					p.mutex.Unlock()
 				}
 			}
@@ -2856,6 +3113,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		if p.config.DebugSampleRate <= 0 || p.config.DebugSampleRate > 100 {
 			p.config.DebugSampleRate = 100
 		}
+		applyLearningDefaults(p.config)
 		p.mutex.Unlock()
 
 		json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "message": "Config updated"})
@@ -2867,6 +3125,16 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 // handleRedirect 处理重定向下载
 func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
+	if p.shouldFastFailUpstream() {
+		_, remain, reason := p.upstreamBackoffState()
+		retryAfter := int(remain.Seconds())
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		http.Error(w, "upstream temporarily unavailable: "+reason, http.StatusServiceUnavailable)
+		return
+	}
 	// 获取重定向 key
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) < 3 {
@@ -3894,6 +4162,16 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 // handleDownload 处理下载请求
 func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	if p.shouldFastFailUpstream() {
+		_, remain, reason := p.upstreamBackoffState()
+		retryAfter := int(remain.Seconds())
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		http.Error(w, "upstream temporarily unavailable: "+reason, http.StatusServiceUnavailable)
+		return
+	}
 	originalPath := r.URL.Path
 	filePath := originalPath
 
@@ -4226,6 +4504,16 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 // handleWebDAV 处理 WebDAV 请求
 func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	if p.shouldFastFailUpstream() {
+		_, remain, reason := p.upstreamBackoffState()
+		retryAfter := int(remain.Seconds())
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		http.Error(w, "upstream temporarily unavailable: "+reason, http.StatusServiceUnavailable)
+		return
+	}
 	// 1. 查找加密配置
 	filePath := r.URL.Path
 	matchPath := filePath
@@ -4510,7 +4798,8 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 	// PROPFIND 404 重试机制 (因为我们不知道请求的是目录还是加密文件)
 	// 如果默认透传 (当作目录) 失败，尝试加密文件名再试 (当作文件)
-	if r.Method == "PROPFIND" && resp.StatusCode == 404 && encPath != nil && encPath.EncName {
+	if r.Method == "PROPFIND" && resp.StatusCode == 404 && encPath != nil && encPath.EncName &&
+		shouldRetryPropfind404(r.Header.Get("Depth"), filePath) {
 		// 关闭旧响应体
 		resp.Body.Close()
 
@@ -4534,7 +4823,9 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				retryBody = bytes.NewReader(reqBodyBytes)
 			}
 
-			retryReq, _ := http.NewRequestWithContext(reqCtx, r.Method, retryTargetURL, retryBody)
+			retryCtx, retryCancel := context.WithTimeout(r.Context(), p.propfindRetryTimeout())
+			defer retryCancel()
+			retryReq, _ := http.NewRequestWithContext(retryCtx, r.Method, retryTargetURL, retryBody)
 			// Copy headers
 			for key, values := range r.Header {
 				if key != "Host" {

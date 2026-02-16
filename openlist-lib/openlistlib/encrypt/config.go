@@ -22,38 +22,43 @@ type ConfigManager struct {
 // DefaultConfig 默认配置
 func DefaultConfig() *ProxyConfig {
 	return &ProxyConfig{
-		AlistHost:                   "127.0.0.1",
-		AlistPort:                   5244,
-		AlistHttps:                  false,
-		ProxyPort:                   5344,
-		UpstreamTimeoutSeconds:      8,
-		ProbeTimeoutSeconds:         3,
-		ProbeBudgetSeconds:          5,
-		UpstreamBackoffSeconds:      20,
-		EnableLocalBypass:           true,
-		ProbeOnDownload:             true,  // 默认开启，确保能正确获取文件大小以解密
-		EnableH2C:                   false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
-		EnableSizeMap:               true,
-		SizeMapTTL:                  1440,
-		EnableRangeCompatCache:      true,
-		RangeCompatTTL:              10,
-		RangeCompatMinFailures:      2,
-		RangeSkipMaxBytes:           8 * 1024 * 1024,
-		RedirectCacheTTLMinutes:     1440,
-		EnableParallelDecrypt:       false,
-		ParallelDecryptConcurrency:  4,
-		StreamBufferKB:              512,
-		DebugEnabled:                false,
-		DebugLevel:                  "info",
-		DebugMaskSensitive:          true,
-		DebugSampleRate:             100,
-		DebugLogBodyBytes:           0,
-		EnableDBExportSync:          false,
-		DBExportBaseURL:             "",
-		DBExportSyncIntervalSeconds: defaultDBExportSyncIntervalSecs,
-		DBExportAuthEnabled:         false,
-		DBExportUsername:            "admin",
-		DBExportPassword:            "",
+		AlistHost:                     "127.0.0.1",
+		AlistPort:                     5244,
+		AlistHttps:                    false,
+		ProxyPort:                     5344,
+		UpstreamTimeoutSeconds:        8,
+		ProbeTimeoutSeconds:           3,
+		ProbeBudgetSeconds:            5,
+		UpstreamBackoffSeconds:        20,
+		EnableLocalBypass:             true,
+		ProbeOnDownload:               true,  // 默认开启，确保能正确获取文件大小以解密
+		EnableH2C:                     false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
+		ProbeStrategyTTLMinutes:       defaultProbeStrategyTTLMinutes,
+		ProbeStrategyStableThreshold:  int(defaultProbeStrategyStableThreshold),
+		ProbeStrategyFailureThreshold: int(defaultProbeStrategyFailureThreshold),
+		EnableSizeMap:                 true,
+		SizeMapTTL:                    defaultSizeMapTTLMinutes,
+		EnableRangeCompatCache:        true,
+		RangeCompatTTL:                defaultRangeCompatTTLMinutes,
+		RangeCompatMinFailures:        2,
+		RangeSkipMaxBytes:             8 * 1024 * 1024,
+		RedirectCacheTTLMinutes:       1440,
+		EnableParallelDecrypt:         true,
+		ParallelDecryptConcurrency:    4,
+		StreamBufferKB:                512,
+		DebugEnabled:                  false,
+		DebugLevel:                    "info",
+		DebugMaskSensitive:            true,
+		DebugSampleRate:               100,
+		DebugLogBodyBytes:             0,
+		LocalSizeRetentionDays:        defaultLocalSizeRetentionDays,
+		LocalStrategyRetentionDays:    defaultLocalStrategyRetentionDays,
+		EnableDBExportSync:            false,
+		DBExportBaseURL:               "",
+		DBExportSyncIntervalSeconds:   defaultDBExportSyncIntervalSecs,
+		DBExportAuthEnabled:           false,
+		DBExportUsername:              "admin",
+		DBExportPassword:              "",
 		EncryptPaths: []*EncryptPath{
 			{
 				Path:     "encrypt_folder/*",
@@ -138,8 +143,20 @@ func (m *ConfigManager) Load() error {
 	if config.DBExportSyncIntervalSeconds <= 0 {
 		config.DBExportSyncIntervalSeconds = defaultDBExportSyncIntervalSecs
 	}
+	if config.ProbeStrategyTTLMinutes <= 0 {
+		config.ProbeStrategyTTLMinutes = defaultProbeStrategyTTLMinutes
+	}
+	if config.ProbeStrategyStableThreshold <= 0 {
+		config.ProbeStrategyStableThreshold = int(defaultProbeStrategyStableThreshold)
+	}
+	if config.ProbeStrategyFailureThreshold <= 0 {
+		config.ProbeStrategyFailureThreshold = int(defaultProbeStrategyFailureThreshold)
+	}
+	if config.SizeMapTTL <= 0 {
+		config.SizeMapTTL = defaultSizeMapTTLMinutes
+	}
 	if config.RangeCompatTTL <= 0 {
-		config.RangeCompatTTL = 10
+		config.RangeCompatTTL = defaultRangeCompatTTLMinutes
 	}
 	if config.RangeCompatMinFailures <= 0 {
 		config.RangeCompatMinFailures = 2
@@ -155,6 +172,12 @@ func (m *ConfigManager) Load() error {
 	}
 	if config.DebugSampleRate <= 0 || config.DebugSampleRate > 100 {
 		config.DebugSampleRate = 100
+	}
+	if config.LocalSizeRetentionDays <= 0 {
+		config.LocalSizeRetentionDays = defaultLocalSizeRetentionDays
+	}
+	if config.LocalStrategyRetentionDays <= 0 {
+		config.LocalStrategyRetentionDays = defaultLocalStrategyRetentionDays
 	}
 	if !config.DebugMaskSensitive && !config.DebugEnabled && config.DebugLogBodyBytes == 0 {
 		config.DebugMaskSensitive = true

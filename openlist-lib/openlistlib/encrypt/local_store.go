@@ -158,15 +158,22 @@ func (s *localStore) Close() error {
 	return nil
 }
 
-func (s *localStore) Cleanup(olderThan time.Duration) error {
+func (s *localStore) Cleanup(sizeOlderThan, strategyOlderThan time.Duration) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	cutoff := time.Now().Add(-olderThan).Unix()
-	if _, err := s.db.Exec("DELETE FROM local_media_size WHERE last_accessed < ?", cutoff); err != nil {
+	if sizeOlderThan <= 0 {
+		sizeOlderThan = time.Duration(defaultLocalSizeRetentionDays) * 24 * time.Hour
+	}
+	if strategyOlderThan <= 0 {
+		strategyOlderThan = time.Duration(defaultLocalStrategyRetentionDays) * 24 * time.Hour
+	}
+	sizeCutoff := time.Now().Add(-sizeOlderThan).Unix()
+	if _, err := s.db.Exec("DELETE FROM local_media_size WHERE last_accessed < ?", sizeCutoff); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec("DELETE FROM local_media_strategy WHERE last_accessed < ?", cutoff); err != nil {
+	strategyCutoff := time.Now().Add(-strategyOlderThan).Unix()
+	if _, err := s.db.Exec("DELETE FROM local_media_strategy WHERE last_accessed < ?", strategyCutoff); err != nil {
 		return err
 	}
 	return nil
