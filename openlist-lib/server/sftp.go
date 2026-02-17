@@ -22,15 +22,20 @@ import (
 type SftpDriver struct {
 	proxyHeader http.Header
 	config      *sftpd.Config
+	baseCtx     context.Context
+	cancel      context.CancelFunc
 }
 
 func NewSftpDriver() (*SftpDriver, error) {
 	ftp.InitStage()
 	sftp.InitHostKey()
+	baseCtx, cancel := context.WithCancel(context.Background())
 	return &SftpDriver{
 		proxyHeader: http.Header{
 			"User-Agent": {base.UserAgent},
 		},
+		baseCtx: baseCtx,
+		cancel:  cancel,
 	}, nil
 }
 
@@ -67,7 +72,10 @@ func (d *SftpDriver) GetFileSystem(sc *ssh.ServerConn) (sftpd.FileSystem, error)
 	if err != nil {
 		return nil, err
 	}
-	ctx := context.Background()
+	ctx := d.baseCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx = context.WithValue(ctx, conf.UserKey, userObj)
 	ctx = context.WithValue(ctx, conf.MetaPassKey, "")
 	ctx = context.WithValue(ctx, conf.ClientIPKey, sc.RemoteAddr().String())
@@ -76,6 +84,9 @@ func (d *SftpDriver) GetFileSystem(sc *ssh.ServerConn) (sftpd.FileSystem, error)
 }
 
 func (d *SftpDriver) Close() {
+	if d.cancel != nil {
+		d.cancel()
+	}
 }
 
 func (d *SftpDriver) NoClientAuth(conn ssh.ConnMetadata) (*ssh.Permissions, error) {

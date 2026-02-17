@@ -18,6 +18,31 @@ import (
 	"gorm.io/gorm/schema"
 )
 
+func applyDBPoolLimits(dbType string, sqlDB interface {
+	SetMaxOpenConns(int)
+	SetMaxIdleConns(int)
+	SetConnMaxLifetime(time.Duration)
+	SetConnMaxIdleTime(time.Duration)
+}) {
+	switch dbType {
+	case "sqlite3":
+		sqlDB.SetMaxOpenConns(1)
+		sqlDB.SetMaxIdleConns(1)
+		sqlDB.SetConnMaxLifetime(30 * time.Minute)
+		sqlDB.SetConnMaxIdleTime(10 * time.Minute)
+	case "mysql", "postgres":
+		sqlDB.SetMaxOpenConns(64)
+		sqlDB.SetMaxIdleConns(16)
+		sqlDB.SetConnMaxLifetime(30 * time.Minute)
+		sqlDB.SetConnMaxIdleTime(10 * time.Minute)
+	default:
+		sqlDB.SetMaxOpenConns(32)
+		sqlDB.SetMaxIdleConns(8)
+		sqlDB.SetConnMaxLifetime(30 * time.Minute)
+		sqlDB.SetConnMaxIdleTime(10 * time.Minute)
+	}
+}
+
 func InitDB() {
 	logLevel := logger.Silent
 	if flags.Debug || flags.Dev {
@@ -84,6 +109,11 @@ func InitDB() {
 	}
 	if err != nil {
 		log.Fatalf("failed to connect database:%s", err.Error())
+	}
+	if sqlDB, err := dB.DB(); err == nil {
+		applyDBPoolLimits(conf.Conf.Database.Type, sqlDB)
+	} else {
+		log.Warnf("failed to configure db pool limits: %v", err)
 	}
 	db.Init(dB)
 }

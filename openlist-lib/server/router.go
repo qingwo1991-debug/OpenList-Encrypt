@@ -37,7 +37,24 @@ func Init(e *gin.Engine) {
 	common.SecretKey = []byte(conf.Conf.JwtSecret)
 	g.Use(middlewares.StoragesLoaded)
 	if conf.Conf.MaxConnections > 0 {
-		g.Use(middlewares.MaxAllowed(conf.Conf.MaxConnections))
+		total := conf.Conf.MaxConnections
+		authN := total / 10
+		apiN := total / 4
+		webdavN := total / 4
+		downloadN := total - authN - apiN - webdavN
+		if authN < 1 {
+			authN = 1
+		}
+		if apiN < 1 {
+			apiN = 1
+		}
+		if webdavN < 1 {
+			webdavN = 1
+		}
+		if downloadN < 1 {
+			downloadN = 1
+		}
+		g.Use(middlewares.MaxAllowedByClass(authN, apiN, downloadN, webdavN))
 	}
 	WebDav(g.Group("/dav"))
 	S3(g.Group("/s3"))

@@ -139,6 +139,26 @@ func (c *ChaCha20Encryptor) Decrypt(data []byte) ([]byte, error) {
 	return c.Encrypt(data)
 }
 
+// EncryptInplace 原地加密，减少每块内存分配
+func (c *ChaCha20Encryptor) EncryptInplace(data []byte) error {
+	for i := range data {
+		if c.byteIdx >= 64 {
+			c.chacha()
+			c.param[12]++
+			c.byteIdx = 0
+		}
+		data[i] ^= c.keystream[c.byteIdx]
+		c.byteIdx++
+	}
+	c.position += int64(len(data))
+	return nil
+}
+
+// DecryptInplace 原地解密（ChaCha20 对称）
+func (c *ChaCha20Encryptor) DecryptInplace(data []byte) error {
+	return c.EncryptInplace(data)
+}
+
 // SetPosition 设置流位置
 func (c *ChaCha20Encryptor) SetPosition(position int64) error {
 	// 计算需要跳过的块数和块内偏移

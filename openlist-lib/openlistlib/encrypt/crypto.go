@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
@@ -31,7 +32,11 @@ const (
 )
 
 // 缓存密码外部密钥
-var passwdOutwardCache = make(map[string]string)
+var (
+	passwdOutwardCache  = make(map[string]string)
+	passwdOutwardMu     sync.RWMutex
+	showNameDecodeCache sync.Map
+)
 
 // CRC6 实例
 var crc6 = NewCRC6()
@@ -63,6 +68,32 @@ var showNameCache = &ShowNameCache{}
 
 // showNameCacheMaxSize 缓存最大条目数
 const showNameCacheMaxSize = 50000
+const showNameDecodeCacheTTL = 10 * time.Minute
+
+type decodeCacheEntry struct {
+	value    string
+	expireAt time.Time
+}
+
+func showNameDecodeCacheKey(password string, encType EncryptionType, encName string) string {
+	return password + "|" + string(encType) + "|" + encName
+}
+
+func decodeNameCached(password string, encType EncryptionType, encName string) string {
+	key := showNameDecodeCacheKey(password, encType, encName)
+	if v, ok := showNameDecodeCache.Load(key); ok {
+		if entry, ok := v.(*decodeCacheEntry); ok && time.Now().Before(entry.expireAt) {
+			return entry.value
+		}
+		showNameDecodeCache.Delete(key)
+	}
+	decoded := DecodeName(password, encType, encName)
+	showNameDecodeCache.Store(key, &decodeCacheEntry{
+		value:    decoded,
+		expireAt: time.Now().Add(showNameDecodeCacheTTL),
+	})
+	return decoded
+}
 
 // CacheNameMapping 缓存显示名到真实加密名的映射
 func CacheNameMapping(dir, showName, realEncName string) {
@@ -90,6 +121,7 @@ func GetCachedRealName(dir, showName string) (string, bool) {
 func ClearShowNameCache() {
 	showNameCache.cache = sync.Map{}
 	showNameCache.size = 0
+	showNameDecodeCache = sync.Map{}
 }
 
 // stripExternalSuffix 尝试剥离外部添加的后缀，返回剥离后的字符串和剥离的后缀
@@ -112,6 +144,12 @@ type FlowEncryptor interface {
 	SetPosition(position int64) error
 	// GetPosition 获取当前位置
 	GetPosition() int64
+}
+
+// InplaceFlowEncryptor 可选的原地加解密接口，用于减少每块分配与拷贝
+type InplaceFlowEncryptor interface {
+	EncryptInplace(data []byte) error
+	DecryptInplace(data []byte) error
 }
 
 // AESCTREncryptor AES-CTR 加密器
@@ -229,6 +267,18 @@ func (e *AESCTREncryptor) Decrypt(data []byte) ([]byte, error) {
 	return e.Encrypt(data)
 }
 
+// EncryptInplace 原地加密，避免每次分配新切片
+func (e *AESCTREncryptor) EncryptInplace(data []byte) error {
+	e.cipher.XORKeyStream(data, data)
+	e.position += int64(len(data))
+	return nil
+}
+
+// DecryptInplace 原地解密（CTR 对称）
+func (e *AESCTREncryptor) DecryptInplace(data []byte) error {
+	return e.EncryptInplace(data)
+}
+
 // RC4MD5Encryptor RC4-MD5 加密器 (Wrapper for CustomRC4)
 type RC4MD5Encryptor struct {
 	customRC4 *CustomRC4
@@ -260,6 +310,17 @@ func (e *RC4MD5Encryptor) Decrypt(data []byte) ([]byte, error) {
 	return e.Encrypt(data)
 }
 
+// EncryptInplace 原地加密，避免每次分配新切片
+func (e *RC4MD5Encryptor) EncryptInplace(data []byte) error {
+	e.customRC4.XORKeyStream(data, data)
+	return nil
+}
+
+// DecryptInplace 原地解密（RC4 对称）
+func (e *RC4MD5Encryptor) DecryptInplace(data []byte) error {
+	return e.EncryptInplace(data)
+}
+
 // NewFlowEncryptor 创建流加密器
 func NewFlowEncryptor(password string, encType EncryptionType, fileSize int64) (FlowEncryptor, error) {
 	passwdOutward := GetPasswdOutward(password, encType)
@@ -280,7 +341,10 @@ func NewFlowEncryptor(password string, encType EncryptionType, fileSize int64) (
 // GetPasswdOutward 获取外部密码（用于文件名加密）
 func GetPasswdOutward(password string, encType EncryptionType) string {
 	key := password + string(encType)
-	if cached, ok := passwdOutwardCache[key]; ok {
+	passwdOutwardMu.RLock()
+	cached, ok := passwdOutwardCache[key]
+	passwdOutwardMu.RUnlock()
+	if ok {
 		return cached
 	}
 
@@ -312,7 +376,9 @@ func GetPasswdOutward(password string, encType EncryptionType) string {
 		passwdOutward = password
 	}
 
+	passwdOutwardMu.Lock()
 	passwdOutwardCache[key] = passwdOutward
+	passwdOutwardMu.Unlock()
 	return passwdOutward
 }
 
@@ -336,11 +402,17 @@ func NewEncryptReader(reader io.Reader, encryptor FlowEncryptor) *EncryptReader 
 func (r *EncryptReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
 	if n > 0 {
-		encrypted, encErr := r.encryptor.Encrypt(p[:n])
-		if encErr != nil {
-			return 0, encErr
+		if inplace, ok := r.encryptor.(InplaceFlowEncryptor); ok {
+			if encErr := inplace.EncryptInplace(p[:n]); encErr != nil {
+				return 0, encErr
+			}
+		} else {
+			encrypted, encErr := r.encryptor.Encrypt(p[:n])
+			if encErr != nil {
+				return 0, encErr
+			}
+			copy(p[:n], encrypted)
 		}
-		copy(p[:n], encrypted)
 	}
 	return n, err
 }
@@ -363,11 +435,17 @@ func NewDecryptReader(reader io.Reader, encryptor FlowEncryptor) *DecryptReader 
 func (r *DecryptReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
 	if n > 0 {
-		decrypted, decErr := r.encryptor.Decrypt(p[:n])
-		if decErr != nil {
-			return 0, decErr
+		if inplace, ok := r.encryptor.(InplaceFlowEncryptor); ok {
+			if decErr := inplace.DecryptInplace(p[:n]); decErr != nil {
+				return 0, decErr
+			}
+		} else {
+			decrypted, decErr := r.encryptor.Decrypt(p[:n])
+			if decErr != nil {
+				return 0, decErr
+			}
+			copy(p[:n], decrypted)
 		}
-		copy(p[:n], decrypted)
 	}
 	return n, err
 }
@@ -514,12 +592,12 @@ func ConvertShowName(password string, encType EncryptionType, pathText string) s
 	encName := strings.TrimSuffix(fileName, ext)
 
 	// 尝试解码
-	showName := DecodeName(password, encType, encName)
+	showName := decodeNameCached(password, encType, encName)
 	if showName == "" {
 		// 第一次解码失败，尝试剥离外部添加的后缀后再解码
 		strippedName, suffix := stripExternalSuffix(encName)
 		if suffix != "" {
-			showName = DecodeName(password, encType, strippedName)
+			showName = decodeNameCached(password, encType, strippedName)
 			if showName != "" {
 				log.Debugf("[%s] ConvertShowName: decoded after stripping suffix %q: %q -> %q", internal.TagDecrypt, suffix, encName, showName)
 				// 缓存映射：显示名 -> 真实加密名（包含外部后缀）

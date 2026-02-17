@@ -63,6 +63,18 @@ var (
 	sftpRunning  bool
 )
 
+func defaultHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      0, // 下载/流式场景允许长写
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1MB
+	}
+}
+
 // Called by OpenList-Mobile
 func IsRunning(t string) bool {
 	switch t {
@@ -114,7 +126,7 @@ func Start() {
 		httpBase := fmt.Sprintf("%s:%d", conf.Conf.Scheme.Address, conf.Conf.Scheme.HttpPort)
 		fmt.Printf("start HTTP server @ %s\n", httpBase)
 		utils.Log.Infof("start HTTP server @ %s", httpBase)
-		httpSrv = &http.Server{Addr: httpBase, Handler: httpHandler}
+		httpSrv = defaultHTTPServer(httpBase, httpHandler)
 		go func() {
 			httpRunning = true
 			err := httpSrv.ListenAndServe()
@@ -131,7 +143,7 @@ func Start() {
 		httpsBase := fmt.Sprintf("%s:%d", conf.Conf.Scheme.Address, conf.Conf.Scheme.HttpsPort)
 		fmt.Printf("start HTTPS server @ %s\n", httpsBase)
 		utils.Log.Infof("start HTTPS server @ %s", httpsBase)
-		httpsSrv = &http.Server{Addr: httpsBase, Handler: r}
+		httpsSrv = defaultHTTPServer(httpsBase, r)
 		go func() {
 			httpsRunning = true
 			err := httpsSrv.ListenAndServeTLS(conf.Conf.Scheme.CertFile, conf.Conf.Scheme.KeyFile)
@@ -170,7 +182,7 @@ func Start() {
 	if conf.Conf.Scheme.UnixFile != "" {
 		fmt.Printf("start unix server @ %s\n", conf.Conf.Scheme.UnixFile)
 		utils.Log.Infof("start unix server @ %s", conf.Conf.Scheme.UnixFile)
-		unixSrv = &http.Server{Handler: httpHandler}
+		unixSrv = defaultHTTPServer("", httpHandler)
 		go func() {
 			listener, err := net.Listen("unix", conf.Conf.Scheme.UnixFile)
 			if err != nil {
@@ -209,10 +221,10 @@ func Start() {
 			s3Running = true
 			var err error
 			if conf.Conf.S3.SSL {
-				s3Srv = &http.Server{Addr: s3Base, Handler: s3r}
+				s3Srv = defaultHTTPServer(s3Base, s3r)
 				err = s3Srv.ListenAndServeTLS(conf.Conf.Scheme.CertFile, conf.Conf.Scheme.KeyFile)
 			} else {
-				s3Srv = &http.Server{Addr: s3Base, Handler: s3r}
+				s3Srv = defaultHTTPServer(s3Base, s3r)
 				err = s3Srv.ListenAndServe()
 			}
 			s3Running = false

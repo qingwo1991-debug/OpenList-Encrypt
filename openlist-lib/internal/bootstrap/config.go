@@ -86,7 +86,7 @@ func InitConfig() {
 		if err != nil {
 			log.Fatalf("marshal config error: %+v", err)
 		}
-		err = os.WriteFile(configPath, confBody, 0o777)
+		err = os.WriteFile(configPath, confBody, 0o644)
 		if err != nil {
 			log.Fatalf("update config struct error: %+v", err)
 		}
@@ -135,7 +135,7 @@ func InitConfig() {
 	convertAbsPath(&conf.Conf.BleveDir)
 	convertAbsPath(&conf.Conf.DistDir)
 
-	err := os.MkdirAll(conf.Conf.TempDir, 0o777)
+	err := os.MkdirAll(conf.Conf.TempDir, 0o755)
 	if err != nil {
 		log.Fatalf("create temp dir error: %+v", err)
 	}

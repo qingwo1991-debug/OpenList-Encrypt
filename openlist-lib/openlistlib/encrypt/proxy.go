@@ -1,6 +1,7 @@
 package encrypt
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -8,6 +9,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net"
 	"net/http"
@@ -17,9 +19,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
@@ -49,6 +53,14 @@ const (
 	maxParallelDecryptLimit = 32
 	// defaultRangeSkipMaxBytes 当上游不支持 Range 时，本地最多跳过的字节数
 	defaultRangeSkipMaxBytes = 8 * 1024 * 1024
+	// encryptedPrefetchMaxDirs 单次最多预热的子目录数
+	encryptedPrefetchMaxDirs = 20
+	// encryptedPrefetchConcurrency 预热并发
+	encryptedPrefetchConcurrency = 4
+	// encryptedPrefetchCooldown 同一路径预热冷却窗口
+	encryptedPrefetchCooldown = 45 * time.Second
+	// upstreamFailureThreshold 连续失败达到该阈值才触发全局快速失败
+	upstreamFailureThreshold = 3
 )
 
 // streamBufferSize 流传输缓冲区大小 (默认 512KB)
@@ -310,6 +322,160 @@ func syncMapLen(m *sync.Map) int {
 	return count
 }
 
+const cacheShardCount = 64
+
+type mapShard struct {
+	mu sync.RWMutex
+	m  map[string]interface{}
+}
+
+type shardedAnyMap struct {
+	shards []mapShard
+}
+
+type upstreamHTTPStats struct {
+	requests       atomic.Int64
+	errors         atomic.Int64
+	totalLatencyNs atomic.Int64
+}
+
+func (s *upstreamHTTPStats) record(d time.Duration, err error, statusCode int) {
+	if s == nil {
+		return
+	}
+	s.requests.Add(1)
+	s.totalLatencyNs.Add(d.Nanoseconds())
+	if err != nil || statusCode >= 500 {
+		s.errors.Add(1)
+	}
+}
+
+func (s *upstreamHTTPStats) snapshot() map[string]interface{} {
+	if s == nil {
+		return map[string]interface{}{}
+	}
+	req := s.requests.Load()
+	errCnt := s.errors.Load()
+	total := s.totalLatencyNs.Load()
+	avgMs := int64(0)
+	if req > 0 {
+		avgMs = (total / req) / int64(time.Millisecond)
+	}
+	return map[string]interface{}{
+		"requests":       req,
+		"errors":         errCnt,
+		"avg_latency_ms": avgMs,
+	}
+}
+
+type instrumentedRoundTripper struct {
+	base  http.RoundTripper
+	stats *upstreamHTTPStats
+}
+
+func (rt *instrumentedRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	start := time.Now()
+	resp, err := rt.base.RoundTrip(req)
+	statusCode := 0
+	if resp != nil {
+		statusCode = resp.StatusCode
+	}
+	rt.stats.record(time.Since(start), err, statusCode)
+	return resp, err
+}
+
+func newShardedAnyMap(shards int) *shardedAnyMap {
+	if shards <= 0 {
+		shards = cacheShardCount
+	}
+	out := &shardedAnyMap{shards: make([]mapShard, shards)}
+	for i := range out.shards {
+		out.shards[i].m = make(map[string]interface{})
+	}
+	return out
+}
+
+func (m *shardedAnyMap) shardFor(key string) *mapShard {
+	if m == nil || len(m.shards) == 0 {
+		return nil
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return &m.shards[int(h.Sum32())%len(m.shards)]
+}
+
+func (m *shardedAnyMap) Set(key string, val interface{}) {
+	s := m.shardFor(key)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.m[key] = val
+	s.mu.Unlock()
+}
+
+// Store provides sync.Map-like compatibility for tests/callers.
+func (m *shardedAnyMap) Store(key string, val interface{}) {
+	m.Set(key, val)
+}
+
+func (m *shardedAnyMap) Get(key string) (interface{}, bool) {
+	s := m.shardFor(key)
+	if s == nil {
+		return nil, false
+	}
+	s.mu.RLock()
+	v, ok := s.m[key]
+	s.mu.RUnlock()
+	return v, ok
+}
+
+// Load provides sync.Map-like compatibility for tests/callers.
+func (m *shardedAnyMap) Load(key string) (interface{}, bool) {
+	return m.Get(key)
+}
+
+func (m *shardedAnyMap) Delete(key string) {
+	s := m.shardFor(key)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.m, key)
+	s.mu.Unlock()
+}
+
+func (m *shardedAnyMap) Len() int {
+	if m == nil {
+		return 0
+	}
+	total := 0
+	for i := range m.shards {
+		s := &m.shards[i]
+		s.mu.RLock()
+		total += len(s.m)
+		s.mu.RUnlock()
+	}
+	return total
+}
+
+func (m *shardedAnyMap) Range(fn func(string, interface{}) bool) {
+	if m == nil || fn == nil {
+		return
+	}
+	for i := range m.shards {
+		s := &m.shards[i]
+		s.mu.RLock()
+		for k, v := range s.m {
+			if !fn(k, v) {
+				s.mu.RUnlock()
+				return
+			}
+		}
+		s.mu.RUnlock()
+	}
+}
+
 // ProbeMethod 探测方法类型
 type ProbeMethod string
 
@@ -319,10 +485,13 @@ const (
 	ProbeMethodWebDAV ProbeMethod = "webdav" // WebDAV PROPFIND
 )
 
-// probeStrategyCache 探测策略缓存（按加密路径 pattern）
-// key: 加密路径 pattern (如 "movie_encrypt/*")
+// probeStrategyCache 探测策略缓存（按盘/路径 scope）
+// key: path=<encryptPattern>|host=<upstreamHost>
 // value: *ProbeStrategy
 var probeStrategyCache sync.Map
+var probeMethodStats = &ProbeMethodStats{
+	byScope: make(map[string]map[ProbeMethod]*ProbeMethodCounter),
+}
 
 // ProbeStrategy 探测策略（学习到的成功方法）
 type ProbeStrategy struct {
@@ -331,6 +500,86 @@ type ProbeStrategy struct {
 	FailCount    int64       // 连续失败次数
 	UpdatedAt    time.Time   // 最近更新（用于 TTL）
 	mutex        sync.Mutex
+}
+
+type ProbeMethodCounter struct {
+	Success  int64 `json:"success"`
+	Fail     int64 `json:"fail"`
+	CacheHit int64 `json:"cache_hit"`
+}
+
+type ProbeMethodStats struct {
+	mu      sync.Mutex
+	byScope map[string]map[ProbeMethod]*ProbeMethodCounter
+}
+
+func (s *ProbeMethodStats) record(scopeKey string, method ProbeMethod, success bool, cacheHit bool) {
+	if s == nil || scopeKey == "" || method == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byScope == nil {
+		s.byScope = make(map[string]map[ProbeMethod]*ProbeMethodCounter)
+	}
+	scope := s.byScope[scopeKey]
+	if scope == nil {
+		scope = make(map[ProbeMethod]*ProbeMethodCounter)
+		s.byScope[scopeKey] = scope
+	}
+	counter := scope[method]
+	if counter == nil {
+		counter = &ProbeMethodCounter{}
+		scope[method] = counter
+	}
+	if success {
+		counter.Success++
+	} else {
+		counter.Fail++
+	}
+	if cacheHit {
+		counter.CacheHit++
+	}
+}
+
+func (s *ProbeMethodStats) counter(scopeKey string, method ProbeMethod) ProbeMethodCounter {
+	if s == nil || scopeKey == "" || method == "" {
+		return ProbeMethodCounter{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byScope == nil {
+		return ProbeMethodCounter{}
+	}
+	scope := s.byScope[scopeKey]
+	if scope == nil {
+		return ProbeMethodCounter{}
+	}
+	counter := scope[method]
+	if counter == nil {
+		return ProbeMethodCounter{}
+	}
+	return *counter
+}
+
+func (s *ProbeMethodStats) snapshot() map[string]map[ProbeMethod]ProbeMethodCounter {
+	result := make(map[string]map[ProbeMethod]ProbeMethodCounter)
+	if s == nil {
+		return result
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for scopeKey, scope := range s.byScope {
+		copied := make(map[ProbeMethod]ProbeMethodCounter)
+		for method, counter := range scope {
+			if counter == nil {
+				continue
+			}
+			copied[method] = *counter
+		}
+		result[scopeKey] = copied
+	}
+	return result
 }
 
 const (
@@ -405,6 +654,12 @@ type EncryptPath struct {
 	EncName  bool           `json:"encName"`  // 是否加密文件名
 	Enable   bool           `json:"enable"`   // 是否启用
 	regex    *regexp.Regexp // 编译后的正则表达式
+	prefix   string         // 可走快速前缀匹配的规则前缀
+}
+
+type encryptPrefixRule struct {
+	prefix string
+	ep     *EncryptPath
 }
 
 // ProxyConfig 代理配置
@@ -502,9 +757,9 @@ type ProxyServer struct {
 	server              *http.Server
 	running             bool
 	mutex               sync.RWMutex
-	fileCache           sync.Map // 文件信息缓存 (path -> *CachedFileInfo)
-	fileCacheCount      int64    // 缓存条目计数
-	redirectCache       sync.Map // 重定向缓存 (key -> *CachedRedirectInfo)
+	fileCache           *shardedAnyMap
+	fileCacheCount      int64 // 缓存条目计数
+	redirectCache       *shardedAnyMap
 	sizeMapMu           sync.RWMutex
 	sizeMap             map[string]SizeMapEntry
 	sizeMapPath         string
@@ -521,6 +776,12 @@ type ProxyServer struct {
 	upstreamMu          sync.RWMutex
 	upstreamDownAt      time.Time
 	upstreamError       string
+	upstreamFailures    int
+	prefetchRecent      *shardedAnyMap // dirPath -> time.Time
+	prefixRules         []encryptPrefixRule
+	controlHTTPStats    upstreamHTTPStats
+	probeHTTPStats      upstreamHTTPStats
+	streamHTTPStats     upstreamHTTPStats
 }
 
 // FileInfo 文件信息
@@ -563,6 +824,60 @@ func applyLearningDefaults(cfg *ProxyConfig) {
 	}
 }
 
+func (p *ProxyServer) ensureRuntimeCaches() {
+	if p == nil {
+		return
+	}
+	if p.fileCache == nil {
+		p.fileCache = newShardedAnyMap(cacheShardCount)
+	}
+	if p.redirectCache == nil {
+		p.redirectCache = newShardedAnyMap(cacheShardCount)
+	}
+	if p.prefetchRecent == nil {
+		p.prefetchRecent = newShardedAnyMap(cacheShardCount)
+	}
+}
+
+func normalizeRulePrefix(raw string) (string, bool) {
+	if raw == "" || strings.HasPrefix(raw, "^") {
+		return "", false
+	}
+	base := raw
+	if strings.HasSuffix(base, "/*") {
+		base = strings.TrimSuffix(base, "/*")
+	} else if strings.HasSuffix(base, "/") {
+		base = strings.TrimSuffix(base, "/")
+	}
+	if base == "" {
+		return "/", true
+	}
+	if strings.ContainsAny(base, "*?[](){}+|\\") {
+		return "", false
+	}
+	if !strings.HasPrefix(base, "/") {
+		base = "/" + base
+	}
+	return path.Clean(base), true
+}
+
+func (p *ProxyServer) rebuildEncryptPathIndex() {
+	if p == nil || p.config == nil {
+		return
+	}
+	rules := make([]encryptPrefixRule, 0, len(p.config.EncryptPaths))
+	for _, ep := range p.config.EncryptPaths {
+		if ep == nil || !ep.Enable || ep.prefix == "" {
+			continue
+		}
+		rules = append(rules, encryptPrefixRule{prefix: ep.prefix, ep: ep})
+	}
+	sort.SliceStable(rules, func(i, j int) bool {
+		return len(rules[i].prefix) > len(rules[j].prefix)
+	})
+	p.prefixRules = rules
+}
+
 // NewProxyServer 创建代理服务器
 func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	if config == nil {
@@ -588,6 +903,11 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 			continue
 		}
 		raw := ep.Path
+		if pref, ok := normalizeRulePrefix(raw); ok {
+			ep.prefix = pref
+		} else {
+			ep.prefix = ""
+		}
 		// 处理以 /* 结尾的目录匹配
 		if strings.HasSuffix(raw, "/*") {
 			base := strings.TrimSuffix(raw, "/*")
@@ -732,15 +1052,22 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	}
 
 	server := &ProxyServer{
-		config:       config,
-		transport:    transport,
-		h2cTransport: h2cTransport,
-		httpClient:   httpClient,
-		probeClient:  probeClient,
-		streamClient: streamClient,
-		cleanupDone:  make(chan struct{}),
-		metaSyncDone: make(chan struct{}),
+		config:         config,
+		transport:      transport,
+		h2cTransport:   h2cTransport,
+		httpClient:     httpClient,
+		probeClient:    probeClient,
+		streamClient:   streamClient,
+		fileCache:      newShardedAnyMap(cacheShardCount),
+		redirectCache:  newShardedAnyMap(cacheShardCount),
+		prefetchRecent: newShardedAnyMap(cacheShardCount),
+		cleanupDone:    make(chan struct{}),
+		metaSyncDone:   make(chan struct{}),
 	}
+	httpClient.Transport = &instrumentedRoundTripper{base: httpClient.Transport, stats: &server.controlHTTPStats}
+	probeClient.Transport = &instrumentedRoundTripper{base: probeClient.Transport, stats: &server.probeHTTPStats}
+	streamClient.Transport = &instrumentedRoundTripper{base: streamClient.Transport, stats: &server.streamHTTPStats}
+	server.rebuildEncryptPathIndex()
 
 	// 启动缓存清理协程
 	server.startCacheCleanup()
@@ -782,7 +1109,14 @@ func (p *ProxyServer) initSizeMap() {
 		return
 	}
 	p.sizeMap = make(map[string]SizeMapEntry)
-	p.sizeMapDone = nil
+	if p.sizeMapPath == "" && p.config.ConfigPath != "" {
+		p.sizeMapPath = filepath.Join(filepath.Dir(p.config.ConfigPath), "size_map.json")
+	}
+	p.loadSizeMap()
+	if p.sizeMapDone == nil {
+		p.sizeMapDone = make(chan struct{})
+		go p.sizeMapLoop()
+	}
 }
 
 func (p *ProxyServer) sizeMapLoop() {
@@ -1015,11 +1349,12 @@ func (p *ProxyServer) markRangeCompatible(targetURL string) {
 
 // cleanupExpiredCache 清理过期的缓存条目
 func (p *ProxyServer) cleanupExpiredCache() {
+	p.ensureRuntimeCaches()
 	now := time.Now()
 	var deletedCount int64
 
 	// 清理文件缓存
-	p.fileCache.Range(func(key, value interface{}) bool {
+	p.fileCache.Range(func(key string, value interface{}) bool {
 		if cached, ok := value.(*CachedFileInfo); ok {
 			if now.After(cached.ExpireAt) {
 				p.fileCache.Delete(key)
@@ -1030,7 +1365,7 @@ func (p *ProxyServer) cleanupExpiredCache() {
 	})
 
 	// 清理重定向缓存
-	p.redirectCache.Range(func(key, value interface{}) bool {
+	p.redirectCache.Range(func(key string, value interface{}) bool {
 		if cached, ok := value.(*CachedRedirectInfo); ok {
 			if now.After(cached.ExpireAt) {
 				p.redirectCache.Delete(key)
@@ -1062,15 +1397,16 @@ func (p *ProxyServer) getFileCacheTTL() time.Duration {
 
 // storeFileCache 存储文件信息到缓存（带 TTL）
 func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
+	p.ensureRuntimeCaches()
 	key := normalizeCacheKey(path)
 	entry := &CachedFileInfo{
 		Info:     info,
 		ExpireAt: time.Now().Add(p.getFileCacheTTL()),
 	}
-	p.fileCache.Store(key, entry)
+	p.fileCache.Set(key, entry)
 	// 兼容：也保存原始 key
 	if key != path {
-		p.fileCache.Store(path, entry)
+		p.fileCache.Set(path, entry)
 	}
 	if info != nil && !info.IsDir && info.Size > 0 {
 		p.updateSizeMap(key, info.Size)
@@ -1082,8 +1418,9 @@ func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
 
 // loadFileCache 从缓存加载文件信息（检查 TTL）
 func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
+	p.ensureRuntimeCaches()
 	key := normalizeCacheKey(filePath)
-	if value, ok := p.fileCache.Load(key); ok {
+	if value, ok := p.fileCache.Get(key); ok {
 		if cached, ok := value.(*CachedFileInfo); ok {
 			if time.Now().Before(cached.ExpireAt) {
 				return cached.Info, true
@@ -1094,7 +1431,7 @@ func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
 	}
 	// 回退尝试原始 key
 	if key != filePath {
-		if value, ok := p.fileCache.Load(filePath); ok {
+		if value, ok := p.fileCache.Get(filePath); ok {
 			if cached, ok := value.(*CachedFileInfo); ok {
 				if time.Now().Before(cached.ExpireAt) {
 					return cached.Info, true
@@ -1117,7 +1454,8 @@ func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
 
 // storeRedirectCache 存储重定向信息到缓存（带 TTL）
 func (p *ProxyServer) storeRedirectCache(key string, info *RedirectInfo) {
-	p.redirectCache.Store(key, &CachedRedirectInfo{
+	p.ensureRuntimeCaches()
+	p.redirectCache.Set(key, &CachedRedirectInfo{
 		Info:     info,
 		ExpireAt: time.Now().Add(p.redirectCacheTTL()),
 	})
@@ -1128,7 +1466,8 @@ func (p *ProxyServer) storeRedirectCache(key string, info *RedirectInfo) {
 
 // loadRedirectCache 从缓存加载重定向信息（检查 TTL）
 func (p *ProxyServer) loadRedirectCache(key string) (*RedirectInfo, bool) {
-	if value, ok := p.redirectCache.Load(key); ok {
+	p.ensureRuntimeCaches()
+	if value, ok := p.redirectCache.Get(key); ok {
 		if cached, ok := value.(*CachedRedirectInfo); ok {
 			if time.Now().Before(cached.ExpireAt) {
 				return cached.Info, true
@@ -1146,10 +1485,14 @@ func (p *ProxyServer) markUpstreamFailure(err error) {
 	}
 	p.upstreamMu.Lock()
 	defer p.upstreamMu.Unlock()
-	p.upstreamDownAt = time.Now().Add(p.upstreamBackoff())
+	p.upstreamFailures++
 	if err != nil {
 		p.upstreamError = err.Error()
 	}
+	if p.upstreamFailures < upstreamFailureThreshold {
+		return
+	}
+	p.upstreamDownAt = time.Now().Add(p.upstreamBackoff())
 }
 
 func (p *ProxyServer) markUpstreamSuccess() {
@@ -1160,6 +1503,7 @@ func (p *ProxyServer) markUpstreamSuccess() {
 	defer p.upstreamMu.Unlock()
 	p.upstreamDownAt = time.Time{}
 	p.upstreamError = ""
+	p.upstreamFailures = 0
 }
 
 func (p *ProxyServer) upstreamBackoffState() (active bool, remain time.Duration, reason string) {
@@ -1244,11 +1588,13 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/", p.handleRoot)
 
 	p.server = &http.Server{
-		Addr:         fmt.Sprintf(":%d", p.config.ProxyPort),
-		Handler:      mux,
-		ReadTimeout:  0, // 视频流需要长连接
-		WriteTimeout: 0,
-		IdleTimeout:  300 * time.Second, // 5分钟空闲超时，防止后台连接被过早断开
+		Addr:              fmt.Sprintf(":%d", p.config.ProxyPort),
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // 防慢连接 header 攻击
+		ReadTimeout:       0,                // 上传/流式场景允许长时间读 body
+		WriteTimeout:      0,                // 下载流允许长连接写出
+		IdleTimeout:       300 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1MB
 	}
 
 	go func() {
@@ -1339,6 +1685,11 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 			continue
 		}
 		raw := ep.Path
+		if pref, ok := normalizeRulePrefix(raw); ok {
+			ep.prefix = pref
+		} else {
+			ep.prefix = ""
+		}
 		if strings.HasSuffix(raw, "/*") {
 			base := strings.TrimSuffix(raw, "/*")
 			converted := wildcardToRegex(base)
@@ -1377,6 +1728,7 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.config = config
+	p.rebuildEncryptPathIndex()
 	if p.httpClient != nil {
 		p.httpClient.Timeout = p.upstreamTimeout()
 	}
@@ -1419,6 +1771,50 @@ func (p *ProxyServer) probeStrategyFailureThreshold() int64 {
 		return int64(p.config.ProbeStrategyFailureThreshold)
 	}
 	return defaultProbeStrategyFailureThreshold
+}
+
+func (p *ProxyServer) probeScopeKey(encPathPattern string, targetURL string) string {
+	pattern := strings.TrimSpace(encPathPattern)
+	if pattern == "" {
+		pattern = "*"
+	}
+	host := "*"
+	if parsed, err := url.Parse(targetURL); err == nil {
+		h := strings.TrimSpace(strings.ToLower(parsed.Hostname()))
+		if h != "" {
+			host = h
+		}
+	}
+	return "path=" + pattern + "|host=" + host
+}
+
+func (p *ProxyServer) probeMethodScore(scopeKey string, method ProbeMethod) int64 {
+	counter := probeMethodStats.counter(scopeKey, method)
+	return counter.Success*4 + counter.CacheHit*2 - counter.Fail*3
+}
+
+func (p *ProxyServer) prioritizeProbeMethods(scopeKey string, methods []ProbeMethod) []ProbeMethod {
+	if len(methods) <= 1 {
+		return methods
+	}
+	prioritized := append([]ProbeMethod(nil), methods...)
+	sort.SliceStable(prioritized, func(i, j int) bool {
+		return p.probeMethodScore(scopeKey, prioritized[i]) > p.probeMethodScore(scopeKey, prioritized[j])
+	})
+	return prioritized
+}
+
+func (p *ProxyServer) probeWithMethodCtx(ctx context.Context, method ProbeMethod, targetURL string, headers http.Header) int64 {
+	switch method {
+	case ProbeMethodRange:
+		return p.probeWithRangeCtx(ctx, targetURL, headers)
+	case ProbeMethodHead:
+		return p.probeWithHeadCtx(ctx, targetURL, headers)
+	case ProbeMethodWebDAV:
+		return p.fetchWebDAVFileSizeCtx(ctx, targetURL, headers)
+	default:
+		return 0
+	}
 }
 
 // getProbeStrategy 获取加密路径的探测策略（如果已学习）
@@ -1501,6 +1897,11 @@ func ClearAllProbeStrategies() {
 		probeStrategyCache.Delete(key)
 		return true
 	})
+	if probeMethodStats != nil {
+		probeMethodStats.mu.Lock()
+		probeMethodStats.byScope = make(map[string]map[ProbeMethod]*ProbeMethodCounter)
+		probeMethodStats.mu.Unlock()
+	}
 	log.Info("[" + internal.TagCache + "] All probe strategy cache cleared")
 }
 
@@ -1611,16 +2012,28 @@ func (p *ProxyServer) probeWithRange(targetURL string, headers http.Header) int6
 // forceProbeRemoteFileSize 强制探测远程文件大小（不受 ProbeOnDownload 配置限制）
 // 用于加密文件解密场景：没有 fileSize 就无法生成密钥，解密必然失败
 func (p *ProxyServer) forceProbeRemoteFileSize(targetURL string, headers http.Header) int64 {
+	return p.forceProbeRemoteFileSizeWithPath(targetURL, headers, "")
+}
+
+func (p *ProxyServer) forceProbeRemoteFileSizeWithPath(targetURL string, headers http.Header, encPathPattern string) int64 {
 	ctx, cancel := context.WithTimeout(context.Background(), p.probeBudget())
 	defer cancel()
-	size := p.probeWithRangeCtx(ctx, targetURL, headers)
-	if size > 0 {
-		return size
+	scopeKey := p.probeScopeKey(encPathPattern, targetURL)
+	methods := p.prioritizeProbeMethods(scopeKey, []ProbeMethod{ProbeMethodRange, ProbeMethodHead, ProbeMethodWebDAV})
+	for _, method := range methods {
+		size := p.probeWithMethodCtx(ctx, method, targetURL, headers)
+		success := size > 0
+		probeMethodStats.record(scopeKey, method, success, false)
+		if success {
+			p.updateProbeStrategy(scopeKey, method)
+			return size
+		}
+		p.markProbeStrategyFailure(scopeKey, method)
+		if ctx.Err() != nil {
+			return 0
+		}
 	}
-	if ctx.Err() != nil {
-		return 0
-	}
-	return p.probeWithHeadCtx(ctx, targetURL, headers)
+	return 0
 }
 
 // probeRemoteFileSize 尝试通过 HEAD 或 Range 请求获取远程文件总大小
@@ -1634,36 +2047,31 @@ func (p *ProxyServer) probeRemoteFileSizeWithPath(targetURL string, headers http
 	if p.config != nil && !p.config.ProbeOnDownload {
 		return 0
 	}
+	scopeKey := p.probeScopeKey(encPathPattern, targetURL)
 
 	// 如果有学习到的策略，优先使用
-	if encPathPattern != "" {
-		if strategy := p.getProbeStrategy(encPathPattern); strategy != nil {
-			strategy.mutex.Lock()
-			method := strategy.Method
-			successCount := strategy.SuccessCount
-			strategy.mutex.Unlock()
-			if successCount < p.probeStrategyStableThreshold() {
-				goto FULL_PROBE_FLOW
-			}
-			var size int64
-			switch method {
-			case ProbeMethodHead:
-				size = p.probeWithHead(targetURL, headers)
-			case ProbeMethodRange:
-				size = p.probeWithRange(targetURL, headers)
-			}
+	if strategy := p.getProbeStrategy(scopeKey); strategy != nil {
+		strategy.mutex.Lock()
+		method := strategy.Method
+		successCount := strategy.SuccessCount
+		strategy.mutex.Unlock()
+		if successCount >= p.probeStrategyStableThreshold() {
+			mctx, cancel := context.WithTimeout(context.Background(), p.probeTimeout())
+			size := p.probeWithMethodCtx(mctx, method, targetURL, headers)
+			cancel()
 			if size > 0 {
-				p.updateProbeStrategy(encPathPattern, method)
-				log.Debugf("[%s] Probe strategy cache hit: pattern=%s method=%s size=%d", internal.TagCache, encPathPattern, method, size)
+				p.updateProbeStrategy(scopeKey, method)
+				probeMethodStats.record(scopeKey, method, true, true)
+				log.Debugf("[%s] Probe strategy cache hit: scope=%s method=%s size=%d", internal.TagCache, scopeKey, method, size)
 				return size
 			}
 			// 策略失败，标记失败次数，达到阈值后清除并重学
-			log.Debugf("[%s] Probe strategy cache miss (method failed): pattern=%s method=%s", internal.TagCache, encPathPattern, method)
-			p.markProbeStrategyFailure(encPathPattern, method)
+			log.Debugf("[%s] Probe strategy cache miss (method failed): scope=%s method=%s", internal.TagCache, scopeKey, method)
+			probeMethodStats.record(scopeKey, method, false, false)
+			p.markProbeStrategyFailure(scopeKey, method)
 		}
 	}
 
-FULL_PROBE_FLOW:
 	// 根据配置或默认策略决定尝试顺序
 	// 默认使用 Range 优先（兼容性更好，大多数网盘都支持）
 	rangeFirst := true
@@ -1671,46 +2079,53 @@ FULL_PROBE_FLOW:
 		rangeFirst = false
 	}
 
-	var size int64
-	var successMethod ProbeMethod
-
+	methods := []ProbeMethod{ProbeMethodRange, ProbeMethodHead, ProbeMethodWebDAV}
 	if rangeFirst {
-		// Range 优先策略
-		size = p.probeWithRange(targetURL, headers)
-		if size > 0 {
-			successMethod = ProbeMethodRange
-		} else {
-			size = p.probeWithHead(targetURL, headers)
-			if size > 0 {
-				successMethod = ProbeMethodHead
-			}
-		}
+		methods = []ProbeMethod{ProbeMethodRange, ProbeMethodHead, ProbeMethodWebDAV}
 	} else {
-		// HEAD 优先策略（传统方式）
-		size = p.probeWithHead(targetURL, headers)
-		if size > 0 {
-			successMethod = ProbeMethodHead
-		} else {
-			size = p.probeWithRange(targetURL, headers)
-			if size > 0 {
-				successMethod = ProbeMethodRange
-			}
+		methods = []ProbeMethod{ProbeMethodHead, ProbeMethodRange, ProbeMethodWebDAV}
+	}
+	methods = p.prioritizeProbeMethods(scopeKey, methods)
+
+	for _, method := range methods {
+		mctx, cancel := context.WithTimeout(context.Background(), p.probeTimeout())
+		size := p.probeWithMethodCtx(mctx, method, targetURL, headers)
+		cancel()
+		success := size > 0
+		probeMethodStats.record(scopeKey, method, success, false)
+		if success {
+			// 学习成功的策略
+			p.updateProbeStrategy(scopeKey, method)
+			log.Debugf("[%s] Probe strategy learned: scope=%s method=%s size=%d", internal.TagCache, scopeKey, method, size)
+			return size
 		}
 	}
-
-	// 学习成功的策略
-	if size > 0 && encPathPattern != "" {
-		p.updateProbeStrategy(encPathPattern, successMethod)
-		log.Debugf("[%s] Probe strategy learned: pattern=%s method=%s size=%d", internal.TagCache, encPathPattern, successMethod, size)
-	}
-
-	return size
+	return 0
 }
 
 // fetchWebDAVFileSize 通过 PROPFIND 获取文件大小（Depth: 0）
 func (p *ProxyServer) fetchWebDAVFileSize(targetURL string, headers http.Header) int64 {
 	ctx, cancel := context.WithTimeout(context.Background(), p.probeTimeout())
 	defer cancel()
+	return p.fetchWebDAVFileSizeCtx(ctx, targetURL, headers)
+}
+
+func (p *ProxyServer) fetchWebDAVFileSizeWithPath(targetURL string, headers http.Header, encPathPattern string) int64 {
+	ctx, cancel := context.WithTimeout(context.Background(), p.probeTimeout())
+	defer cancel()
+	size := p.fetchWebDAVFileSizeCtx(ctx, targetURL, headers)
+	scopeKey := p.probeScopeKey(encPathPattern, targetURL)
+	success := size > 0
+	probeMethodStats.record(scopeKey, ProbeMethodWebDAV, success, false)
+	if success {
+		p.updateProbeStrategy(scopeKey, ProbeMethodWebDAV)
+	} else {
+		p.markProbeStrategyFailure(scopeKey, ProbeMethodWebDAV)
+	}
+	return size
+}
+
+func (p *ProxyServer) fetchWebDAVFileSizeCtx(ctx context.Context, targetURL string, headers http.Header) int64 {
 	body := `<?xml version="1.0" encoding="utf-8" ?><D:propfind xmlns:D="DAV:"><D:prop><D:getcontentlength/></D:prop></D:propfind>`
 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", targetURL, strings.NewReader(body))
 	if err != nil {
@@ -1928,6 +2343,26 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 		decodedPath = filePath
 	}
 
+	matchPrefix := func(candidate string) *EncryptPath {
+		for _, rule := range p.prefixRules {
+			if rule.ep == nil || !rule.ep.Enable {
+				continue
+			}
+			if candidate == rule.prefix || strings.HasPrefix(candidate, rule.prefix+"/") {
+				return p.applyFolderOverride(rule.ep, decodedPath)
+			}
+		}
+		return nil
+	}
+	if ep := matchPrefix(filePath); ep != nil {
+		return ep
+	}
+	if decodedPath != filePath {
+		if ep := matchPrefix(decodedPath); ep != nil {
+			return ep
+		}
+	}
+
 	for _, ep := range p.config.EncryptPaths {
 		if !ep.Enable {
 			continue
@@ -1935,11 +2370,11 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 		if ep.regex != nil {
 			log.Debugf("[%s] Testing rule %q (regex: %s) against %q", internal.TagProxy, ep.Path, ep.regex.String(), filePath)
 			if ep.regex.MatchString(filePath) {
-				log.Infof("[%s] Matched rule: %s for %s (encType=%q, encName=%v)", internal.TagProxy, ep.Path, filePath, ep.EncType, ep.EncName)
+				p.debugf("path", "[%s] Matched rule: %s for %s (encType=%q, encName=%v)", internal.TagProxy, ep.Path, filePath, ep.EncType, ep.EncName)
 				return p.applyFolderOverride(ep, decodedPath)
 			}
 			if filePath != decodedPath && ep.regex.MatchString(decodedPath) {
-				log.Infof("[%s] Matched rule (decoded): %s for %s (encType=%q, encName=%v)", internal.TagProxy, ep.Path, decodedPath, ep.EncType, ep.EncName)
+				p.debugf("path", "[%s] Matched rule (decoded): %s for %s (encType=%q, encName=%v)", internal.TagProxy, ep.Path, decodedPath, ep.EncType, ep.EncName)
 				return p.applyFolderOverride(ep, decodedPath)
 			}
 		} else {
@@ -2020,11 +2455,78 @@ func (p *ProxyServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 // handleStats returns runtime stats for caches and config toggles
 func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	p.ensureRuntimeCaches()
 	probeCount := 0
 	probeStrategyCache.Range(func(_, _ interface{}) bool {
 		probeCount++
 		return true
 	})
+	probeStatsSnapshot := probeMethodStats.snapshot()
+	probeByScope := make(map[string]map[string]interface{}, len(probeStatsSnapshot))
+	type scopeRankingItem struct {
+		Key           string
+		Preferred     string
+		Score         int64
+		TotalSuccess  int64
+		TotalFail     int64
+		TotalCacheHit int64
+	}
+	rankings := make([]scopeRankingItem, 0, len(probeStatsSnapshot))
+	for scopeKey, scopeStats := range probeStatsSnapshot {
+		scopeEntry := map[string]interface{}{}
+		methods := []ProbeMethod{ProbeMethodRange, ProbeMethodHead, ProbeMethodWebDAV}
+		bestMethod := ""
+		var bestScore int64 = -1 << 62
+		var totalSuccess int64
+		var totalFail int64
+		var totalCacheHit int64
+		for _, method := range methods {
+			counter := scopeStats[method]
+			scopeEntry[string(method)] = map[string]int64{
+				"success":   counter.Success,
+				"fail":      counter.Fail,
+				"cache_hit": counter.CacheHit,
+			}
+			totalSuccess += counter.Success
+			totalFail += counter.Fail
+			totalCacheHit += counter.CacheHit
+			score := counter.Success*4 + counter.CacheHit*2 - counter.Fail*3
+			if score > bestScore {
+				bestScore = score
+				bestMethod = string(method)
+			}
+		}
+		scopeEntry["preferred_method"] = bestMethod
+		probeByScope[scopeKey] = scopeEntry
+		rankings = append(rankings, scopeRankingItem{
+			Key:           scopeKey,
+			Preferred:     bestMethod,
+			Score:         bestScore,
+			TotalSuccess:  totalSuccess,
+			TotalFail:     totalFail,
+			TotalCacheHit: totalCacheHit,
+		})
+	}
+	sort.SliceStable(rankings, func(i, j int) bool {
+		if rankings[i].Score == rankings[j].Score {
+			return rankings[i].TotalSuccess > rankings[j].TotalSuccess
+		}
+		return rankings[i].Score > rankings[j].Score
+	})
+	if len(rankings) > 10 {
+		rankings = rankings[:10]
+	}
+	rankingOutput := make([]map[string]interface{}, 0, len(rankings))
+	for _, item := range rankings {
+		rankingOutput = append(rankingOutput, map[string]interface{}{
+			"scope":            item.Key,
+			"preferred_method": item.Preferred,
+			"score":            item.Score,
+			"success":          item.TotalSuccess,
+			"fail":             item.TotalFail,
+			"cache_hit":        item.TotalCacheHit,
+		})
+	}
 
 	sizeMapCount := 0
 	sizeMapDirty := false
@@ -2065,9 +2567,11 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 		"status": "ok",
 		"uptime": time.Since(startTime).Round(time.Second).String(),
 		"cache": map[string]interface{}{
-			"file_cache_entries":     syncMapLen(&p.fileCache),
-			"redirect_cache_entries": syncMapLen(&p.redirectCache),
+			"file_cache_entries":     p.fileCache.Len(),
+			"redirect_cache_entries": p.redirectCache.Len(),
 			"probe_strategy_entries": probeCount,
+			"probe_method_by_scope":  probeByScope,
+			"probe_scope_ranking":    rankingOutput,
 			"probe_strategy_ttl_minutes": func() int {
 				if p.config != nil {
 					return p.config.ProbeStrategyTTLMinutes
@@ -2159,6 +2663,37 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 			}(),
 			"checkpoint_since":  dbExportSince,
 			"checkpoint_cursor": dbExportCursor,
+		},
+		"http_profiles": map[string]interface{}{
+			"control": p.controlHTTPStats.snapshot(),
+			"probe":   p.probeHTTPStats.snapshot(),
+			"stream":  p.streamHTTPStats.snapshot(),
+		},
+		"transport": map[string]interface{}{
+			"max_idle_conns": func() int {
+				if p.transport != nil {
+					return p.transport.MaxIdleConns
+				}
+				return 0
+			}(),
+			"max_idle_conns_per_host": func() int {
+				if p.transport != nil {
+					return p.transport.MaxIdleConnsPerHost
+				}
+				return 0
+			}(),
+			"max_conns_per_host": func() int {
+				if p.transport != nil {
+					return p.transport.MaxConnsPerHost
+				}
+				return 0
+			}(),
+			"idle_conn_timeout_seconds": func() int64 {
+				if p.transport != nil {
+					return int64(p.transport.IdleConnTimeout / time.Second)
+				}
+				return 0
+			}(),
 		},
 		"parallel_decrypt": map[string]interface{}{
 			"enabled": p.config != nil && p.config.EnableParallelDecrypt,
@@ -2356,17 +2891,11 @@ func (p *ProxyServer) handleRestart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotImplemented)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"code":    200,
-		"message": "Service will restart",
+		"code":    http.StatusNotImplemented,
+		"message": "restart is not implemented in current runtime",
 	})
-
-	// 异步重启（给响应时间先返回）
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		log.Info("[" + internal.TagServer + "] Restarting encrypt proxy server...")
-		// 实际重启逻辑需要在 encrypt_server.go 中实现
-	}()
 }
 
 // handleRoot 处理根路径
@@ -3225,7 +3754,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	log.Infof("%s handleRedirect: response status=%d, content-length=%s",
+	p.debugf("redirect", "%s handleRedirect: response status=%d, content-length=%s",
 		internal.LogPrefix(ctx, internal.TagDownload), resp.StatusCode, resp.Header.Get("Content-Length"))
 
 	statusCode := resp.StatusCode
@@ -3347,7 +3876,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 					webdavPath = "/dav" + webdavPath
 				}
 				webdavURL := p.getAlistURL() + webdavPath
-				if size := p.fetchWebDAVFileSize(webdavURL, info.Headers); size > 0 {
+				if size := p.fetchWebDAVFileSizeWithPath(webdavURL, info.Headers, info.PasswdInfo.Path); size > 0 {
 					fileSize = size
 					log.Infof("%s handleRedirect: got fileSize from WebDAV PROPFIND: %d", internal.LogPrefix(ctx, internal.TagFileSize), fileSize)
 				}
@@ -3355,7 +3884,7 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 
 			// 5. 如果仍然为 0，强制探测远程文件大小（加密文件没有 fileSize 无法解密）
 			if fileSize == 0 {
-				probed := p.forceProbeRemoteFileSize(info.RedirectURL, req.Header)
+				probed := p.forceProbeRemoteFileSizeWithPath(info.RedirectURL, req.Header, info.PasswdInfo.Path)
 				if probed > 0 {
 					fileSize = probed
 					log.Infof("%s handleRedirect: probed remote fileSize=%d", internal.LogPrefix(ctx, internal.TagFileSize), fileSize)
@@ -3460,10 +3989,132 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (p *ProxyServer) shouldSchedulePrefetch(dirPath string) bool {
+	if p == nil || dirPath == "" {
+		return false
+	}
+	p.ensureRuntimeCaches()
+	now := time.Now()
+	key := normalizeCacheKey(dirPath)
+	if v, ok := p.prefetchRecent.Get(key); ok {
+		if ts, ok := v.(time.Time); ok && now.Sub(ts) < encryptedPrefetchCooldown {
+			return false
+		}
+	}
+	p.prefetchRecent.Set(key, now)
+	return true
+}
+
+func (p *ProxyServer) prefetchEncryptedSubDirs(parentCtx context.Context, reqData map[string]interface{}, dirs []string, headers http.Header) {
+	if p == nil || len(dirs) == 0 {
+		return
+	}
+	if p.shouldFastFailUpstream() {
+		return
+	}
+
+	uniq := make([]string, 0, len(dirs))
+	seen := make(map[string]struct{}, len(dirs))
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
+		nd := normalizeCacheKey(d)
+		if _, ok := seen[nd]; ok {
+			continue
+		}
+		if !p.shouldSchedulePrefetch(nd) {
+			continue
+		}
+		seen[nd] = struct{}{}
+		uniq = append(uniq, nd)
+		if len(uniq) >= encryptedPrefetchMaxDirs {
+			break
+		}
+	}
+	if len(uniq) == 0 {
+		return
+	}
+
+	sem := make(chan struct{}, encryptedPrefetchConcurrency)
+	for _, dirPath := range uniq {
+		sem <- struct{}{}
+		go func(targetPath string) {
+			defer func() { <-sem }()
+
+			payload := make(map[string]interface{}, len(reqData)+1)
+			for k, v := range reqData {
+				payload[k] = v
+			}
+			payload["path"] = targetPath
+
+			body, err := json.Marshal(payload)
+			if err != nil {
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(parentCtx, p.probeTimeout())
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.getAlistURL()+"/api/fs/list", bytes.NewReader(body))
+			if err != nil {
+				return
+			}
+			for key, values := range headers {
+				if strings.EqualFold(key, "Host") || strings.EqualFold(key, "Content-Length") {
+					continue
+				}
+				for _, value := range values {
+					req.Header.Add(key, value)
+				}
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := p.httpClient.Do(req)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return
+			}
+
+			var result map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				return
+			}
+			code, _ := result["code"].(float64)
+			if code != 200 {
+				return
+			}
+			data, _ := result["data"].(map[string]interface{})
+			content, _ := data["content"].([]interface{})
+			for _, item := range content {
+				fileMap, ok := item.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				name, _ := fileMap["name"].(string)
+				size, _ := fileMap["size"].(float64)
+				isDir, _ := fileMap["is_dir"].(bool)
+				filePath := path.Join(targetPath, name)
+				if apiPath, ok := fileMap["path"].(string); ok && apiPath != "" {
+					filePath = apiPath
+				}
+				p.storeFileCache(filePath, &FileInfo{
+					Name:  name,
+					Size:  int64(size),
+					IsDir: isDir,
+					Path:  filePath,
+				})
+			}
+		}(dirPath)
+	}
+}
+
 // handleFsList 处理文件列表
 func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	log.Infof("%s Proxy handling fs list request", internal.LogPrefix(ctx, internal.TagList))
+	p.debugf("list", "%s Proxy handling fs list request", internal.LogPrefix(ctx, internal.TagList))
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -3499,104 +4150,325 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// 解析响应（使用流式解码，避免将整个响应读入内存）
-	var result map[string]interface{}
-	var outBody []byte
-	if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
-		if code, ok := result["code"].(float64); ok && code == 200 {
-			if data, ok := result["data"].(map[string]interface{}); ok {
-				if content, ok := data["content"].([]interface{}); ok {
-					var reqData map[string]string
-					json.Unmarshal(body, &reqData)
-					dirPath := reqData["path"]
+	reqData := map[string]interface{}{}
+	_ = json.Unmarshal(body, &reqData)
+	dirPath, _ := reqData["path"].(string)
+	parentEncPath := p.findEncryptPath(dirPath)
+	p.debugf("list", "%s Handling fs list for path: %s", internal.LogPrefix(ctx, internal.TagList), dirPath)
 
-					log.Infof("%s Handling fs list for path: %s", internal.LogPrefix(ctx, internal.TagList), dirPath)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		copyWithBuffer(w, resp.Body)
+		return
+	}
+	prefetchDirs, err := p.streamRewriteFsListResponse(w, resp.Body, dirPath, parentEncPath)
+	if err != nil {
+		log.Warnf("%s stream rewrite fs list failed: %v", internal.LogPrefix(ctx, internal.TagList), err)
+		return
+	}
+	if parentEncPath != nil && len(prefetchDirs) > 0 {
+		headers := r.Header.Clone()
+		go p.prefetchEncryptedSubDirs(context.Background(), reqData, prefetchDirs, headers)
+	}
+}
 
-					// 收集需要解密的文件
-					var decryptTasks []fileDecryptTask
+func writeJSONScalarToken(w *bufio.Writer, tok interface{}) error {
+	b, err := json.Marshal(tok)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(b)
+	return err
+}
 
-					for i, item := range content {
-						if fileMap, ok := item.(map[string]interface{}); ok {
-							name, _ := fileMap["name"].(string)
-							size, _ := fileMap["size"].(float64)
-							isDir, _ := fileMap["is_dir"].(bool)
+func writeJSONStringToken(w *bufio.Writer, s string) error {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(b)
+	return err
+}
 
-							// 优先使用 API 返回的 path 字段，如果没有则使用 dirPath + name
-							filePath := path.Join(dirPath, name)
-							if apiPath, ok := fileMap["path"].(string); ok && apiPath != "" {
-								filePath = apiPath
-							}
-
-							// 缓存文件信息（使用带 TTL 的缓存）
-							p.storeFileCache(filePath, &FileInfo{
-								Name:  name,
-								Size:  int64(size),
-								IsDir: isDir,
-								Path:  filePath,
-							})
-
-							// 为每个文件单独查找加密路径配置（与 alist-encrypt 行为一致）
-							fileEncPath := p.findEncryptPath(filePath)
-
-							// 收集需要解密文件名的文件
-							if fileEncPath != nil && fileEncPath.EncName && !isDir {
-								decryptTasks = append(decryptTasks, fileDecryptTask{
-									index:    i,
-									fileMap:  fileMap,
-									name:     name,
-									filePath: filePath,
-									encPath:  fileEncPath, // 保存每个文件的加密配置
-								})
-							}
-						}
+func copyJSONValue(dec *json.Decoder, w *bufio.Writer) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := tok.(json.Delim); ok {
+		switch d {
+		case '{':
+			if _, err := w.WriteString("{"); err != nil {
+				return err
+			}
+			first := true
+			for dec.More() {
+				keyTok, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyTok.(string)
+				if !ok {
+					return errors.New("invalid object key token")
+				}
+				if !first {
+					if _, err := w.WriteString(","); err != nil {
+						return err
 					}
-
-					// 并行解密文件名（当文件数超过阈值时）
-					if len(decryptTasks) > 0 {
-						useParallel := p.config != nil && p.config.EnableParallelDecrypt && len(decryptTasks) >= parallelDecryptThreshold
-						if useParallel {
-							// 使用并行解密
-							p.parallelDecryptFileNamesV2(decryptTasks)
-						} else {
-							// 串行解密（文件数少时开销更小）
-							for _, task := range decryptTasks {
-								showName := ConvertShowName(task.encPath.Password, task.encPath.EncType, task.name)
-								if showName != task.name && !strings.HasPrefix(showName, "orig_") {
-									log.Debugf("%s Decrypt filename: %s -> %s", internal.LogPrefix(ctx, internal.TagDecrypt), task.name, showName)
-								}
-								task.fileMap["name"] = showName
-								// 同步更新 path，避免客户端使用密文 path
-								if pathStr, ok := task.fileMap["path"].(string); ok && pathStr != "" {
-									task.fileMap["path"] = path.Join(path.Dir(pathStr), showName)
-								} else if task.filePath != "" {
-									task.fileMap["path"] = path.Join(path.Dir(task.filePath), showName)
-								}
-							}
-						}
-					}
-
-					// 封面自动隐藏：将与视频同名的图片设置为视频的 thumb，并从列表移除封面文件
-					content = p.processCoverFiles(content)
-					data["content"] = content
-
-					result["data"] = data
-					outBody, _ = json.Marshal(result)
+				}
+				first = false
+				if err := writeJSONStringToken(w, key); err != nil {
+					return err
+				}
+				if _, err := w.WriteString(":"); err != nil {
+					return err
+				}
+				if err := copyJSONValue(dec, w); err != nil {
+					return err
 				}
 			}
+			endTok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			endDelim, ok := endTok.(json.Delim)
+			if !ok || endDelim != '}' {
+				return errors.New("invalid object end token")
+			}
+			_, err = w.WriteString("}")
+			return err
+		case '[':
+			if _, err := w.WriteString("["); err != nil {
+				return err
+			}
+			first := true
+			for dec.More() {
+				if !first {
+					if _, err := w.WriteString(","); err != nil {
+						return err
+					}
+				}
+				first = false
+				if err := copyJSONValue(dec, w); err != nil {
+					return err
+				}
+			}
+			endTok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			endDelim, ok := endTok.(json.Delim)
+			if !ok || endDelim != ']' {
+				return errors.New("invalid array end token")
+			}
+			_, err = w.WriteString("]")
+			return err
+		default:
+			return errors.New("unexpected json delimiter")
+		}
+	}
+	return writeJSONScalarToken(w, tok)
+}
+
+func (p *ProxyServer) streamRewriteFsListResponse(w http.ResponseWriter, body io.Reader, dirPath string, parentEncPath *EncryptPath) ([]string, error) {
+	dec := json.NewDecoder(body)
+	bw := bufio.NewWriterSize(w, mediumBufferSize)
+	prefetchDirs := make([]string, 0, 8)
+
+	startTok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	startDelim, ok := startTok.(json.Delim)
+	if !ok || startDelim != '{' {
+		return nil, errors.New("invalid fs list response: expected object")
+	}
+	if _, err := bw.WriteString("{"); err != nil {
+		return nil, err
+	}
+
+	firstField := true
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return nil, errors.New("invalid top-level key token")
+		}
+		if !firstField {
+			if _, err := bw.WriteString(","); err != nil {
+				return nil, err
+			}
+		}
+		firstField = false
+		if err := writeJSONStringToken(bw, key); err != nil {
+			return nil, err
+		}
+		if _, err := bw.WriteString(":"); err != nil {
+			return nil, err
+		}
+
+		if key != "data" {
+			if err := copyJSONValue(dec, bw); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		nextTok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		nextDelim, isDelim := nextTok.(json.Delim)
+		if !isDelim || nextDelim != '{' {
+			if err := writeJSONScalarToken(bw, nextTok); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if _, err := bw.WriteString("{"); err != nil {
+			return nil, err
+		}
+
+		firstDataField := true
+		for dec.More() {
+			dataKeyTok, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			dataKey, ok := dataKeyTok.(string)
+			if !ok {
+				return nil, errors.New("invalid data key token")
+			}
+			if !firstDataField {
+				if _, err := bw.WriteString(","); err != nil {
+					return nil, err
+				}
+			}
+			firstDataField = false
+			if err := writeJSONStringToken(bw, dataKey); err != nil {
+				return nil, err
+			}
+			if _, err := bw.WriteString(":"); err != nil {
+				return nil, err
+			}
+
+			if dataKey != "content" {
+				if err := copyJSONValue(dec, bw); err != nil {
+					return nil, err
+				}
+				continue
+			}
+
+			contentTok, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			contentDelim, isContentDelim := contentTok.(json.Delim)
+			if !isContentDelim || contentDelim != '[' {
+				if err := writeJSONScalarToken(bw, contentTok); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if _, err := bw.WriteString("["); err != nil {
+				return nil, err
+			}
+
+			firstItem := true
+			for dec.More() {
+				var item map[string]interface{}
+				if err := dec.Decode(&item); err != nil {
+					return nil, err
+				}
+				name, _ := item["name"].(string)
+				size, _ := item["size"].(float64)
+				isDir, _ := item["is_dir"].(bool)
+
+				filePath := path.Join(dirPath, name)
+				if apiPath, ok := item["path"].(string); ok && apiPath != "" {
+					filePath = apiPath
+				}
+
+				p.storeFileCache(filePath, &FileInfo{
+					Name:  name,
+					Size:  int64(size),
+					IsDir: isDir,
+					Path:  filePath,
+				})
+
+				fileEncPath := p.findEncryptPath(filePath)
+				if parentEncPath != nil && isDir && len(prefetchDirs) < encryptedPrefetchMaxDirs {
+					prefetchDirs = append(prefetchDirs, filePath)
+				}
+				if fileEncPath != nil && fileEncPath.EncName && !isDir {
+					showName := ConvertShowName(fileEncPath.Password, fileEncPath.EncType, name)
+					item["name"] = showName
+					if pathStr, ok := item["path"].(string); ok && pathStr != "" {
+						item["path"] = path.Join(path.Dir(pathStr), showName)
+					} else {
+						item["path"] = path.Join(path.Dir(filePath), showName)
+					}
+				}
+
+				if !firstItem {
+					if _, err := bw.WriteString(","); err != nil {
+						return nil, err
+					}
+				}
+				firstItem = false
+				itemBytes, err := json.Marshal(item)
+				if err != nil {
+					return nil, err
+				}
+				if _, err := bw.Write(itemBytes); err != nil {
+					return nil, err
+				}
+			}
+			endContentTok, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			endContentDelim, ok := endContentTok.(json.Delim)
+			if !ok || endContentDelim != ']' {
+				return nil, errors.New("invalid content array end token")
+			}
+			if _, err := bw.WriteString("]"); err != nil {
+				return nil, err
+			}
+		}
+
+		endDataTok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		endDataDelim, ok := endDataTok.(json.Delim)
+		if !ok || endDataDelim != '}' {
+			return nil, errors.New("invalid data object end token")
+		}
+		if _, err := bw.WriteString("}"); err != nil {
+			return nil, err
 		}
 	}
 
-	// 返回响应（若上面未能成功解析 JSON，则尝试原样流式转发）
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	if len(outBody) > 0 {
-		w.Write(outBody)
-		return
+	endTok, err := dec.Token()
+	if err != nil {
+		return nil, err
 	}
-	// 如果没有构造好的 respBody，说明上面未进入 JSON 解析分支，直接将 resp.Body 内容拷贝到响应
-	// 为了此处可读，需要先重-open resp.Body — 但 resp.Body 已在流式解码中消费或关闭，
-	// 所以此分支通常不会被触达。作为保险，尝试写空体。
-	return
+	endDelim, ok := endTok.(json.Delim)
+	if !ok || endDelim != '}' {
+		return nil, errors.New("invalid fs list response end token")
+	}
+	if _, err := bw.WriteString("}"); err != nil {
+		return nil, err
+	}
+	if err := bw.Flush(); err != nil {
+		return nil, err
+	}
+	return prefetchDirs, nil
 }
 
 // parallelDecryptFileNames 并行解密文件名（旧版本，使用统一的 encPath）
@@ -3628,18 +4500,24 @@ func (p *ProxyServer) parallelDecryptFileNames(tasks []fileDecryptTask, encPath 
 
 // parallelDecryptFileNamesV2 并行解密文件名（新版本，每个文件使用自己的 encPath）
 func (p *ProxyServer) parallelDecryptFileNamesV2(tasks []fileDecryptTask) {
+	workers := p.parallelDecryptLimit()
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > len(tasks) {
+		workers = len(tasks)
+	}
+	if workers <= 0 {
+		return
+	}
+
+	taskCh := make(chan fileDecryptTask, workers*2)
 	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, p.parallelDecryptLimit())
-
-	for _, task := range tasks {
-		wg.Add(1)
-		go func(t fileDecryptTask) {
-			defer wg.Done()
-			semaphore <- struct{}{}        // 获取信号量
-			defer func() { <-semaphore }() // 释放信号量
-
+	workerFn := func() {
+		defer wg.Done()
+		for t := range taskCh {
 			if t.encPath == nil {
-				return
+				continue
 			}
 			showName := ConvertShowName(t.encPath.Password, t.encPath.EncType, t.name)
 			if showName != t.name && !strings.HasPrefix(showName, "orig_") {
@@ -3651,8 +4529,16 @@ func (p *ProxyServer) parallelDecryptFileNamesV2(tasks []fileDecryptTask) {
 			} else if t.filePath != "" {
 				t.fileMap["path"] = path.Join(path.Dir(t.filePath), showName)
 			}
-		}(task)
+		}
 	}
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go workerFn()
+	}
+	for _, task := range tasks {
+		taskCh <- task
+	}
+	close(taskCh)
 	wg.Wait()
 }
 
@@ -4091,7 +4977,7 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 			ext := path.Ext(fileName)
 			encName := EncodeName(encPath.Password, encPath.EncType, fileName)
 			newFilePath := path.Join(path.Dir(filePath), encName+ext)
-			log.Infof("%s Encrypting filename: %s -> %s", internal.LogPrefix(ctx, internal.TagEncrypt), fileName, encName+ext)
+			p.debugf("encrypt", "%s Encrypting filename: %s -> %s", internal.LogPrefix(ctx, internal.TagEncrypt), fileName, encName+ext)
 
 			// 更新 File-Path header
 			r.Header.Set("File-Path", url.PathEscape(newFilePath))
@@ -4102,7 +4988,7 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if encPath != nil {
-		log.Infof("%s Encrypting upload for path: %s", internal.LogPrefix(ctx, internal.TagEncrypt), filePath)
+		p.debugf("encrypt", "%s Encrypting upload for path: %s", internal.LogPrefix(ctx, internal.TagEncrypt), filePath)
 		contentLength := r.ContentLength
 		if contentLength <= 0 {
 			contentLength = 0
@@ -4369,7 +5255,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		if fileSize == 0 {
 			// 强制探测：加密文件没有 fileSize 无法解密
-			probed := p.forceProbeRemoteFileSize(p.getAlistURL()+actualURLPath, req.Header)
+			probed := p.forceProbeRemoteFileSizeWithPath(p.getAlistURL()+actualURLPath, req.Header, encPath.Path)
 			if probed > 0 {
 				fileSize = probed
 				log.Infof("%s handleDownload: probed remote fileSize=%d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
@@ -4922,7 +5808,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			// 如果缓存中没有 fileSize，尝试通过 PROPFIND 获取（修复 WebDAV 播放问题）
 			if fileSize == 0 {
 				propfindURL := targetURL
-				if size := p.fetchWebDAVFileSize(propfindURL, r.Header); size > 0 {
+				if size := p.fetchWebDAVFileSizeWithPath(propfindURL, r.Header, encPath.Path); size > 0 {
 					fileSize = size
 					log.Infof("%s WebDAV redirect: got fileSize from PROPFIND: %d for %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
 					// 缓存文件大小
@@ -4936,7 +5822,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 			// 如果 PROPFIND 也获取不到，强制探测远程文件大小（加密文件没有 fileSize 无法解密）
 			if fileSize == 0 {
-				probed := p.forceProbeRemoteFileSize(location, r.Header)
+				probed := p.forceProbeRemoteFileSizeWithPath(location, r.Header, encPath.Path)
 				if probed > 0 {
 					fileSize = probed
 					log.Infof("WebDAV redirect: probed remote fileSize: %d for %s", fileSize, filePath)
@@ -5055,7 +5941,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 		// 如果仍然未知，先尝试 WebDAV PROPFIND 获取大小
 		if fileSize == 0 {
-			if size := p.fetchWebDAVFileSize(targetURL, req.Header); size > 0 {
+			if size := p.fetchWebDAVFileSizeWithPath(targetURL, req.Header, encPath.Path); size > 0 {
 				fileSize = size
 				p.storeFileCache(filePath, &FileInfo{Name: path.Base(filePath), Size: size, IsDir: false, Path: filePath})
 				if strings.HasPrefix(filePath, "/dav/") {
@@ -5068,7 +5954,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 		// 如果仍然未知，强制探测远程总大小（加密文件没有 fileSize 无法解密）
 		if fileSize == 0 {
-			probed := p.forceProbeRemoteFileSize(targetURL, req.Header)
+			probed := p.forceProbeRemoteFileSizeWithPath(targetURL, req.Header, encPath.Path)
 			if probed > 0 {
 				fileSize = probed
 				log.Infof("handleWebDAV: probed remote fileSize=%d for %s", fileSize, targetURL)

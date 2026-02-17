@@ -1,7 +1,12 @@
 package openlistlib
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap"
@@ -73,7 +78,22 @@ func Shutdown(timeout int64) (err error) {
 
 // ForceDBSync forces SQLite WAL checkpoint to sync data to main database file
 func ForceDBSync() error {
-	log.Info("[" + internal.TagServer + "] Forcing database sync (WAL checkpoint)...")
+	mode := strings.ToUpper(strings.TrimSpace(os.Getenv("OPENLIST_WAL_CHECKPOINT_MODE")))
+	if mode == "" {
+		mode = "PASSIVE"
+	}
+	switch mode {
+	case "PASSIVE", "FULL", "RESTART", "TRUNCATE":
+	default:
+		mode = "PASSIVE"
+	}
+	timeout := 2 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("OPENLIST_WAL_CHECKPOINT_TIMEOUT_MS")); raw != "" {
+		if ms, err := strconv.Atoi(raw); err == nil && ms > 0 {
+			timeout = time.Duration(ms) * time.Millisecond
+		}
+	}
+	log.Infof("[%s] Forcing database sync (WAL checkpoint mode=%s timeout=%s)...", internal.TagServer, mode, timeout)
 
 	// Get the database instance and execute WAL checkpoint
 	gormDB := db.GetDb()
@@ -85,7 +105,9 @@ func ForceDBSync() error {
 		}
 
 		// Execute WAL checkpoint with TRUNCATE mode to force sync and remove WAL files
-		_, err = sqlDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		_, err = sqlDB.ExecContext(ctx, fmt.Sprintf("PRAGMA wal_checkpoint(%s)", mode))
 		if err != nil {
 			log.Errorf("[%s] Failed to execute WAL checkpoint: %v", internal.TagServer, err)
 			return err

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
@@ -265,13 +266,91 @@ func (e HttpStatusCodeError) Error() string {
 	return fmt.Sprintf("%d|%s", e, http.StatusText(int(e)))
 }
 
-var once sync.Once
-var httpClient *http.Client
+var (
+	controlOnce        sync.Once
+	controlHTTPClient  *http.Client
+	streamOnce         sync.Once
+	streamHTTPClient   *http.Client
+	clientProfileStats sync.Map // profile -> *httpClientProfileStats
+)
+
+type httpClientProfileStats struct {
+	requests       atomic.Int64
+	errors         atomic.Int64
+	totalLatencyNs atomic.Int64
+}
+
+func (s *httpClientProfileStats) record(d time.Duration, err error, statusCode int) {
+	if s == nil {
+		return
+	}
+	s.requests.Add(1)
+	s.totalLatencyNs.Add(d.Nanoseconds())
+	if err != nil || statusCode >= 500 {
+		s.errors.Add(1)
+	}
+}
+
+func (s *httpClientProfileStats) snapshot() map[string]int64 {
+	if s == nil {
+		return map[string]int64{}
+	}
+	req := s.requests.Load()
+	errCnt := s.errors.Load()
+	avgMs := int64(0)
+	if req > 0 {
+		avgMs = (s.totalLatencyNs.Load() / req) / int64(time.Millisecond)
+	}
+	return map[string]int64{
+		"requests":       req,
+		"errors":         errCnt,
+		"avg_latency_ms": avgMs,
+	}
+}
+
+type instrumentedRoundTripper struct {
+	base    http.RoundTripper
+	profile string
+}
+
+func (rt *instrumentedRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	start := time.Now()
+	resp, err := rt.base.RoundTrip(req)
+	statusCode := 0
+	if resp != nil {
+		statusCode = resp.StatusCode
+	}
+	val, _ := clientProfileStats.LoadOrStore(rt.profile, &httpClientProfileStats{})
+	val.(*httpClientProfileStats).record(time.Since(start), err, statusCode)
+	return resp, err
+}
+
+func profileTransport(base http.RoundTripper, profile string) http.RoundTripper {
+	return &instrumentedRoundTripper{base: base, profile: profile}
+}
+
+// HTTPClientProfileStats 返回控制面/数据面 HTTP 客户端统计
+func HTTPClientProfileStats() map[string]map[string]int64 {
+	out := make(map[string]map[string]int64)
+	clientProfileStats.Range(func(key, value interface{}) bool {
+		k, ok := key.(string)
+		if !ok {
+			return true
+		}
+		v, ok := value.(*httpClientProfileStats)
+		if !ok {
+			return true
+		}
+		out[k] = v.snapshot()
+		return true
+	})
+	return out
+}
 
 func HttpClient() *http.Client {
-	once.Do(func() {
-		httpClient = NewHttpClient()
-		httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+	controlOnce.Do(func() {
+		controlHTTPClient = NewHttpClient()
+		controlHTTPClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return errors.New("stopped after 10 redirects")
 			}
@@ -279,19 +358,62 @@ func HttpClient() *http.Client {
 			return nil
 		}
 	})
-	return httpClient
+	return controlHTTPClient
+}
+
+// StreamHttpClient 用于大流量数据面请求，避免影响控制面连接池
+func StreamHttpClient() *http.Client {
+	streamOnce.Do(func() {
+		streamHTTPClient = NewStreamHttpClient()
+		streamHTTPClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			req.Header.Del("Referer")
+			return nil
+		}
+	})
+	return streamHTTPClient
 }
 
 func NewHttpClient() *http.Client {
 	transport := &http.Transport{
-		Proxy:           http.ProxyFromEnvironment,
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: conf.Conf.TlsInsecureSkipVerify},
+		Proxy:                 http.ProxyFromEnvironment,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: conf.Conf.TlsInsecureSkipVerify},
+		MaxIdleConns:          200,
+		MaxIdleConnsPerHost:   50,
+		MaxConnsPerHost:       100,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
 	}
 
 	SetProxyIfConfigured(transport)
 
 	return &http.Client{
-		Timeout:   time.Hour * 48,
-		Transport: transport,
+		Timeout:   30 * time.Second,
+		Transport: profileTransport(transport, "control"),
+	}
+}
+
+func NewStreamHttpClient() *http.Client {
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: conf.Conf.TlsInsecureSkipVerify},
+		MaxIdleConns:          400,
+		MaxIdleConnsPerHost:   100,
+		MaxConnsPerHost:       200,
+		IdleConnTimeout:       300 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+	}
+
+	SetProxyIfConfigured(transport)
+
+	return &http.Client{
+		Timeout:   0,
+		Transport: profileTransport(transport, "stream"),
 	}
 }

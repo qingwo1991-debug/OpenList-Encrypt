@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -106,7 +105,7 @@ func TestFindEncryptPath(t *testing.T) {
 }
 
 func TestProcessPropfindResponse(t *testing.T) {
-	p := &ProxyServer{fileCache: sync.Map{}}
+	p := &ProxyServer{fileCache: newShardedAnyMap(cacheShardCount)}
 
 	passwd := "testpass123"
 	encType := EncTypeMix

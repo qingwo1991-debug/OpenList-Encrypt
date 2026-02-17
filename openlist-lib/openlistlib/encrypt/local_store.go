@@ -9,7 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	_ "github.com/mattn/go-sqlite3"
+	log "github.com/sirupsen/logrus"
 )
 
 type StreamStrategy string
@@ -93,6 +95,10 @@ func newLocalStore(baseDir string) (*localStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(10 * time.Minute)
 	if err := initLocalSchema(db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -290,7 +296,18 @@ func (s *localStore) enqueue(record storeRecord) {
 }
 
 func (s *localStore) flushBatchAsync(batch []storeRecord) {
-	_ = s.flushBatch(batch)
+	if err := s.flushBatch(batch); err != nil {
+		// 异步刷盘失败不能丢数据：回灌到队列头并延迟重试
+		log.Warnf("[%s] local_store async flush failed, requeue batch size=%d: %v", internal.TagCache, len(batch), err)
+		s.mu.Lock()
+		if !s.closed {
+			s.buffer = append(batch, s.buffer...)
+		}
+		s.flushing = false
+		s.mu.Unlock()
+		time.Sleep(500 * time.Millisecond)
+		return
+	}
 
 	s.mu.Lock()
 	s.flushing = false

@@ -31,6 +31,8 @@ type FtpMainDriver struct {
 	shutdownLock sync.RWMutex
 	isShutdown   bool
 	tlsConfig    *tls.Config
+	baseCtx      context.Context
+	cancel       context.CancelFunc
 }
 
 func NewMainDriver() (*FtpMainDriver, error) {
@@ -57,6 +59,7 @@ func NewMainDriver() (*FtpMainDriver, error) {
 	if err != nil && tlsRequired != ftpserver.ClearOrEncrypted {
 		return nil, fmt.Errorf("FTP mandatory TLS has been enabled, but the certificate failed to load: %w", err)
 	}
+	baseCtx, cancel := context.WithCancel(context.Background())
 	return &FtpMainDriver{
 		settings: &ftpserver.Settings{
 			ListenAddr:               conf.Conf.FTP.Listen,
@@ -88,6 +91,8 @@ func NewMainDriver() (*FtpMainDriver, error) {
 		shutdownLock: sync.RWMutex{},
 		isShutdown:   false,
 		tlsConfig:    tlsConf,
+		baseCtx:      baseCtx,
+		cancel:       cancel,
 	}, nil
 }
 
@@ -147,7 +152,10 @@ func (d *FtpMainDriver) AuthUser(cc ftpserver.ClientContext, user, pass string) 
 	}
 	model.LoginCache.Del(ip)
 
-	ctx := context.Background()
+	ctx := d.baseCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx = context.WithValue(ctx, conf.UserKey, userObj)
 	if user == "anonymous" || user == "guest" {
 		ctx = context.WithValue(ctx, conf.MetaPassKey, pass)
@@ -168,6 +176,9 @@ func (d *FtpMainDriver) GetTLSConfig() (*tls.Config, error) {
 
 func (d *FtpMainDriver) Stop() {
 	d.isShutdown = true
+	if d.cancel != nil {
+		d.cancel()
+	}
 	d.shutdownLock.Lock()
 	defer d.shutdownLock.Unlock()
 	for _, value := range d.clients {
