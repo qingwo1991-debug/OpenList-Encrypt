@@ -4450,9 +4450,8 @@ func (p *ProxyServer) streamRewriteFsListResponse(w http.ResponseWriter, body io
 				if fileEncPath != nil && fileEncPath.EncName && !isDir {
 					showName := convertShowNameByRule(fileEncPath, name)
 					item["name"] = showName
-					if pathStr, ok := item["path"].(string); ok && pathStr != "" {
-						item["path"] = path.Join(path.Dir(pathStr), showName)
-					} else {
+					normalizeDecryptedMediaFields(item, showName)
+					if _, ok := item["path"].(string); !ok || item["path"] == "" {
 						item["path"] = path.Join(path.Dir(filePath), showName)
 					}
 				}
@@ -4531,9 +4530,8 @@ func (p *ProxyServer) parallelDecryptFileNames(tasks []fileDecryptTask, encPath 
 				log.Debugf("[%s] Parallel decrypt filename: %s -> %s", internal.TagDecrypt, t.name, showName)
 			}
 			t.fileMap["name"] = showName
-			if pathStr, ok := t.fileMap["path"].(string); ok && pathStr != "" {
-				t.fileMap["path"] = path.Join(path.Dir(pathStr), showName)
-			} else if t.filePath != "" {
+			normalizeDecryptedMediaFields(t.fileMap, showName)
+			if _, ok := t.fileMap["path"].(string); (!ok || t.fileMap["path"] == "") && t.filePath != "" {
 				t.fileMap["path"] = path.Join(path.Dir(t.filePath), showName)
 			}
 		}(task)
@@ -4567,9 +4565,8 @@ func (p *ProxyServer) parallelDecryptFileNamesV2(tasks []fileDecryptTask) {
 				log.Debugf("[%s] Parallel decrypt filename: %s -> %s", internal.TagDecrypt, t.name, showName)
 			}
 			t.fileMap["name"] = showName
-			if pathStr, ok := t.fileMap["path"].(string); ok && pathStr != "" {
-				t.fileMap["path"] = path.Join(path.Dir(pathStr), showName)
-			} else if t.filePath != "" {
+			normalizeDecryptedMediaFields(t.fileMap, showName)
+			if _, ok := t.fileMap["path"].(string); (!ok || t.fileMap["path"] == "") && t.filePath != "" {
 				t.fileMap["path"] = path.Join(path.Dir(t.filePath), showName)
 			}
 		}
@@ -4592,6 +4589,25 @@ type fileDecryptTask struct {
 	name     string
 	filePath string
 	encPath  *EncryptPath // 每个文件的加密配置
+}
+
+// normalizeDecryptedMediaFields keeps preview-related fields aligned with decrypted name.
+// This avoids frontend strategy mismatch when encrypted suffix hides the real extension.
+func normalizeDecryptedMediaFields(fileMap map[string]interface{}, showName string) {
+	if fileMap == nil || showName == "" {
+		return
+	}
+	if pathStr, ok := fileMap["path"].(string); ok && pathStr != "" {
+		fileMap["path"] = path.Join(path.Dir(pathStr), showName)
+	}
+	ext := strings.ToLower(path.Ext(showName))
+	if videoExtensions[ext] {
+		fileMap["type"] = float64(2)
+		return
+	}
+	if coverExtensions[ext] || ext == ".svg" || ext == ".avif" {
+		fileMap["type"] = float64(5)
+	}
 }
 
 // 常见视频扩展名
@@ -4768,9 +4784,7 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 					if name, ok := data["name"].(string); ok {
 						showName := convertShowNameByRule(encPath, name)
 						data["name"] = showName
-						if pathStr, ok := data["path"].(string); ok && pathStr != "" {
-							data["path"] = path.Join(path.Dir(pathStr), showName)
-						}
+						normalizeDecryptedMediaFields(data, showName)
 					}
 				}
 
