@@ -2,6 +2,7 @@ package encrypt
 
 import (
 	"path"
+	"strings"
 	"testing"
 )
 
@@ -322,5 +323,42 @@ func TestStripExternalSuffixVariants(t *testing.T) {
 				t.Fatalf("stripExternalSuffix(%q) = (%q, %q), want (%q, %q)", tc.input, gotName, gotSuffix, tc.wantStripped, tc.wantSuffix)
 			}
 		})
+	}
+}
+
+func TestConvertShowNameWithSuffixCompat(t *testing.T) {
+	password := "testpass"
+	encType := EncTypeAESCTR
+	plain := "movie.mp4"
+
+	encrypted := ConvertRealNameWithSuffix(password, encType, plain, ".bin")
+	if path.Ext(encrypted) != ".bin" {
+		t.Fatalf("encrypted ext should be .bin, got %q", path.Ext(encrypted))
+	}
+
+	withDup := strings.TrimSuffix(encrypted, ".bin") + "(1).bin"
+	show := ConvertShowNameWithSuffix(password, encType, withDup, ".bin")
+	if show != "movie{__esuffix__(1)}.mp4" {
+		t.Fatalf("unexpected show name: got %q", show)
+	}
+
+	real := ConvertRealNameWithSuffix(password, encType, show, ".bin")
+	if real != withDup {
+		t.Fatalf("round-trip with duplicate suffix failed: got %q, want %q", real, withDup)
+	}
+}
+
+func TestNormalizeEncSuffix(t *testing.T) {
+	cases := map[string]string{
+		"":      "",
+		"   ":   "",
+		".bin":  ".bin",
+		"bin":   ".bin",
+		" .dat": ".dat",
+	}
+	for in, want := range cases {
+		if got := NormalizeEncSuffix(in); got != want {
+			t.Fatalf("NormalizeEncSuffix(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

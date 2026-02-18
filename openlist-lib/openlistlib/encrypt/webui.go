@@ -655,7 +655,7 @@ const webUIHTML = `
                                 if (encType === 'aesctr') encType = 'aes-ctr';
                                 if (encType === 'rc4') encType = 'rc4md5';
                                 for (const p of encPaths) {
-                                    encryptPaths.push({ path: p, password: item.password, encType: encType || 'aes-ctr', encName: item.encName || false, enable: item.enable !== false });
+                                    encryptPaths.push({ path: p, password: item.password, encType: encType || 'aes-ctr', encName: item.encName || false, encSuffix: item.encSuffix || '', enable: item.enable !== false });
                                 }
                             }
                         } else {
@@ -816,13 +816,14 @@ const webUIHTML = `
             event.preventDefault();
             
             const index = parseInt(document.getElementById('path-index').value);
-            const pathData = {
-                path: document.getElementById('path-pattern').value,
-                password: document.getElementById('path-password').value,
-                encType: document.getElementById('path-enctype').value,
-                encName: document.getElementById('path-encname').checked,
-                enable: true
-            };
+                const pathData = {
+                    path: document.getElementById('path-pattern').value,
+                    password: document.getElementById('path-password').value,
+                    encType: document.getElementById('path-enctype').value,
+                    encName: document.getElementById('path-encname').checked,
+                    encSuffix: index >= 0 && encryptPaths[index] ? (encryptPaths[index].encSuffix || '') : '',
+                    enable: true
+                };
             
             if (index >= 0) {
                 encryptPaths[index] = pathData;

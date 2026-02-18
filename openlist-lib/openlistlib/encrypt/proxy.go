@@ -648,13 +648,14 @@ type SizeMapEntry struct {
 
 // EncryptPath 加密路径配置
 type EncryptPath struct {
-	Path     string         `json:"path"`     // 路径正则表达式
-	Password string         `json:"password"` // 加密密码
-	EncType  EncryptionType `json:"encType"`  // 加密类型
-	EncName  bool           `json:"encName"`  // 是否加密文件名
-	Enable   bool           `json:"enable"`   // 是否启用
-	regex    *regexp.Regexp // 编译后的正则表达式
-	prefix   string         // 可走快速前缀匹配的规则前缀
+	Path      string         `json:"path"`                // 路径正则表达式
+	Password  string         `json:"password"`            // 加密密码
+	EncType   EncryptionType `json:"encType"`             // 加密类型
+	EncName   bool           `json:"encName"`             // 是否加密文件名
+	EncSuffix string         `json:"encSuffix,omitempty"` // 加密文件统一后缀（如 .bin）
+	Enable    bool           `json:"enable"`              // 是否启用
+	regex     *regexp.Regexp // 编译后的正则表达式
+	prefix    string         // 可走快速前缀匹配的规则前缀
 }
 
 type encryptPrefixRule struct {
@@ -861,6 +862,20 @@ func normalizeRulePrefix(raw string) (string, bool) {
 	return path.Clean(base), true
 }
 
+func convertRealNameByRule(ep *EncryptPath, pathText string) string {
+	if ep == nil {
+		return path.Base(pathText)
+	}
+	return ConvertRealNameWithSuffix(ep.Password, ep.EncType, pathText, ep.EncSuffix)
+}
+
+func convertShowNameByRule(ep *EncryptPath, pathText string) string {
+	if ep == nil {
+		return path.Base(pathText)
+	}
+	return ConvertShowNameWithSuffix(ep.Password, ep.EncType, pathText, ep.EncSuffix)
+}
+
 func (p *ProxyServer) rebuildEncryptPathIndex() {
 	if p == nil || p.config == nil {
 		return
@@ -902,6 +917,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		if ep.Path == "" {
 			continue
 		}
+		ep.EncSuffix = NormalizeEncSuffix(ep.EncSuffix)
 		raw := ep.Path
 		if pref, ok := normalizeRulePrefix(raw); ok {
 			ep.prefix = pref
@@ -2226,7 +2242,7 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 							// 仅对“看起来像文件”的名称进行解密（与 alist-encrypt 行为一致，避免误判目录）
 							ext := path.Ext(fileName)
 							if ext != "" {
-								showName := ConvertShowName(encPath.Password, encPath.EncType, fileName)
+								showName := convertShowNameByRule(encPath, fileName)
 								if showName != fileName && !strings.HasPrefix(showName, "orig_") {
 									newPath := path.Join(path.Dir(decodedPath), showName)
 									curHrefShow = newPath
@@ -2259,7 +2275,7 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 						if fileName != "/" && fileName != "." && !strings.HasPrefix(fileName, "orig_") {
 							ext := path.Ext(fileName)
 							if ext != "" {
-								showName := ConvertShowName(encPath.Password, encPath.EncType, fileName)
+								showName := convertShowNameByRule(encPath, fileName)
 								if showName != fileName && !strings.HasPrefix(showName, "orig_") {
 									content = showName
 								}
@@ -2946,11 +2962,12 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			}
 
 			passwdList = append(passwdList, map[string]interface{}{
-				"encPath":  []string{ep.Path},
-				"password": ep.Password,
-				"encType":  encType,
-				"encName":  ep.EncName,
-				"enable":   ep.Enable,
+				"encPath":   []string{ep.Path},
+				"password":  ep.Password,
+				"encType":   encType,
+				"encName":   ep.EncName,
+				"encSuffix": ep.EncSuffix,
+				"enable":    ep.Enable,
 			})
 		}
 
@@ -3451,6 +3468,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 						pwd, _ := m["password"].(string)
 						encTypeStr, _ := m["encType"].(string)
 						encName, _ := m["encName"].(bool)
+						encSuffix, _ := m["encSuffix"].(string)
 						enable, okEnable := m["enable"].(bool)
 						if !okEnable {
 							enable = true
@@ -3466,7 +3484,14 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 						default:
 							encType = EncryptionType(encTypeStr)
 						}
-						newPaths = append(newPaths, &EncryptPath{Path: pathStr, Password: pwd, EncType: encType, EncName: encName, Enable: enable})
+						newPaths = append(newPaths, &EncryptPath{
+							Path:      pathStr,
+							Password:  pwd,
+							EncType:   encType,
+							EncName:   encName,
+							EncSuffix: NormalizeEncSuffix(encSuffix),
+							Enable:    enable,
+						})
 					}
 				}
 				// assign and compile regex using safe wildcard->regex conversion
@@ -3487,6 +3512,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 					if ep.Path == "" {
 						continue
 					}
+					ep.EncSuffix = NormalizeEncSuffix(ep.EncSuffix)
 					raw := ep.Path
 					if strings.HasSuffix(raw, "/*") {
 						base := strings.TrimSuffix(raw, "/*")
@@ -3539,6 +3565,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 									pwd, _ := m["password"].(string)
 									encTypeStr, _ := m["encType"].(string)
 									encName, _ := m["encName"].(bool)
+									encSuffix, _ := m["encSuffix"].(string)
 									var encType EncryptionType
 									switch encTypeStr {
 									case "aesctr":
@@ -3550,7 +3577,14 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 									default:
 										encType = EncryptionType(encTypeStr)
 									}
-									newPaths = append(newPaths, &EncryptPath{Path: pstr, Password: pwd, EncType: encType, EncName: encName, Enable: true})
+									newPaths = append(newPaths, &EncryptPath{
+										Path:      pstr,
+										Password:  pwd,
+										EncType:   encType,
+										EncName:   encName,
+										EncSuffix: NormalizeEncSuffix(encSuffix),
+										Enable:    true,
+									})
 								}
 							case []interface{}:
 								for _, epp := range vv {
@@ -3558,6 +3592,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 										pwd, _ := m["password"].(string)
 										encTypeStr, _ := m["encType"].(string)
 										encName, _ := m["encName"].(bool)
+										encSuffix, _ := m["encSuffix"].(string)
 										var encType EncryptionType
 										switch encTypeStr {
 										case "aesctr":
@@ -3569,7 +3604,14 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 										default:
 											encType = EncryptionType(encTypeStr)
 										}
-										newPaths = append(newPaths, &EncryptPath{Path: s, Password: pwd, EncType: encType, EncName: encName, Enable: true})
+										newPaths = append(newPaths, &EncryptPath{
+											Path:      s,
+											Password:  pwd,
+											EncType:   encType,
+											EncName:   encName,
+											EncSuffix: NormalizeEncSuffix(encSuffix),
+											Enable:    true,
+										})
 									}
 								}
 							}
@@ -3594,6 +3636,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 					if ep.Path == "" {
 						continue
 					}
+					ep.EncSuffix = NormalizeEncSuffix(ep.EncSuffix)
 					raw := ep.Path
 					if strings.HasSuffix(raw, "/*") {
 						base := strings.TrimSuffix(raw, "/*")
@@ -4405,7 +4448,7 @@ func (p *ProxyServer) streamRewriteFsListResponse(w http.ResponseWriter, body io
 					prefetchDirs = append(prefetchDirs, filePath)
 				}
 				if fileEncPath != nil && fileEncPath.EncName && !isDir {
-					showName := ConvertShowName(fileEncPath.Password, fileEncPath.EncType, name)
+					showName := convertShowNameByRule(fileEncPath, name)
 					item["name"] = showName
 					if pathStr, ok := item["path"].(string); ok && pathStr != "" {
 						item["path"] = path.Join(path.Dir(pathStr), showName)
@@ -4483,7 +4526,7 @@ func (p *ProxyServer) parallelDecryptFileNames(tasks []fileDecryptTask, encPath 
 			semaphore <- struct{}{}        // 获取信号量
 			defer func() { <-semaphore }() // 释放信号量
 
-			showName := ConvertShowName(encPath.Password, encPath.EncType, t.name)
+			showName := convertShowNameByRule(encPath, t.name)
 			if showName != t.name && !strings.HasPrefix(showName, "orig_") {
 				log.Debugf("[%s] Parallel decrypt filename: %s -> %s", internal.TagDecrypt, t.name, showName)
 			}
@@ -4519,7 +4562,7 @@ func (p *ProxyServer) parallelDecryptFileNamesV2(tasks []fileDecryptTask) {
 			if t.encPath == nil {
 				continue
 			}
-			showName := ConvertShowName(t.encPath.Password, t.encPath.EncType, t.name)
+			showName := convertShowNameByRule(t.encPath, t.name)
 			if showName != t.name && !strings.HasPrefix(showName, "orig_") {
 				log.Debugf("[%s] Parallel decrypt filename: %s -> %s", internal.TagDecrypt, t.name, showName)
 			}
@@ -4648,7 +4691,7 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 		// 尝试将显示名转换为真实加密名（ConvertRealName 会处理 orig_ 前缀）
 		fileName := path.Base(filePath)
 		if fileName != "/" && fileName != "." {
-			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			realName := convertRealNameByRule(encPath, filePath)
 			filePath = path.Join(path.Dir(filePath), realName)
 			reqData["path"] = filePath
 			body, _ = json.Marshal(reqData)
@@ -4723,7 +4766,7 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 				// 如果开启了文件名加密，将加密名转换为显示名
 				if encPath.EncName {
 					if name, ok := data["name"].(string); ok {
-						showName := ConvertShowName(encPath.Password, encPath.EncType, name)
+						showName := convertShowNameByRule(encPath, name)
 						data["name"] = showName
 						if pathStr, ok := data["path"].(string); ok && pathStr != "" {
 							data["path"] = path.Join(path.Dir(pathStr), showName)
@@ -4843,7 +4886,7 @@ func (p *ProxyServer) handleFsRemove(w http.ResponseWriter, r *http.Request) {
 				converted = append(converted, name)
 				seen[name] = true
 			}
-			realName := ConvertRealName(encPath.Password, encPath.EncType, name)
+			realName := convertRealNameByRule(encPath, name)
 			if realName != "" && !seen[realName] {
 				converted = append(converted, realName)
 				seen[realName] = true
@@ -4887,7 +4930,7 @@ func (p *ProxyServer) handleFsMoveCopy(w http.ResponseWriter, r *http.Request, a
 			if name == "" {
 				continue
 			}
-			realName := ConvertRealName(encPath.Password, encPath.EncType, name)
+			realName := convertRealNameByRule(encPath, name)
 			if realName == "" {
 				realName = name
 			}
@@ -4919,8 +4962,8 @@ func (p *ProxyServer) handleFsRename(w http.ResponseWriter, r *http.Request) {
 	encPath := p.findEncryptPath(filePath)
 	if encPath != nil && encPath.EncName {
 		if cached, ok := p.loadFileCache(filePath); ok && !cached.IsDir {
-			reqData["path"] = ConvertRealName(encPath.Password, encPath.EncType, filePath)
-			reqData["name"] = ConvertRealName(encPath.Password, encPath.EncType, name)
+			reqData["path"] = convertRealNameByRule(encPath, filePath)
+			reqData["name"] = convertRealNameByRule(encPath, name)
 			body, _ = json.Marshal(reqData)
 		}
 	}
@@ -4972,12 +5015,9 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 	if encPath != nil && encPath.EncName {
 		fileName := path.Base(filePath)
 		if fileName != "/" && fileName != "." {
-			// alist-encrypt: const encName = encodeName(passwdInfo.password, passwdInfo.encType, fileName)
-			// 然后 filePath = dirname + '/' + encName + ext
-			ext := path.Ext(fileName)
-			encName := EncodeName(encPath.Password, encPath.EncType, fileName)
-			newFilePath := path.Join(path.Dir(filePath), encName+ext)
-			p.debugf("encrypt", "%s Encrypting filename: %s -> %s", internal.LogPrefix(ctx, internal.TagEncrypt), fileName, encName+ext)
+			newRealName := convertRealNameByRule(encPath, filePath)
+			newFilePath := path.Join(path.Dir(filePath), newRealName)
+			p.debugf("encrypt", "%s Encrypting filename: %s -> %s", internal.LogPrefix(ctx, internal.TagEncrypt), fileName, newRealName)
 
 			// 更新 File-Path header
 			r.Header.Set("File-Path", url.PathEscape(newFilePath))
@@ -5081,7 +5121,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	if encPath != nil && encPath.EncName {
 		fileName := path.Base(filePath)
 		if fileName != "/" && fileName != "." {
-			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			realName := convertRealNameByRule(encPath, filePath)
 			newFilePath := path.Join(path.Dir(filePath), realName)
 			if strings.HasPrefix(originalPath, "/d/") {
 				actualURLPath = "/d" + newFilePath
@@ -5101,7 +5141,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		log.Debugf("%s handleDownload: got fileSize from cache: %d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
 	}
 	if fileSize == 0 && encPath != nil && encPath.EncName {
-		realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+		realName := convertRealNameByRule(encPath, filePath)
 		encPathFull := path.Join(path.Dir(filePath), realName)
 		if !strings.HasPrefix(encPathFull, "/") {
 			encPathFull = "/" + encPathFull
@@ -5443,7 +5483,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		//                const sourceUrl = path.dirname(url) + '/' + realName
 		//                const sourceFileInfo = await getFileInfo(sourceUrl)
 		if fileName != "/" && fileName != "." {
-			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			realName := convertRealNameByRule(encPath, filePath)
 			// 缓存中存储的是完整路径（包含 /dav 前缀），所以查找时也用完整路径
 			sourceUrl := path.Join(path.Dir(filePath), realName)
 			if !strings.HasPrefix(sourceUrl, "/") {
@@ -5471,7 +5511,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 	if methodNeedConvert && encPath != nil && encPath.EncName {
 		if fileName != "/" && fileName != "." {
-			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			realName := convertRealNameByRule(encPath, filePath)
 			newPath := path.Join(path.Dir(filePath), realName)
 			// 确保路径以 / 开头
 			if !strings.HasPrefix(newPath, "/") {
@@ -5592,7 +5632,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			if destEncPath != nil && destEncPath.EncName {
 				destName := path.Base(destPath)
 				if destName != "/" && destName != "." {
-					realDestName := ConvertRealName(destEncPath.Password, destEncPath.EncType, destPath)
+					realDestName := convertRealNameByRule(destEncPath, destPath)
 					newDestPath := path.Join(path.Dir(destPath), realDestName)
 					if !strings.HasPrefix(newDestPath, "/") {
 						newDestPath = "/" + newDestPath
@@ -5692,7 +5732,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		// 重新计算加密路径
 		fileName := path.Base(filePath)
 		if fileName != "/" && fileName != "." {
-			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			realName := convertRealNameByRule(encPath, filePath)
 			newPath := path.Join(path.Dir(filePath), realName)
 			if !strings.HasPrefix(newPath, "/") {
 				newPath = "/" + newPath
@@ -5789,7 +5829,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			}
 			// 也尝试用密文路径查缓存
 			if fileSize == 0 && encPath.EncName {
-				realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+				realName := convertRealNameByRule(encPath, filePath)
 				encPathFull := path.Join(path.Dir(filePath), realName)
 				if !strings.HasPrefix(encPathFull, "/") {
 					encPathFull = "/" + encPathFull
@@ -5900,7 +5940,7 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 		// 进一步尝试：使用密文路径查缓存（对齐 alist-encrypt 的重试逻辑）
 		if fileSize == 0 && encPath != nil && encPath.EncName {
-			realName := ConvertRealName(encPath.Password, encPath.EncType, filePath)
+			realName := convertRealNameByRule(encPath, filePath)
 			encPathFull := path.Join(path.Dir(filePath), realName)
 			if !strings.HasPrefix(encPathFull, "/") {
 				encPathFull = "/" + encPathFull
