@@ -170,10 +170,10 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
         }
     }
     
-    override fun addEncryptPath(path: String, password: String, encType: String, encName: Boolean) {
-        Log.d(TAG, "addEncryptPath: path=$path, encType=$encType, encName=$encName")
+    override fun addEncryptPath(path: String, password: String, encType: String, encName: Boolean, encSuffix: String) {
+        Log.d(TAG, "addEncryptPath: path=$path, encType=$encType, encName=$encName, encSuffix=$encSuffix")
         try {
-            Openlistlib.addEncryptPathConfig(path, password, encType, encName)
+            Openlistlib.addEncryptPathConfig(path, password, encType, encName, encSuffix)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to add encrypt path", e)
             throw e
@@ -186,11 +186,12 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
         password: String,
         encType: String,
         encName: Boolean,
+        encSuffix: String,
         enable: Boolean
     ) {
         Log.d(TAG, "updateEncryptPath: index=$index, path=$path")
         try {
-            Openlistlib.updateEncryptPathConfig(index, path, password, encType, encName, enable)
+            Openlistlib.updateEncryptPathConfig(index, path, password, encType, encName, encSuffix, enable)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to update encrypt path", e)
             throw e

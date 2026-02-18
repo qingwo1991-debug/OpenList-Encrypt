@@ -225,14 +225,14 @@ func (m *EncryptProxyManager) SetDBExportSyncConfig(enable bool, baseURL string,
 }
 
 // AddEncryptPath 添加加密路径
-func (m *EncryptProxyManager) AddEncryptPath(path, password string, encType string, encName bool) error {
+func (m *EncryptProxyManager) AddEncryptPath(path, password string, encType string, encName bool, encSuffix string) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	if m.configManager == nil {
 		return errors.New("config manager not initialized")
 	}
-	err := m.configManager.AddEncryptPath(path, password, encrypt.EncryptionType(encType), encName)
+	err := m.configManager.AddEncryptPath(path, password, encrypt.EncryptionType(encType), encName, encSuffix)
 	if err == nil {
 		m.updateProxyServerConfig()
 	}
@@ -240,14 +240,14 @@ func (m *EncryptProxyManager) AddEncryptPath(path, password string, encType stri
 }
 
 // UpdateEncryptPath 更新加密路径
-func (m *EncryptProxyManager) UpdateEncryptPath(index int, path, password string, encType string, encName, enable bool) error {
+func (m *EncryptProxyManager) UpdateEncryptPath(index int, path, password string, encType string, encName bool, encSuffix string, enable bool) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	if m.configManager == nil {
 		return errors.New("config manager not initialized")
 	}
-	err := m.configManager.UpdateEncryptPath(index, path, password, encrypt.EncryptionType(encType), encName, enable)
+	err := m.configManager.UpdateEncryptPath(index, path, password, encrypt.EncryptionType(encType), encName, encSuffix, enable)
 	if err == nil {
 		m.updateProxyServerConfig()
 	}
@@ -377,8 +377,8 @@ func GetEncryptEnableH2C() bool {
 }
 
 // AddEncryptPathConfig 添加加密路径配置（供 gomobile 调用）
-func AddEncryptPathConfig(path, password, encType string, encName bool) error {
-	return GetEncryptManager().AddEncryptPath(path, password, encType, encName)
+func AddEncryptPathConfig(path, password, encType string, encName bool, encSuffix string) error {
+	return GetEncryptManager().AddEncryptPath(path, password, encType, encName, encSuffix)
 }
 
 // RemoveEncryptPathConfig 删除加密路径配置（供 gomobile 调用）
@@ -404,19 +404,21 @@ func GetEncryptPathsJson() string {
 	}
 
 	type PathInfo struct {
-		Path    string `json:"path"`
-		EncType string `json:"encType"`
-		EncName bool   `json:"encName"`
-		Enable  bool   `json:"enable"`
+		Path      string `json:"path"`
+		EncType   string `json:"encType"`
+		EncName   bool   `json:"encName"`
+		EncSuffix string `json:"encSuffix,omitempty"`
+		Enable    bool   `json:"enable"`
 	}
 
 	infos := make([]PathInfo, len(paths))
 	for i, p := range paths {
 		infos[i] = PathInfo{
-			Path:    p.Path,
-			EncType: string(p.EncType),
-			EncName: p.EncName,
-			Enable:  p.Enable,
+			Path:      p.Path,
+			EncType:   string(p.EncType),
+			EncName:   p.EncName,
+			EncSuffix: p.EncSuffix,
+			Enable:    p.Enable,
 		}
 	}
 
@@ -435,10 +437,11 @@ func GetEncryptConfigJson() string {
 	}
 
 	type PathInfo struct {
-		Path    string `json:"path"`
-		EncType string `json:"encType"`
-		EncName bool   `json:"encName"`
-		Enable  bool   `json:"enable"`
+		Path      string `json:"path"`
+		EncType   string `json:"encType"`
+		EncName   bool   `json:"encName"`
+		EncSuffix string `json:"encSuffix,omitempty"`
+		Enable    bool   `json:"enable"`
 	}
 
 	type ConfigInfo struct {
@@ -464,10 +467,11 @@ func GetEncryptConfigJson() string {
 	paths := make([]PathInfo, len(config.EncryptPaths))
 	for i, p := range config.EncryptPaths {
 		paths[i] = PathInfo{
-			Path:    p.Path,
-			EncType: string(p.EncType),
-			EncName: p.EncName,
-			Enable:  p.Enable,
+			Path:      p.Path,
+			EncType:   string(p.EncType),
+			EncName:   p.EncName,
+			EncSuffix: p.EncSuffix,
+			Enable:    p.Enable,
 		}
 	}
 
@@ -499,6 +503,6 @@ func GetEncryptConfigJson() string {
 }
 
 // UpdateEncryptPathConfig 更新加密路径配置（供 gomobile 调用）
-func UpdateEncryptPathConfig(index int64, path, password, encType string, encName, enable bool) error {
-	return GetEncryptManager().UpdateEncryptPath(int(index), path, password, encType, encName, enable)
+func UpdateEncryptPathConfig(index int64, path, password, encType string, encName bool, encSuffix string, enable bool) error {
+	return GetEncryptManager().UpdateEncryptPath(int(index), path, password, encType, encName, encSuffix, enable)
 }

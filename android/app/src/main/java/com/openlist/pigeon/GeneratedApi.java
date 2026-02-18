@@ -798,7 +798,8 @@ public class GeneratedApi {
         @NonNull String path,
         @NonNull String password,
         @NonNull String encType,
-        @NonNull Boolean encName);
+        @NonNull Boolean encName,
+        @NonNull String encSuffix);
 
     void updateEncryptPath(
         @NonNull Long index,
@@ -806,6 +807,7 @@ public class GeneratedApi {
         @NonNull String password,
         @NonNull String encType,
         @NonNull Boolean encName,
+        @NonNull String encSuffix,
         @NonNull Boolean enable);
 
     void removeEncryptPath(@NonNull Long index);
@@ -1127,8 +1129,9 @@ public class GeneratedApi {
                 String passwordArg = (String) args.get(1);
                 String encTypeArg = (String) args.get(2);
                 Boolean encNameArg = (Boolean) args.get(3);
+                String encSuffixArg = (String) args.get(4);
                 try {
-                  api.addEncryptPath(pathArg, passwordArg, encTypeArg, encNameArg);
+                  api.addEncryptPath(pathArg, passwordArg, encTypeArg, encNameArg, encSuffixArg);
                   wrapped.add(0, null);
                 } catch (Throwable exception) {
                   ArrayList<Object> wrappedError = wrapError(exception);
@@ -1154,9 +1157,10 @@ public class GeneratedApi {
                 String passwordArg = (String) args.get(2);
                 String encTypeArg = (String) args.get(3);
                 Boolean encNameArg = (Boolean) args.get(4);
-                Boolean enableArg = (Boolean) args.get(5);
+                String encSuffixArg = (String) args.get(5);
+                Boolean enableArg = (Boolean) args.get(6);
                 try {
-                  api.updateEncryptPath(indexArg, pathArg, passwordArg, encTypeArg, encNameArg, enableArg);
+                  api.updateEncryptPath(indexArg, pathArg, passwordArg, encTypeArg, encNameArg, encSuffixArg, enableArg);
                   wrapped.add(0, null);
                 } catch (Throwable exception) {
                   ArrayList<Object> wrappedError = wrapError(exception);

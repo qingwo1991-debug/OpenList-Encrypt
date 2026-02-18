@@ -113,6 +113,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
               password: '', // 密码不会返回
               encType: p['encType'] ?? 'aes-ctr',
               encName: p['encName'] ?? false,
+              encSuffix: p['encSuffix'] ?? '',
               enable: p['enable'] ?? true,
             )).toList();
           }
@@ -229,6 +230,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   void _showAddPathDialog() {
     final pathController = TextEditingController();
     final passwordController = TextEditingController();
+    final encSuffixController = TextEditingController();
     String encType = 'aes-ctr';
     bool encName = false;
     
@@ -278,6 +280,14 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         setDialogState(() => encName = value);
                       },
                     ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: encSuffixController,
+                      decoration: const InputDecoration(
+                        labelText: '加密后缀',
+                        hintText: '.bin（留空则使用原始后缀）',
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -304,6 +314,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                   passwordController.text,
                   encType,
                   encName,
+                  encSuffixController.text,
                 );
                 
                 // 重新加载配置
@@ -329,6 +340,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     final config = _encryptPaths[index];
     final pathController = TextEditingController(text: config.path);
     final passwordController = TextEditingController();
+    final encSuffixController = TextEditingController(text: config.encSuffix);
     String encType = config.encType;
     bool encName = config.encName;
     bool enable = config.enable;
@@ -378,6 +390,14 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         setDialogState(() => encName = value);
                       },
                     ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: encSuffixController,
+                      decoration: const InputDecoration(
+                        labelText: '加密后缀',
+                        hintText: '.bin（留空则使用原始后缀）',
+                      ),
+                    ),
                     SwitchListTile(
                       title: const Text('启用'),
                       value: enable,
@@ -423,6 +443,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                   passwordController.text,
                   encType,
                   encName,
+                  encSuffixController.text,
                   enable,
                 );
                 
@@ -819,7 +840,8 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                               title: Text(config.path),
                               subtitle: Text(
                                 '${config.encType.toUpperCase()} | '
-                                '${config.encName ? "加密文件名" : "不加密文件名"}',
+                                '${config.encName ? "加密文件名" : "不加密文件名"}'
+                                '${config.encSuffix.isEmpty ? "" : " | 后缀 ${config.encSuffix}"}',
                               ),
                               trailing: Switch(
                                 value: config.enable,
@@ -831,6 +853,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                                       '', // 密码保持不变
                                       config.encType,
                                       config.encName,
+                                      config.encSuffix,
                                       value,
                                     );
                                     await _loadConfig();
@@ -893,6 +916,7 @@ class EncryptPathConfig {
   final String password;
   final String encType;
   final bool encName;
+  final String encSuffix;
   final bool enable;
 
   EncryptPathConfig({
@@ -900,6 +924,7 @@ class EncryptPathConfig {
     required this.password,
     required this.encType,
     required this.encName,
+    required this.encSuffix,
     required this.enable,
   });
 }

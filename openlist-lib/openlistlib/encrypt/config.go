@@ -322,9 +322,10 @@ func (m *ConfigManager) SetDBExportSyncConfig(enable bool, baseURL string, inter
 }
 
 // AddEncryptPath 添加加密路径
-func (m *ConfigManager) AddEncryptPath(pathVal, password string, encType EncryptionType, encName bool) error {
+func (m *ConfigManager) AddEncryptPath(pathVal, password string, encType EncryptionType, encName bool, encSuffix string) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+	encSuffix = NormalizeEncSuffix(encSuffix)
 
 	// 支持逗号分隔的多个路径
 	paths := strings.Split(pathVal, ",")
@@ -347,11 +348,12 @@ func (m *ConfigManager) AddEncryptPath(pathVal, password string, encType Encrypt
 		}
 
 		m.config.EncryptPaths = append(m.config.EncryptPaths, &EncryptPath{
-			Path:     rawPath,
-			Password: password,
-			EncType:  encType,
-			EncName:  encName,
-			Enable:   true,
+			Path:      rawPath,
+			Password:  password,
+			EncType:   encType,
+			EncName:   encName,
+			EncSuffix: encSuffix,
+			Enable:    true,
 		})
 	}
 
@@ -359,20 +361,22 @@ func (m *ConfigManager) AddEncryptPath(pathVal, password string, encType Encrypt
 }
 
 // UpdateEncryptPath 更新加密路径
-func (m *ConfigManager) UpdateEncryptPath(index int, path, password string, encType EncryptionType, encName, enable bool) error {
+func (m *ConfigManager) UpdateEncryptPath(index int, path, password string, encType EncryptionType, encName bool, encSuffix string, enable bool) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+	encSuffix = NormalizeEncSuffix(encSuffix)
 
 	if index < 0 || index >= len(m.config.EncryptPaths) {
 		return errors.New("index out of range")
 	}
 
 	m.config.EncryptPaths[index] = &EncryptPath{
-		Path:     path,
-		Password: password,
-		EncType:  encType,
-		EncName:  encName,
-		Enable:   enable,
+		Path:      path,
+		Password:  password,
+		EncType:   encType,
+		EncName:   encName,
+		EncSuffix: encSuffix,
+		Enable:    enable,
 	}
 
 	return m.saveConfigLocked()

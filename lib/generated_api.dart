@@ -1076,7 +1076,7 @@ class EncryptProxy {
   }
 
   /// 添加加密路径
-  Future<void> addEncryptPath(String path, String password, String encType, bool encName) async {
+  Future<void> addEncryptPath(String path, String password, String encType, bool encName, String encSuffix) async {
     const String __pigeon_channelName = 'dev.flutter.pigeon.openlist_mobile.EncryptProxy.addEncryptPath';
     final BasicMessageChannel<Object?> __pigeon_channel = BasicMessageChannel<Object?>(
       __pigeon_channelName,
@@ -1084,7 +1084,7 @@ class EncryptProxy {
       binaryMessenger: __pigeon_binaryMessenger,
     );
     final List<Object?>? __pigeon_replyList =
-        await __pigeon_channel.send(<Object?>[path, password, encType, encName]) as List<Object?>?;
+        await __pigeon_channel.send(<Object?>[path, password, encType, encName, encSuffix]) as List<Object?>?;
     if (__pigeon_replyList == null) {
       throw _createConnectionError(__pigeon_channelName);
     } else if (__pigeon_replyList.length > 1) {
@@ -1099,7 +1099,7 @@ class EncryptProxy {
   }
 
   /// 更新加密路径
-  Future<void> updateEncryptPath(int index, String path, String password, String encType, bool encName, bool enable) async {
+  Future<void> updateEncryptPath(int index, String path, String password, String encType, bool encName, String encSuffix, bool enable) async {
     const String __pigeon_channelName = 'dev.flutter.pigeon.openlist_mobile.EncryptProxy.updateEncryptPath';
     final BasicMessageChannel<Object?> __pigeon_channel = BasicMessageChannel<Object?>(
       __pigeon_channelName,
@@ -1107,7 +1107,7 @@ class EncryptProxy {
       binaryMessenger: __pigeon_binaryMessenger,
     );
     final List<Object?>? __pigeon_replyList =
-        await __pigeon_channel.send(<Object?>[index, path, password, encType, encName, enable]) as List<Object?>?;
+        await __pigeon_channel.send(<Object?>[index, path, password, encType, encName, encSuffix, enable]) as List<Object?>?;
     if (__pigeon_replyList == null) {
       throw _createConnectionError(__pigeon_channelName);
     } else if (__pigeon_replyList.length > 1) {

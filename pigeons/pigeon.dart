@@ -123,10 +123,10 @@ abstract class EncryptProxy {
   );
   
   /// 添加加密路径
-  void addEncryptPath(String path, String password, String encType, bool encName);
+  void addEncryptPath(String path, String password, String encType, bool encName, String encSuffix);
   
   /// 更新加密路径
-  void updateEncryptPath(int index, String path, String password, String encType, bool encName, bool enable);
+  void updateEncryptPath(int index, String path, String password, String encType, bool encName, String encSuffix, bool enable);
   
   /// 删除加密路径
   void removeEncryptPath(int index);
