@@ -40,8 +40,8 @@ func DefaultConfig() *ProxyConfig {
 		SizeMapTTL:                    defaultSizeMapTTLMinutes,
 		EnableRangeCompatCache:        true,
 		RangeCompatTTL:                defaultRangeCompatTTLMinutes,
-		RangeCompatMinFailures:        1,
-		RangeSkipMaxBytes:             32 * 1024 * 1024,
+		RangeCompatMinFailures:        2,
+		RangeSkipMaxBytes:             defaultRangeSkipMaxBytes,
 		PlayFirstFallback:             true,
 		WebDAVNegativeCacheTTLMinutes: 10,
 		RedirectCacheTTLMinutes:       1440,
@@ -168,10 +168,10 @@ func (m *ConfigManager) Load() error {
 		config.RangeCompatTTL = defaultRangeCompatTTLMinutes
 	}
 	if config.RangeCompatMinFailures <= 0 {
-		config.RangeCompatMinFailures = 1
+		config.RangeCompatMinFailures = 2
 	}
 	if config.RangeSkipMaxBytes <= 0 {
-		config.RangeSkipMaxBytes = 32 * 1024 * 1024
+		config.RangeSkipMaxBytes = defaultRangeSkipMaxBytes
 	}
 	if config.ParallelDecryptConcurrency <= 0 {
 		config.ParallelDecryptConcurrency = 8
@@ -387,14 +387,14 @@ func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
 	}
 	if payload.RangeCompatMinFailures != nil {
 		if *payload.RangeCompatMinFailures <= 0 {
-			m.config.RangeCompatMinFailures = 1
+			m.config.RangeCompatMinFailures = 2
 		} else {
 			m.config.RangeCompatMinFailures = *payload.RangeCompatMinFailures
 		}
 	}
 	if payload.RangeSkipMaxBytes != nil {
 		if *payload.RangeSkipMaxBytes <= 0 {
-			m.config.RangeSkipMaxBytes = 32 * 1024 * 1024
+			m.config.RangeSkipMaxBytes = defaultRangeSkipMaxBytes
 		} else {
 			m.config.RangeSkipMaxBytes = *payload.RangeSkipMaxBytes
 		}

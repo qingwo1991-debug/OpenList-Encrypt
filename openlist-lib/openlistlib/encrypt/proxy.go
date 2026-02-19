@@ -52,7 +52,9 @@ const (
 	// maxParallelDecryptLimit 最大并行解密数上限
 	maxParallelDecryptLimit = 32
 	// defaultRangeSkipMaxBytes 当上游不支持 Range 时，本地最多跳过的字节数
-	defaultRangeSkipMaxBytes = 32 * 1024 * 1024
+	defaultRangeSkipMaxBytes = 256 * 1024 * 1024
+	// rangePreferUpstreamStartBytes 当偏移超过该值时优先保留上游 Range，避免本地大跨度 skip
+	rangePreferUpstreamStartBytes = 4 * 1024 * 1024
 	// encryptedPrefetchMaxDirs 单次最多预热的子目录数
 	encryptedPrefetchMaxDirs = 20
 	// encryptedPrefetchConcurrency 预热并发
@@ -87,6 +89,41 @@ func clampSeconds(v, def, minV, maxV int) int {
 		v = maxV
 	}
 	return v
+}
+
+func parseRangeStart(rangeHeader string) (int64, bool) {
+	raw := strings.TrimSpace(rangeHeader)
+	if raw == "" || !strings.HasPrefix(raw, "bytes=") {
+		return 0, false
+	}
+	parts := strings.SplitN(strings.TrimPrefix(raw, "bytes="), "-", 2)
+	if len(parts) == 0 {
+		return 0, false
+	}
+	startText := strings.TrimSpace(parts[0])
+	if startText == "" {
+		return 0, false
+	}
+	start, err := strconv.ParseInt(startText, 10, 64)
+	if err != nil || start < 0 {
+		return 0, false
+	}
+	return start, true
+}
+
+func pathScopeKey(rawPath string) string {
+	trimmed := strings.Trim(strings.TrimSpace(rawPath), "/")
+	if trimmed == "" {
+		return "/"
+	}
+	first := trimmed
+	if idx := strings.IndexByte(trimmed, '/'); idx >= 0 {
+		first = trimmed[:idx]
+	}
+	if first == "" {
+		return "/"
+	}
+	return strings.ToLower(first)
 }
 
 func (p *ProxyServer) debugEnabled(module string) bool {
@@ -773,6 +810,11 @@ type ProxyServer struct {
 	rangeCompatMu       sync.RWMutex
 	rangeCompat         map[string]time.Time
 	rangeCompatFailures map[string]int
+	rangeProbeMu        sync.Mutex
+	rangeProbeTargets   map[string]rangeProbeTarget
+	rangeProbeQueue     chan string
+	rangeProbeDone      chan struct{}
+	rangeProbeWG        sync.WaitGroup
 	cleanupTicker       *time.Ticker
 	cleanupDone         chan struct{}
 	localStore          *localStore
@@ -825,7 +867,7 @@ func applyLearningDefaults(cfg *ProxyConfig) {
 		cfg.RangeCompatTTL = defaultRangeCompatTTLMinutes
 	}
 	if cfg.RangeCompatMinFailures <= 0 {
-		cfg.RangeCompatMinFailures = 1
+		cfg.RangeCompatMinFailures = 2
 	}
 	if cfg.RangeSkipMaxBytes <= 0 {
 		cfg.RangeSkipMaxBytes = defaultRangeSkipMaxBytes
@@ -1173,8 +1215,9 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	// 启动缓存清理协程
 	server.startCacheCleanup()
 	server.initSizeMap()
-	server.initRangeCompat()
 	server.initLocalStore()
+	server.initRangeCompat()
+	server.startRangeProbeLoop()
 	server.startDBExportSyncLoop()
 
 	return server, nil
@@ -1333,18 +1376,36 @@ func (p *ProxyServer) initRangeCompat() {
 		p.rangeCompatFailures = make(map[string]int)
 	}
 	p.rangeCompatMu.Unlock()
+	if p.localStore != nil {
+		if records, err := p.localStore.LoadRangeCompat(time.Now()); err != nil {
+			log.Warnf("[%s] load range compat cache failed: %v", internal.TagCache, err)
+		} else if len(records) > 0 {
+			p.rangeCompatMu.Lock()
+			for key, blockedUntil := range records {
+				p.rangeCompat[key] = blockedUntil
+			}
+			p.rangeCompatMu.Unlock()
+		}
+	}
 }
 
-func (p *ProxyServer) rangeCompatKey(targetURL string) string {
+func (p *ProxyServer) rangeCompatKey(targetURL, sourcePath string) string {
 	parsed, err := url.Parse(targetURL)
 	if err != nil {
 		return ""
 	}
-	pathKey := strings.Trim(parsed.Path, "/")
-	if pathKey == "" {
-		pathKey = "/"
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "" {
+		host = strings.ToLower(strings.TrimSpace(parsed.Host))
 	}
-	return parsed.Host + "|" + pathKey
+	if host == "" {
+		return ""
+	}
+	scope := pathScopeKey(sourcePath)
+	if scope == "/" {
+		scope = pathScopeKey(parsed.Path)
+	}
+	return host + "|" + scope
 }
 
 func (p *ProxyServer) rangeCompatTTL() time.Duration {
@@ -1354,7 +1415,7 @@ func (p *ProxyServer) rangeCompatTTL() time.Duration {
 	return time.Duration(p.config.RangeCompatTTL) * time.Minute
 }
 
-func (p *ProxyServer) shouldSkipRange(targetURL string) bool {
+func (p *ProxyServer) shouldSkipRange(targetURL, sourcePath string) bool {
 	if p.config == nil || !p.config.EnableRangeCompatCache {
 		return false
 	}
@@ -1362,7 +1423,7 @@ func (p *ProxyServer) shouldSkipRange(targetURL string) bool {
 	if ttl <= 0 {
 		return false
 	}
-	key := p.rangeCompatKey(targetURL)
+	key := p.rangeCompatKey(targetURL, sourcePath)
 	if key == "" {
 		return false
 	}
@@ -1376,6 +1437,9 @@ func (p *ProxyServer) shouldSkipRange(targetURL string) bool {
 		p.rangeCompatMu.Lock()
 		delete(p.rangeCompat, key)
 		p.rangeCompatMu.Unlock()
+		if p.localStore != nil {
+			_ = p.localStore.DeleteRangeCompat(key)
+		}
 		return false
 	}
 	return true
@@ -1402,7 +1466,7 @@ func (p *ProxyServer) redirectCacheTTL() time.Duration {
 	return time.Duration(p.config.RedirectCacheTTLMinutes) * time.Minute
 }
 
-func (p *ProxyServer) markRangeIncompatible(targetURL string) {
+func (p *ProxyServer) markRangeIncompatible(targetURL, sourcePath string) {
 	if p.config == nil || !p.config.EnableRangeCompatCache {
 		return
 	}
@@ -1410,7 +1474,7 @@ func (p *ProxyServer) markRangeIncompatible(targetURL string) {
 	if ttl <= 0 {
 		return
 	}
-	key := p.rangeCompatKey(targetURL)
+	key := p.rangeCompatKey(targetURL, sourcePath)
 	if key == "" {
 		return
 	}
@@ -1423,19 +1487,29 @@ func (p *ProxyServer) markRangeIncompatible(targetURL string) {
 	}
 	p.rangeCompatFailures[key]++
 	failures := p.rangeCompatFailures[key]
+	threshold := p.rangeCompatMinFailures()
 	if failures >= p.rangeCompatMinFailures() {
 		p.rangeCompat[key] = time.Now().Add(ttl)
 		p.rangeCompatFailures[key] = 0
 	}
+	blockedUntil := p.rangeCompat[key]
 	p.rangeCompatMu.Unlock()
+	if p.localStore != nil {
+		if failures >= threshold {
+			_ = p.localStore.UpsertRangeCompat(key, blockedUntil, 0)
+		} else {
+			_ = p.localStore.UpsertRangeCompat(key, time.Time{}, failures)
+		}
+	}
+	p.registerRangeProbeTarget(targetURL, sourcePath, failures >= threshold)
 	p.debugf("range", "mark incompatible key=%s failures=%d ttl=%s", key, failures, ttl.String())
 }
 
-func (p *ProxyServer) markRangeCompatible(targetURL string) {
+func (p *ProxyServer) markRangeCompatible(targetURL, sourcePath string) {
 	if p.config == nil || !p.config.EnableRangeCompatCache {
 		return
 	}
-	key := p.rangeCompatKey(targetURL)
+	key := p.rangeCompatKey(targetURL, sourcePath)
 	if key == "" {
 		return
 	}
@@ -1445,6 +1519,10 @@ func (p *ProxyServer) markRangeCompatible(targetURL string) {
 		delete(p.rangeCompatFailures, key)
 	}
 	p.rangeCompatMu.Unlock()
+	if p.localStore != nil {
+		_ = p.localStore.DeleteRangeCompat(key)
+	}
+	p.registerRangeProbeTarget(targetURL, sourcePath, false)
 	p.debugf("range", "mark compatible key=%s", key)
 }
 
@@ -1720,6 +1798,7 @@ func (p *ProxyServer) Stop() error {
 
 	// 停止缓存清理协程
 	p.stopCacheCleanup()
+	p.stopRangeProbeLoop()
 	p.stopDBExportSyncLoop()
 	if p.sizeMapDone != nil {
 		close(p.sizeMapDone)
@@ -3872,10 +3951,10 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 		p.mutex.Lock()
 		if p.config.RangeCompatMinFailures <= 0 {
-			p.config.RangeCompatMinFailures = 1
+			p.config.RangeCompatMinFailures = 2
 		}
 		if p.config.RangeSkipMaxBytes <= 0 {
-			p.config.RangeSkipMaxBytes = 32 * 1024 * 1024
+			p.config.RangeSkipMaxBytes = defaultRangeSkipMaxBytes
 		}
 		if p.config.ParallelDecryptConcurrency <= 0 {
 			p.config.ParallelDecryptConcurrency = 8
@@ -3966,23 +4045,18 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	clientRangeHeader := r.Header.Get("Range")
 	upstreamRangeHeader := clientRangeHeader
 	var startPos int64 = 0
-	if clientRangeHeader != "" {
-		if strings.HasPrefix(clientRangeHeader, "bytes=") {
-			rangeParts := strings.Split(strings.TrimPrefix(clientRangeHeader, "bytes="), "-")
-			if len(rangeParts) >= 1 {
-				startPos, _ = strconv.ParseInt(rangeParts[0], 10, 64)
-			}
-		}
+	if parsedStart, ok := parseRangeStart(clientRangeHeader); ok {
+		startPos = parsedStart
 		log.Infof("%s handleRedirect: Range header=%s, startPos=%d", internal.LogPrefix(ctx, internal.TagDownload), clientRangeHeader, startPos)
 	}
 
 	rangeSuppressedByStrategy := false
-	if clientRangeHeader != "" {
+	if clientRangeHeader != "" && startPos < rangePreferUpstreamStartBytes {
 		if strategy, ok := p.lookupLocalStrategy(info.RedirectURL, info.OriginalURL); ok && strategy == StreamStrategyChunked {
 			rangeSuppressedByStrategy = true
 		}
 	}
-	if clientRangeHeader != "" && (rangeSuppressedByStrategy || p.shouldSkipRange(info.RedirectURL)) {
+	if clientRangeHeader != "" && (rangeSuppressedByStrategy || p.shouldSkipRange(info.RedirectURL, info.OriginalURL)) {
 		upstreamRangeHeader = ""
 	}
 
@@ -4042,9 +4116,9 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
 	if clientRangeHeader != "" && !upstreamIsRange {
-		p.markRangeIncompatible(info.RedirectURL)
+		p.markRangeIncompatible(info.RedirectURL, info.OriginalURL)
 	} else if clientRangeHeader != "" && upstreamIsRange {
-		p.markRangeCompatible(info.RedirectURL)
+		p.markRangeCompatible(info.RedirectURL, info.OriginalURL)
 	}
 
 	// 复制响应头
@@ -4239,14 +4313,17 @@ func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
 
 		upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
 		if clientRangeHeader != "" && !upstreamIsRange {
-			p.markRangeIncompatible(info.RedirectURL)
+			p.markRangeIncompatible(info.RedirectURL, info.OriginalURL)
+		} else if clientRangeHeader != "" && upstreamIsRange {
+			p.markRangeCompatible(info.RedirectURL, info.OriginalURL)
 		}
 		if startPos > 0 {
 			if upstreamIsRange {
 				encryptor.SetPosition(startPos)
 			} else {
 				if startPos > p.rangeSkipMaxBytes() {
-					log.Warnf("%s handleRedirect: skip exceeds limit start=%d limit=%d", internal.LogPrefix(ctx, internal.TagDecrypt), startPos, p.rangeSkipMaxBytes())
+					log.Warnf("%s handleRedirect: skip exceeds limit start=%d limit=%d upstreamRange=%v status=%d contentRange=%q",
+						internal.LogPrefix(ctx, internal.TagDecrypt), startPos, p.rangeSkipMaxBytes(), upstreamIsRange, resp.StatusCode, resp.Header.Get("Content-Range"))
 					http.Error(w, "range skip exceeds limit", http.StatusRequestedRangeNotSatisfiable)
 					return
 				}
@@ -4993,16 +5070,32 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 	if encPath != nil {
 		var result map[string]interface{}
 		if err := json.Unmarshal(respBody, &result); err == nil {
-			if convertedPathForGet {
-				needsFallback := respStatusCode == http.StatusBadRequest || respStatusCode == http.StatusNotFound
-				if !needsFallback {
-					if code, ok := result["code"].(float64); ok {
-						respCode := int(code)
-						if respCode == http.StatusBadRequest || respCode == http.StatusNotFound {
-							needsFallback = true
+			fsGetFailed := func(httpStatus int, body map[string]interface{}) bool {
+				if httpStatus == http.StatusBadRequest || httpStatus == http.StatusNotFound {
+					return true
+				}
+				if code, ok := body["code"].(float64); ok {
+					if int(code) == http.StatusBadRequest || int(code) == http.StatusNotFound {
+						return true
+					}
+					if int(code) != 200 {
+						if msg, ok := body["message"].(string); ok {
+							lowerMsg := strings.ToLower(strings.TrimSpace(msg))
+							if strings.Contains(lowerMsg, "not found") || strings.Contains(lowerMsg, "object not found") {
+								return true
+							}
 						}
 					}
 				}
+				data, ok := body["data"].(map[string]interface{})
+				if !ok || data == nil {
+					return true
+				}
+				rawURL, _ := data["raw_url"].(string)
+				return strings.TrimSpace(rawURL) == ""
+			}
+			if convertedPathForGet {
+				needsFallback := fsGetFailed(respStatusCode, result)
 
 				tryFsGetPath := func(targetPath, stage string) bool {
 					reqData["path"] = targetPath
@@ -5032,14 +5125,20 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 					if err5 := json.Unmarshal(respBody, &result); err5 != nil {
 						return false
 					}
-					p.debugf("filename", "fs/get fallback stage=%s to=%s from=%s", stage, targetPath, filePath)
-					return true
+					msg, _ := result["message"].(string)
+					data, _ := result["data"].(map[string]interface{})
+					rawURL, _ := data["raw_url"].(string)
+					code, _ := result["code"].(float64)
+					failed := fsGetFailed(respStatusCode, result)
+					p.debugf("filename", "fs/get fallback stage=%s to=%s from=%s http=%d code=%d failed=%v message=%q hasRawURL=%v",
+						stage, targetPath, filePath, respStatusCode, int(code), failed, msg, strings.TrimSpace(rawURL) != "")
+					return !failed
 				}
 
-				if needsFallback && convertedNoSuffixPathForGet {
-					_ = tryFsGetPath(noSuffixPathForGet, "encrypted-no-suffix")
+				if needsFallback && convertedNoSuffixPathForGet && tryFsGetPath(noSuffixPathForGet, "encrypted-no-suffix") {
+					needsFallback = false
 				}
-				if code, ok := result["code"].(float64); ok && int(code) != 200 {
+				if needsFallback {
 					_ = tryFsGetPath(originalPath, "original-path")
 				}
 			}
@@ -5485,10 +5584,17 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 			return false
 		}
 		targetURL := p.getAlistURL() + urlPath
-		if strategy, ok := p.lookupLocalStrategy(targetURL, filePath); ok && strategy == StreamStrategyChunked {
+		rangeStart, hasRangeStart := parseRangeStart(clientRangeHeader)
+		if (!hasRangeStart || rangeStart < rangePreferUpstreamStartBytes) &&
+			func() bool {
+				if strategy, ok := p.lookupLocalStrategy(targetURL, filePath); ok && strategy == StreamStrategyChunked {
+					return true
+				}
+				return false
+			}() {
 			return false
 		}
-		if p.shouldSkipRange(targetURL) {
+		if p.shouldSkipRange(targetURL, filePath) {
 			return false
 		}
 		return true
@@ -5687,9 +5793,9 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
 	if clientRangeHeader != "" && selectedAttempt.sendRange {
 		if upstreamIsRange {
-			p.markRangeCompatible(p.getAlistURL() + actualURLPath)
+			p.markRangeCompatible(p.getAlistURL()+actualURLPath, filePath)
 		} else {
-			p.markRangeIncompatible(p.getAlistURL() + actualURLPath)
+			p.markRangeIncompatible(p.getAlistURL()+actualURLPath, filePath)
 		}
 	}
 
@@ -5735,13 +5841,8 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	// 获取 Range 信息
 	var startPos int64 = 0
-	if clientRangeHeader != "" {
-		if strings.HasPrefix(clientRangeHeader, "bytes=") {
-			rangeParts := strings.Split(strings.TrimPrefix(clientRangeHeader, "bytes="), "-")
-			if len(rangeParts) >= 1 {
-				startPos, _ = strconv.ParseInt(rangeParts[0], 10, 64)
-			}
-		}
+	if parsedStart, ok := parseRangeStart(clientRangeHeader); ok {
+		startPos = parsedStart
 	}
 
 	// 只有响应状态码是 2xx 时才尝试解密
@@ -5775,7 +5876,8 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 				encryptor.SetPosition(startPos)
 			} else {
 				if startPos > p.rangeSkipMaxBytes() {
-					log.Warnf("%s handleDownload: skip exceeds limit start=%d limit=%d", internal.LogPrefix(ctx, internal.TagDecrypt), startPos, p.rangeSkipMaxBytes())
+					log.Warnf("%s handleDownload: skip exceeds limit start=%d limit=%d upstreamRange=%v status=%d contentRange=%q path=%s",
+						internal.LogPrefix(ctx, internal.TagDecrypt), startPos, p.rangeSkipMaxBytes(), upstreamIsRange, resp.StatusCode, resp.Header.Get("Content-Range"), filePath)
 					http.Error(w, "range skip exceeds limit", http.StatusRequestedRangeNotSatisfiable)
 					return
 				}
@@ -5915,11 +6017,17 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 	rangeSuppressedByStrategy := false
 	if r.Method == "GET" && clientRangeHeader != "" {
-		if strategy, ok := p.lookupLocalStrategy(targetURL, filePath); ok && strategy == StreamStrategyChunked {
+		rangeStart, hasRangeStart := parseRangeStart(clientRangeHeader)
+		if (!hasRangeStart || rangeStart < rangePreferUpstreamStartBytes) && func() bool {
+			if strategy, ok := p.lookupLocalStrategy(targetURL, filePath); ok && strategy == StreamStrategyChunked {
+				return true
+			}
+			return false
+		}() {
 			rangeSuppressedByStrategy = true
 		}
 	}
-	if r.Method == "GET" && clientRangeHeader != "" && (rangeSuppressedByStrategy || p.shouldSkipRange(targetURL)) {
+	if r.Method == "GET" && clientRangeHeader != "" && (rangeSuppressedByStrategy || p.shouldSkipRange(targetURL, filePath)) {
 		upstreamRangeHeader = ""
 	}
 	p.debugf("range", "webdav method=%s path=%s clientRange=%q upstreamRange=%q suppressedByStrategy=%v",
@@ -6455,13 +6563,8 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 		// 只有当服务端返回了内容，且知道大小，才解密
 		if fileSize > 0 {
 			var startPos int64 = 0
-			if clientRangeHeader != "" {
-				if strings.HasPrefix(clientRangeHeader, "bytes=") {
-					rangeParts := strings.Split(strings.TrimPrefix(clientRangeHeader, "bytes="), "-")
-					if len(rangeParts) >= 1 {
-						startPos, _ = strconv.ParseInt(rangeParts[0], 10, 64)
-					}
-				}
+			if parsedStart, ok := parseRangeStart(clientRangeHeader); ok {
+				startPos = parsedStart
 			}
 
 			log.Infof("WebDAV decrypt: path=%s range=%q content-range=%q content-length=%q fileSize=%d start=%d",
@@ -6484,9 +6587,9 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 
 			upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
 			if clientRangeHeader != "" && !upstreamIsRange {
-				p.markRangeIncompatible(targetURL)
+				p.markRangeIncompatible(targetURL, filePath)
 			} else if clientRangeHeader != "" && upstreamIsRange {
-				p.markRangeCompatible(targetURL)
+				p.markRangeCompatible(targetURL, filePath)
 			}
 			if clientRangeHeader != "" && !upstreamIsRange && startPos > 0 {
 				endPos := fileSize - 1
@@ -6509,7 +6612,8 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 					encryptor.SetPosition(startPos)
 				} else {
 					if startPos > p.rangeSkipMaxBytes() {
-						log.Warnf("WebDAV decrypt: skip exceeds limit start=%d limit=%d", startPos, p.rangeSkipMaxBytes())
+						log.Warnf("WebDAV decrypt: skip exceeds limit start=%d limit=%d upstreamRange=%v status=%d contentRange=%q path=%s",
+							startPos, p.rangeSkipMaxBytes(), upstreamIsRange, resp.StatusCode, resp.Header.Get("Content-Range"), filePath)
 						http.Error(w, "range skip exceeds limit", http.StatusRequestedRangeNotSatisfiable)
 						return
 					}

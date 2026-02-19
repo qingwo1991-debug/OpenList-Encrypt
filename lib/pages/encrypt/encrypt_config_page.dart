@@ -33,7 +33,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   bool _enableRangeCompatCache = true;
   final _rangeCompatTtlController = TextEditingController(text: '43200');
   final _rangeCompatMinFailuresController = TextEditingController(text: '2');
-  final _rangeSkipMaxBytesController = TextEditingController(text: '${8 * 1024 * 1024}');
+  final _rangeSkipMaxBytesController = TextEditingController(text: '${256 * 1024 * 1024}');
   bool _enableParallelDecrypt = true;
   final _parallelDecryptConcurrencyController = TextEditingController(text: '4');
   final _streamBufferKbController = TextEditingController(text: '512');
@@ -115,7 +115,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           _rangeCompatMinFailuresController.text =
               (config['rangeCompatMinFailures'] ?? 2).toString();
           _rangeSkipMaxBytesController.text =
-              (config['rangeSkipMaxBytes'] ?? (8 * 1024 * 1024)).toString();
+              (config['rangeSkipMaxBytes'] ?? (256 * 1024 * 1024)).toString();
           _enableParallelDecrypt = config['enableParallelDecrypt'] ?? true;
           _parallelDecryptConcurrencyController.text =
               (config['parallelDecryptConcurrency'] ?? 4).toString();
@@ -266,7 +266,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
         'rangeCompatMinFailures':
             int.tryParse(_rangeCompatMinFailuresController.text) ?? 2,
         'rangeSkipMaxBytes':
-            int.tryParse(_rangeSkipMaxBytesController.text) ?? (8 * 1024 * 1024),
+            int.tryParse(_rangeSkipMaxBytesController.text) ?? (256 * 1024 * 1024),
         'enableParallelDecrypt': _enableParallelDecrypt,
         'parallelDecryptConcurrency':
             int.tryParse(_parallelDecryptConcurrencyController.text) ?? 4,

@@ -132,11 +132,26 @@ func initLocalSchema(db *sql.DB) error {
         );`,
 		`CREATE INDEX IF NOT EXISTS idx_local_media_strategy_accessed ON local_media_strategy(last_accessed);`,
 		`CREATE TABLE IF NOT EXISTS local_sync_checkpoint (
-            name TEXT PRIMARY KEY,
-            since INTEGER NOT NULL,
-            cursor TEXT NOT NULL DEFAULT '',
-            updated_at INTEGER NOT NULL
-        );`,
+	            name TEXT PRIMARY KEY,
+	            since INTEGER NOT NULL,
+	            cursor TEXT NOT NULL DEFAULT '',
+	            updated_at INTEGER NOT NULL
+	        );`,
+		`CREATE TABLE IF NOT EXISTS local_range_compat (
+	            key TEXT PRIMARY KEY,
+	            blocked_until INTEGER NOT NULL DEFAULT 0,
+	            failures INTEGER NOT NULL DEFAULT 0,
+	            updated_at INTEGER NOT NULL
+	        );`,
+		`CREATE INDEX IF NOT EXISTS idx_local_range_compat_blocked_until ON local_range_compat(blocked_until);`,
+		`CREATE TABLE IF NOT EXISTS local_range_probe_target (
+	            key TEXT PRIMARY KEY,
+	            sample_url TEXT NOT NULL,
+	            source_path TEXT NOT NULL,
+	            next_probe_at INTEGER NOT NULL DEFAULT 0,
+	            updated_at INTEGER NOT NULL
+	        );`,
+		`CREATE INDEX IF NOT EXISTS idx_local_range_probe_next_probe ON local_range_probe_target(next_probe_at);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -180,6 +195,9 @@ func (s *localStore) Cleanup(sizeOlderThan, strategyOlderThan time.Duration) err
 	}
 	strategyCutoff := time.Now().Add(-strategyOlderThan).Unix()
 	if _, err := s.db.Exec("DELETE FROM local_media_strategy WHERE last_accessed < ?", strategyCutoff); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec("DELETE FROM local_range_compat WHERE blocked_until > 0 AND blocked_until < ?", time.Now().Unix()); err != nil {
 		return err
 	}
 	return nil
@@ -560,6 +578,130 @@ func (s *localStore) Import(data *LocalExport) error {
 	}
 
 	return tx.Commit()
+}
+
+func (s *localStore) LoadRangeCompat(now time.Time) (map[string]time.Time, error) {
+	if s == nil || s.db == nil {
+		return map[string]time.Time{}, nil
+	}
+	ts := now.Unix()
+	rows, err := s.db.Query("SELECT key, blocked_until FROM local_range_compat WHERE blocked_until > ?", ts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]time.Time)
+	for rows.Next() {
+		var key string
+		var blockedUntil int64
+		if err := rows.Scan(&key, &blockedUntil); err != nil {
+			return nil, err
+		}
+		if key == "" || blockedUntil <= ts {
+			continue
+		}
+		out[key] = time.Unix(blockedUntil, 0)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *localStore) UpsertRangeCompat(key string, blockedUntil time.Time, failures int) error {
+	if s == nil || s.db == nil || strings.TrimSpace(key) == "" {
+		return nil
+	}
+	if failures < 0 {
+		failures = 0
+	}
+	blockedTS := blockedUntil.Unix()
+	if blockedUntil.IsZero() {
+		blockedTS = 0
+	}
+	_, err := s.db.Exec(`INSERT INTO local_range_compat (key, blocked_until, failures, updated_at)
+	        VALUES (?, ?, ?, ?)
+	        ON CONFLICT(key) DO UPDATE SET
+	        blocked_until=excluded.blocked_until,
+	        failures=excluded.failures,
+	        updated_at=excluded.updated_at`, key, blockedTS, failures, time.Now().Unix())
+	return err
+}
+
+func (s *localStore) DeleteRangeCompat(key string) error {
+	if s == nil || s.db == nil || strings.TrimSpace(key) == "" {
+		return nil
+	}
+	_, err := s.db.Exec("DELETE FROM local_range_compat WHERE key = ?", key)
+	return err
+}
+
+func (s *localStore) LoadRangeProbeTargets() (map[string]rangeProbeTarget, error) {
+	if s == nil || s.db == nil {
+		return map[string]rangeProbeTarget{}, nil
+	}
+	rows, err := s.db.Query("SELECT key, sample_url, source_path, next_probe_at FROM local_range_probe_target")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]rangeProbeTarget)
+	for rows.Next() {
+		var key string
+		var sampleURL string
+		var sourcePath string
+		var nextProbeAt int64
+		if err := rows.Scan(&key, &sampleURL, &sourcePath, &nextProbeAt); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(key) == "" || strings.TrimSpace(sampleURL) == "" {
+			continue
+		}
+		target := rangeProbeTarget{
+			Key:        key,
+			URL:        sampleURL,
+			SourcePath: sourcePath,
+		}
+		if nextProbeAt > 0 {
+			target.NextProbeAt = time.Unix(nextProbeAt, 0)
+		}
+		out[key] = target
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *localStore) UpsertRangeProbeTarget(target rangeProbeTarget) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	key := strings.TrimSpace(target.Key)
+	sampleURL := strings.TrimSpace(target.URL)
+	if key == "" || sampleURL == "" {
+		return nil
+	}
+	nextProbeAt := target.NextProbeAt.Unix()
+	if target.NextProbeAt.IsZero() {
+		nextProbeAt = 0
+	}
+	_, err := s.db.Exec(`INSERT INTO local_range_probe_target (key, sample_url, source_path, next_probe_at, updated_at)
+	        VALUES (?, ?, ?, ?, ?)
+	        ON CONFLICT(key) DO UPDATE SET
+	        sample_url=excluded.sample_url,
+	        source_path=excluded.source_path,
+	        next_probe_at=excluded.next_probe_at,
+	        updated_at=excluded.updated_at`, key, sampleURL, target.SourcePath, nextProbeAt, time.Now().Unix())
+	return err
+}
+
+func (s *localStore) DeleteRangeProbeTarget(key string) error {
+	if s == nil || s.db == nil || strings.TrimSpace(key) == "" {
+		return nil
+	}
+	_, err := s.db.Exec("DELETE FROM local_range_probe_target WHERE key = ?", key)
+	return err
 }
 
 func (s *localStore) Counts() (int, int, error) {
