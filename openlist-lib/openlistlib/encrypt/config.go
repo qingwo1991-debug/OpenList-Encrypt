@@ -48,6 +48,7 @@ func DefaultConfig() *ProxyConfig {
 		EnableParallelDecrypt:         true,
 		ParallelDecryptConcurrency:    8,
 		StreamBufferKB:                1024,
+		StreamEngineVersion:           defaultStreamEngineVersion,
 		DebugEnabled:                  false,
 		DebugLevel:                    "info",
 		DebugMaskSensitive:            true,
@@ -178,6 +179,9 @@ func (m *ConfigManager) Load() error {
 	}
 	if config.StreamBufferKB <= 0 {
 		config.StreamBufferKB = 1024
+	}
+	if config.StreamEngineVersion <= 0 {
+		config.StreamEngineVersion = defaultStreamEngineVersion
 	}
 	if !config.EnableParallelDecrypt && !rawEnableParallelDecrypt &&
 		rawParallelDecryptConcurrency == 0 && rawStreamBufferKB == 0 {
@@ -362,6 +366,7 @@ func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
 		EnableParallelDecrypt         *bool  `json:"enableParallelDecrypt"`
 		ParallelDecryptConcurrency    *int   `json:"parallelDecryptConcurrency"`
 		StreamBufferKB                *int   `json:"streamBufferKb"`
+		StreamEngineVersion           *int   `json:"streamEngineVersion"`
 		WebDAVNegativeCacheTTLMinutes *int   `json:"webdavNegativeCacheTtlMinutes"`
 	}
 	var payload advancedConfigPayload
@@ -414,6 +419,13 @@ func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
 			m.config.StreamBufferKB = 1024
 		} else {
 			m.config.StreamBufferKB = *payload.StreamBufferKB
+		}
+	}
+	if payload.StreamEngineVersion != nil {
+		if *payload.StreamEngineVersion <= 0 {
+			m.config.StreamEngineVersion = defaultStreamEngineVersion
+		} else {
+			m.config.StreamEngineVersion = *payload.StreamEngineVersion
 		}
 	}
 	if payload.WebDAVNegativeCacheTTLMinutes != nil {

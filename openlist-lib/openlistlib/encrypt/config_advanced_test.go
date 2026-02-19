@@ -17,8 +17,8 @@ func TestSetAdvancedConfigFromJSON_Persisted(t *testing.T) {
 		"playFirstFallback": true,
 		"enableRangeCompatCache": true,
 		"rangeCompatTtlMinutes": 43200,
-		"rangeCompatMinFailures": 1,
-		"rangeSkipMaxBytes": 33554432,
+		"rangeCompatMinFailures": 2,
+		"rangeSkipMaxBytes": 268435456,
 		"enableParallelDecrypt": true,
 		"parallelDecryptConcurrency": 8,
 		"streamBufferKb": 1024,
@@ -36,7 +36,7 @@ func TestSetAdvancedConfigFromJSON_Persisted(t *testing.T) {
 	if !cfg.EnableParallelDecrypt || cfg.ParallelDecryptConcurrency != 8 {
 		t.Fatalf("unexpected parallel decrypt config: enabled=%v conc=%d", cfg.EnableParallelDecrypt, cfg.ParallelDecryptConcurrency)
 	}
-	if !cfg.EnableRangeCompatCache || cfg.RangeCompatMinFailures != 1 || cfg.RangeSkipMaxBytes != 32*1024*1024 {
+	if !cfg.EnableRangeCompatCache || cfg.RangeCompatMinFailures != 2 || cfg.RangeSkipMaxBytes != defaultRangeSkipMaxBytes {
 		t.Fatalf("unexpected range config: enabled=%v min=%d skip=%d", cfg.EnableRangeCompatCache, cfg.RangeCompatMinFailures, cfg.RangeSkipMaxBytes)
 	}
 	if cfg.StreamBufferKB != 1024 {
@@ -62,10 +62,10 @@ func TestSetAdvancedConfigFromJSON_ClampDefaults(t *testing.T) {
 		t.Fatalf("SetAdvancedConfigFromJSON failed: %v", err)
 	}
 	cfg := manager.GetConfig()
-	if cfg.RangeCompatMinFailures != 1 {
+	if cfg.RangeCompatMinFailures != 2 {
 		t.Fatalf("unexpected range min failures: %d", cfg.RangeCompatMinFailures)
 	}
-	if cfg.RangeSkipMaxBytes != 32*1024*1024 {
+	if cfg.RangeSkipMaxBytes != defaultRangeSkipMaxBytes {
 		t.Fatalf("unexpected range skip max bytes: %d", cfg.RangeSkipMaxBytes)
 	}
 	if cfg.ParallelDecryptConcurrency != 8 {
@@ -107,7 +107,7 @@ func TestLoadLegacyDefaultsForBoolAdvancedFlags(t *testing.T) {
 	if cfg.ParallelDecryptConcurrency != 8 || cfg.StreamBufferKB != 1024 {
 		t.Fatalf("unexpected parallel defaults: conc=%d stream=%d", cfg.ParallelDecryptConcurrency, cfg.StreamBufferKB)
 	}
-	if cfg.RangeCompatMinFailures != 1 || cfg.RangeSkipMaxBytes != 32*1024*1024 {
+	if cfg.RangeCompatMinFailures != 2 || cfg.RangeSkipMaxBytes != defaultRangeSkipMaxBytes {
 		t.Fatalf("unexpected range defaults: min=%d skip=%d", cfg.RangeCompatMinFailures, cfg.RangeSkipMaxBytes)
 	}
 }

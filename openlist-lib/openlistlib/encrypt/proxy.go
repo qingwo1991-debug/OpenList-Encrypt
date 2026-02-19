@@ -63,6 +63,8 @@ const (
 	encryptedPrefetchCooldown = 45 * time.Second
 	// upstreamFailureThreshold 连续失败达到该阈值才触发全局快速失败
 	upstreamFailureThreshold = 3
+	// defaultStreamEngineVersion 默认播放内核版本（V2）
+	defaultStreamEngineVersion = 2
 )
 
 // streamBufferSize 流传输缓冲区大小 (默认 512KB)
@@ -756,6 +758,8 @@ type ProxyConfig struct {
 	ParallelDecryptConcurrency int `json:"parallelDecryptConcurrency,omitempty"`
 	// StreamBufferKB: 流式解密缓冲区大小（KB）
 	StreamBufferKB int `json:"streamBufferKb,omitempty"`
+	// StreamEngineVersion: 播放内核版本，1=legacy，2=v2
+	StreamEngineVersion int `json:"streamEngineVersion,omitempty"`
 	// EnableDBExportSync: 启用通过 DB_EXPORT_API 拉取元数据到本地数据库
 	EnableDBExportSync bool `json:"enableDbExportSync,omitempty"`
 	// DBExportBaseURL: 远端加密服务地址，例如 http://127.0.0.1:5344
@@ -877,6 +881,9 @@ func applyLearningDefaults(cfg *ProxyConfig) {
 	}
 	if cfg.StreamBufferKB <= 0 {
 		cfg.StreamBufferKB = 1024
+	}
+	if cfg.StreamEngineVersion <= 0 {
+		cfg.StreamEngineVersion = defaultStreamEngineVersion
 	}
 	// 旧配置兼容：缺省时启用播放优先兜底
 	if !cfg.PlayFirstFallback && cfg.WebDAVNegativeCacheTTLMinutes == 0 && cfg.ProbeStrategy == "" {
@@ -1748,6 +1755,9 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/api/encrypt/localExport", p.handleLocalExport)
 	mux.HandleFunc("/api/encrypt/localImport", p.handleLocalImport)
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
+	mux.HandleFunc("/api/play/resolve", internal.WrapHandler(p.handlePlayResolve))
+	mux.HandleFunc("/api/play/stream/", internal.WrapHandler(p.handlePlayStream))
+	mux.HandleFunc("/api/play/stats", internal.WrapHandler(p.handlePlayStats))
 	// 文件操作相关 - 包装以支持全链路追踪
 	mux.HandleFunc("/redirect/", internal.WrapHandler(p.handleRedirect))
 	mux.HandleFunc("/api/fs/list", internal.WrapHandler(p.handleFsList))
@@ -1763,6 +1773,8 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/p/", internal.WrapHandler(p.handleDownload))
 	mux.HandleFunc("/dav/", internal.WrapHandler(p.handleWebDAV))
 	mux.HandleFunc("/dav", internal.WrapHandler(p.handleWebDAV))
+	mux.HandleFunc("/dav2/", internal.WrapHandler(p.handleWebDAVV2))
+	mux.HandleFunc("/dav2", internal.WrapHandler(p.handleWebDAVV2))
 	// 根路径：直接代理到 OpenList (Alist)
 	mux.HandleFunc("/", p.handleRoot)
 
@@ -3237,6 +3249,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				"enableParallelDecrypt":         p.config.EnableParallelDecrypt,
 				"parallelDecryptConcurrency":    p.config.ParallelDecryptConcurrency,
 				"streamBufferKb":                p.config.StreamBufferKB,
+				"streamEngineVersion":           p.config.StreamEngineVersion,
 				"debugEnabled":                  p.config.DebugEnabled,
 				"debugLevel":                    p.config.DebugLevel,
 				"debugModules":                  p.config.DebugModules,
@@ -3497,6 +3510,20 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 					p.mutex.Lock()
 					p.config.StreamBufferKB = val
 					p.mutex.Unlock()
+				}
+			}
+			if v, ok := bodyMap["streamEngineVersion"]; ok {
+				switch vt := v.(type) {
+				case float64:
+					p.mutex.Lock()
+					p.config.StreamEngineVersion = int(vt)
+					p.mutex.Unlock()
+				case string:
+					if val, err := strconv.Atoi(vt); err == nil {
+						p.mutex.Lock()
+						p.config.StreamEngineVersion = val
+						p.mutex.Unlock()
+					}
 				}
 			}
 		}
@@ -3961,6 +3988,9 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if p.config.StreamBufferKB <= 0 {
 			p.config.StreamBufferKB = 1024
+		}
+		if p.config.StreamEngineVersion <= 0 {
+			p.config.StreamEngineVersion = defaultStreamEngineVersion
 		}
 		if p.config.RedirectCacheTTLMinutes <= 0 {
 			p.config.RedirectCacheTTLMinutes = int(redirectCacheTTL / time.Minute)
