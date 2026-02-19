@@ -72,6 +72,23 @@ type LocalExport struct {
 	Strategies []LocalStrategyRecord `json:"strategies"`
 }
 
+type LocalSyncStatusRecord struct {
+	Name              string `json:"name"`
+	LastSuccessAt     int64  `json:"last_success_at"`
+	LastCycleImported int    `json:"last_cycle_imported"`
+	TotalImported     int64  `json:"total_imported"`
+	LastError         string `json:"last_error"`
+	SyncMode          string `json:"sync_mode"`
+	UpdatedAt         int64  `json:"updated_at"`
+}
+
+type LocalSyncCycleRecord struct {
+	CycleAt      int64  `json:"cycle_at"`
+	Imported     int    `json:"imported"`
+	OK           bool   `json:"ok"`
+	ErrorSummary string `json:"error_summary"`
+}
+
 const defaultFlushThreshold = 20
 
 func newLocalStore(baseDir string) (*localStore, error) {
@@ -152,6 +169,25 @@ func initLocalSchema(db *sql.DB) error {
 	            updated_at INTEGER NOT NULL
 	        );`,
 		`CREATE INDEX IF NOT EXISTS idx_local_range_probe_next_probe ON local_range_probe_target(next_probe_at);`,
+		`CREATE TABLE IF NOT EXISTS local_sync_status (
+	            name TEXT PRIMARY KEY,
+	            last_success_at INTEGER NOT NULL DEFAULT 0,
+	            last_cycle_imported INTEGER NOT NULL DEFAULT 0,
+	            total_imported INTEGER NOT NULL DEFAULT 0,
+	            last_error TEXT NOT NULL DEFAULT '',
+	            sync_mode TEXT NOT NULL DEFAULT '',
+	            updated_at INTEGER NOT NULL
+	        );`,
+		`CREATE TABLE IF NOT EXISTS local_sync_cycle (
+	            id INTEGER PRIMARY KEY AUTOINCREMENT,
+	            name TEXT NOT NULL,
+	            cycle_at INTEGER NOT NULL,
+	            imported INTEGER NOT NULL DEFAULT 0,
+	            ok INTEGER NOT NULL DEFAULT 0,
+	            error_summary TEXT NOT NULL DEFAULT '',
+	            updated_at INTEGER NOT NULL
+	        );`,
+		`CREATE INDEX IF NOT EXISTS idx_local_sync_cycle_name_time ON local_sync_cycle(name, cycle_at DESC);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -721,6 +757,46 @@ func (s *localStore) Counts() (int, int, error) {
 	return sizeCount, strategyCount, nil
 }
 
+func (s *localStore) CountRangeCompat() (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	row := s.db.QueryRow("SELECT COUNT(1) FROM local_range_compat")
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *localStore) CountRangeProbeTargets() (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	row := s.db.QueryRow("SELECT COUNT(1) FROM local_range_probe_target")
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *localStore) CountsExtended() (int, int, int, int, error) {
+	sizeCount, strategyCount, err := s.Counts()
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	rangeCompatCount, err := s.CountRangeCompat()
+	if err != nil {
+		return sizeCount, strategyCount, 0, 0, err
+	}
+	rangeProbeCount, err := s.CountRangeProbeTargets()
+	if err != nil {
+		return sizeCount, strategyCount, rangeCompatCount, 0, err
+	}
+	return sizeCount, strategyCount, rangeCompatCount, rangeProbeCount, nil
+}
+
 func (s *localStore) GetSyncCheckpoint(name string) (int64, string, error) {
 	if s == nil || s.db == nil || name == "" {
 		return 0, "", nil
@@ -751,4 +827,107 @@ func (s *localStore) SaveSyncCheckpoint(name string, since int64, cursor string)
         cursor=excluded.cursor,
         updated_at=excluded.updated_at`, name, since, cursor, time.Now().Unix())
 	return err
+}
+
+func (s *localStore) GetSyncStatus(name string) (*LocalSyncStatusRecord, error) {
+	if s == nil || s.db == nil || strings.TrimSpace(name) == "" {
+		return nil, nil
+	}
+	row := s.db.QueryRow(`SELECT name, last_success_at, last_cycle_imported, total_imported, last_error, sync_mode, updated_at
+        FROM local_sync_status WHERE name = ?`, name)
+	rec := &LocalSyncStatusRecord{}
+	if err := row.Scan(&rec.Name, &rec.LastSuccessAt, &rec.LastCycleImported, &rec.TotalImported, &rec.LastError, &rec.SyncMode, &rec.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (s *localStore) UpsertSyncStatus(status LocalSyncStatusRecord) error {
+	if s == nil || s.db == nil || strings.TrimSpace(status.Name) == "" {
+		return nil
+	}
+	if status.LastCycleImported < 0 {
+		status.LastCycleImported = 0
+	}
+	if status.TotalImported < 0 {
+		status.TotalImported = 0
+	}
+	now := time.Now().Unix()
+	updatedAt := status.UpdatedAt
+	if updatedAt <= 0 {
+		updatedAt = now
+	}
+	_, err := s.db.Exec(`INSERT INTO local_sync_status
+        (name, last_success_at, last_cycle_imported, total_imported, last_error, sync_mode, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+        last_success_at=excluded.last_success_at,
+        last_cycle_imported=excluded.last_cycle_imported,
+        total_imported=excluded.total_imported,
+        last_error=excluded.last_error,
+        sync_mode=excluded.sync_mode,
+        updated_at=excluded.updated_at`,
+		status.Name, status.LastSuccessAt, status.LastCycleImported, status.TotalImported, status.LastError, status.SyncMode, updatedAt)
+	return err
+}
+
+func (s *localStore) AppendSyncCycle(name string, cycle LocalSyncCycleRecord, maxRows int) error {
+	if s == nil || s.db == nil || strings.TrimSpace(name) == "" {
+		return nil
+	}
+	if maxRows <= 0 {
+		maxRows = 200
+	}
+	if cycle.Imported < 0 {
+		cycle.Imported = 0
+	}
+	cycleAt := cycle.CycleAt
+	if cycleAt <= 0 {
+		cycleAt = time.Now().Unix()
+	}
+	okInt := 0
+	if cycle.OK {
+		okInt = 1
+	}
+	if _, err := s.db.Exec(`INSERT INTO local_sync_cycle (name, cycle_at, imported, ok, error_summary, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)`, name, cycleAt, cycle.Imported, okInt, cycle.ErrorSummary, time.Now().Unix()); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`DELETE FROM local_sync_cycle
+        WHERE name = ? AND id NOT IN (
+            SELECT id FROM local_sync_cycle WHERE name = ? ORDER BY cycle_at DESC, id DESC LIMIT ?
+        )`, name, name, maxRows)
+	return err
+}
+
+func (s *localStore) ListRecentSyncCycles(name string, limit int) ([]LocalSyncCycleRecord, error) {
+	if s == nil || s.db == nil || strings.TrimSpace(name) == "" {
+		return []LocalSyncCycleRecord{}, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`SELECT cycle_at, imported, ok, error_summary
+        FROM local_sync_cycle WHERE name = ? ORDER BY cycle_at DESC, id DESC LIMIT ?`, name, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]LocalSyncCycleRecord, 0, limit)
+	for rows.Next() {
+		var rec LocalSyncCycleRecord
+		var okInt int
+		if err := rows.Scan(&rec.CycleAt, &rec.Imported, &okInt, &rec.ErrorSummary); err != nil {
+			return nil, err
+		}
+		rec.OK = okInt == 1
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

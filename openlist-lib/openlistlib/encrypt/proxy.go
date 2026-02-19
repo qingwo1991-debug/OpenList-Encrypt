@@ -1751,10 +1751,12 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/enc-api/localImport", p.handleLocalImport)
 	mux.HandleFunc("/api/encrypt/config", p.handleConfig)
 	mux.HandleFunc("/api/encrypt/stats", p.handleStats)
+	mux.HandleFunc("/api/encrypt/sync/overview", p.handleSyncOverview)
 	mux.HandleFunc("/api/encrypt/localState", p.handleLocalState)
 	mux.HandleFunc("/api/encrypt/localExport", p.handleLocalExport)
 	mux.HandleFunc("/api/encrypt/localImport", p.handleLocalImport)
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
+	mux.HandleFunc("/public/sync-stats.html", p.handleSyncStatsPage)
 	mux.HandleFunc("/api/play/resolve", internal.WrapHandler(p.handlePlayResolve))
 	mux.HandleFunc("/api/play/stream/", internal.WrapHandler(p.handlePlayStream))
 	mux.HandleFunc("/api/play/stats", internal.WrapHandler(p.handlePlayStats))
@@ -2801,16 +2803,44 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	localSizeCount := 0
 	localStrategyCount := 0
+	localRangeCompatCount := 0
+	localRangeProbeCount := 0
 	dbExportSince := int64(0)
 	dbExportCursor := ""
+	dbExportStrategySince := int64(0)
+	dbExportStrategyCursor := ""
+	dbExportRangeSince := int64(0)
+	dbExportRangeCursor := ""
+	dbExportLastSuccessAt := ""
+	dbExportLastCycleImported := 0
+	dbExportTotalImported := int64(0)
+	dbExportSyncMode := ""
+	dbExportLastError := ""
 	if p.localStore != nil {
-		if sizeCount, strategyCount, err := p.localStore.Counts(); err == nil {
+		if sizeCount, strategyCount, rangeCompatCount, rangeProbeCount, err := p.localStore.CountsExtended(); err == nil {
 			localSizeCount = sizeCount
 			localStrategyCount = strategyCount
+			localRangeCompatCount = rangeCompatCount
+			localRangeProbeCount = rangeProbeCount
 		}
 		if since, cursor, err := p.localStore.GetSyncCheckpoint(dbExportCheckpointName); err == nil {
 			dbExportSince = since
 			dbExportCursor = cursor
+		}
+		if since, cursor, err := p.localStore.GetSyncCheckpoint(dbExportStrategyCheckpointName); err == nil {
+			dbExportStrategySince = since
+			dbExportStrategyCursor = cursor
+		}
+		if since, cursor, err := p.localStore.GetSyncCheckpoint(dbExportRangeCheckpointName); err == nil {
+			dbExportRangeSince = since
+			dbExportRangeCursor = cursor
+		}
+		if status, err := p.localStore.GetSyncStatus(dbExportSyncStatusName); err == nil && status != nil {
+			dbExportLastSuccessAt = unixToRFC3339(status.LastSuccessAt)
+			dbExportLastCycleImported = status.LastCycleImported
+			dbExportTotalImported = status.TotalImported
+			dbExportSyncMode = status.SyncMode
+			dbExportLastError = status.LastError
 		}
 	}
 
@@ -2884,9 +2914,11 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 			"count":   atomic.LoadUint64(&p.playFirstCount),
 		},
 		"local_store": map[string]interface{}{
-			"enabled":          p.localStore != nil,
-			"size_entries":     localSizeCount,
-			"strategy_entries": localStrategyCount,
+			"enabled":              p.localStore != nil,
+			"size_entries":         localSizeCount,
+			"strategy_entries":     localStrategyCount,
+			"range_compat_entries": localRangeCompatCount,
+			"range_probe_targets":  localRangeProbeCount,
 			"size_retention_days": func() int {
 				if p.config != nil {
 					return p.config.LocalSizeRetentionDays
@@ -2925,8 +2957,17 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 				}
 				return false
 			}(),
-			"checkpoint_since":  dbExportSince,
-			"checkpoint_cursor": dbExportCursor,
+			"checkpoint_since":    dbExportSince,
+			"checkpoint_cursor":   dbExportCursor,
+			"strategy_since":      dbExportStrategySince,
+			"strategy_cursor":     dbExportStrategyCursor,
+			"range_since":         dbExportRangeSince,
+			"range_cursor":        dbExportRangeCursor,
+			"last_success_at":     dbExportLastSuccessAt,
+			"last_cycle_imported": dbExportLastCycleImported,
+			"total_imported":      dbExportTotalImported,
+			"sync_mode":           dbExportSyncMode,
+			"last_error":          dbExportLastError,
 		},
 		"http_profiles": map[string]interface{}{
 			"control": p.controlHTTPStats.snapshot(),
