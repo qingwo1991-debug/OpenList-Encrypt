@@ -4721,6 +4721,8 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 	originalPath := reqData["path"]
 	filePath := originalPath
 	convertedPathForGet := false
+	noSuffixPathForGet := ""
+	convertedNoSuffixPathForGet := false
 
 	// 检查是否需要转换文件名
 	encPath := p.findEncryptPath(filePath)
@@ -4733,6 +4735,11 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 			reqData["path"] = filePath
 			body, _ = json.Marshal(reqData)
 			convertedPathForGet = filePath != originalPath
+			if encPath.EncSuffix != "" {
+				noSuffixRealName := ConvertRealNameWithSuffix(encPath.Password, encPath.EncType, originalPath, "")
+				noSuffixPathForGet = path.Join(path.Dir(originalPath), noSuffixRealName)
+				convertedNoSuffixPathForGet = noSuffixPathForGet != originalPath && noSuffixPathForGet != filePath
+			}
 		}
 	}
 
@@ -4758,6 +4765,7 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	respStatusCode := resp.StatusCode
 
 	// 读取响应
 	respBody, err := io.ReadAll(resp.Body)
@@ -4771,27 +4779,53 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 		var result map[string]interface{}
 		if err := json.Unmarshal(respBody, &result); err == nil {
 			if convertedPathForGet {
-				if code, ok := result["code"].(float64); ok && int(code) != 200 {
-					p.debugf("filename", "fs/get fallback to original path=%s from=%s", originalPath, filePath)
-					reqData["path"] = originalPath
+				needsFallback := respStatusCode == http.StatusBadRequest || respStatusCode == http.StatusNotFound
+				if !needsFallback {
+					if code, ok := result["code"].(float64); ok {
+						respCode := int(code)
+						if respCode == http.StatusBadRequest || respCode == http.StatusNotFound {
+							needsFallback = true
+						}
+					}
+				}
+
+				tryFsGetPath := func(targetPath, stage string) bool {
+					reqData["path"] = targetPath
 					body2, _ := json.Marshal(reqData)
 					req2, err2 := http.NewRequestWithContext(r.Context(), "POST", p.getAlistURL()+"/api/fs/get", bytes.NewReader(body2))
-					if err2 == nil {
-						for key, values := range r.Header {
-							if key != "Host" {
-								for _, value := range values {
-									req2.Header.Add(key, value)
-								}
-							}
-						}
-						if resp2, err3 := p.httpClient.Do(req2); err3 == nil {
-							defer resp2.Body.Close()
-							if bodyRetry, err4 := io.ReadAll(resp2.Body); err4 == nil {
-								respBody = bodyRetry
-								_ = json.Unmarshal(respBody, &result)
+					if err2 != nil {
+						return false
+					}
+					for key, values := range r.Header {
+						if key != "Host" {
+							for _, value := range values {
+								req2.Header.Add(key, value)
 							}
 						}
 					}
+					resp2, err3 := p.httpClient.Do(req2)
+					if err3 != nil {
+						return false
+					}
+					defer resp2.Body.Close()
+					bodyRetry, err4 := io.ReadAll(resp2.Body)
+					if err4 != nil {
+						return false
+					}
+					respBody = bodyRetry
+					respStatusCode = resp2.StatusCode
+					if err5 := json.Unmarshal(respBody, &result); err5 != nil {
+						return false
+					}
+					p.debugf("filename", "fs/get fallback stage=%s to=%s from=%s", stage, targetPath, filePath)
+					return true
+				}
+
+				if needsFallback && convertedNoSuffixPathForGet {
+					_ = tryFsGetPath(noSuffixPathForGet, "encrypted-no-suffix")
+				}
+				if code, ok := result["code"].(float64); ok && int(code) != 200 {
+					_ = tryFsGetPath(originalPath, "original-path")
 				}
 			}
 			if data, ok := result["data"].(map[string]interface{}); ok {
@@ -4839,7 +4873,7 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 
 	// 返回响应
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
+	w.WriteHeader(respStatusCode)
 	w.Write(respBody)
 }
 
@@ -5151,6 +5185,8 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// 构建实际请求的 URL 路径
 	actualURLPath := originalPath
 	convertedURLPath := false
+	noSuffixURLPath := ""
+	convertedNoSuffixURLPath := false
 
 	// 如果开启了文件名加密，转换为真实加密名
 	if encPath != nil && encPath.EncName {
@@ -5164,6 +5200,16 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 				actualURLPath = "/p" + newFilePath
 			}
 			convertedURLPath = actualURLPath != originalPath
+			if encPath.EncSuffix != "" {
+				noSuffixRealName := ConvertRealNameWithSuffix(encPath.Password, encPath.EncType, filePath, "")
+				noSuffixFilePath := path.Join(path.Dir(filePath), noSuffixRealName)
+				if strings.HasPrefix(originalPath, "/d/") {
+					noSuffixURLPath = "/d" + noSuffixFilePath
+				} else {
+					noSuffixURLPath = "/p" + noSuffixFilePath
+				}
+				convertedNoSuffixURLPath = noSuffixURLPath != originalPath && noSuffixURLPath != actualURLPath
+			}
 		}
 	}
 
@@ -5233,7 +5279,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
-	attempts := make([]downloadAttempt, 0, 4)
+	attempts := make([]downloadAttempt, 0, 6)
 	addAttempt := func(urlPath string, sendRange bool, stage string) {
 		for _, a := range attempts {
 			if a.urlPath == urlPath && a.sendRange == sendRange {
@@ -5245,11 +5291,17 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	initialURLPath := actualURLPath
 	primaryRange := shouldSendRangeForPath(actualURLPath)
 	addAttempt(actualURLPath, primaryRange, "primary")
+	if convertedNoSuffixURLPath && encPath != nil && encPath.EncName {
+		addAttempt(noSuffixURLPath, shouldSendRangeForPath(noSuffixURLPath), "fallback-encrypted-no-suffix")
+	}
 	if convertedURLPath && encPath != nil && encPath.EncName {
 		addAttempt(originalPath, shouldSendRangeForPath(originalPath), "fallback-original-path")
 	}
 	if clientRangeHeader != "" {
 		addAttempt(actualURLPath, !primaryRange, "fallback-toggle-range")
+		if convertedNoSuffixURLPath && encPath != nil && encPath.EncName {
+			addAttempt(noSuffixURLPath, !shouldSendRangeForPath(noSuffixURLPath), "fallback-encrypted-no-suffix-toggle-range")
+		}
 		if convertedURLPath && encPath != nil && encPath.EncName {
 			addAttempt(originalPath, !shouldSendRangeForPath(originalPath), "fallback-original-toggle-range")
 		}
@@ -5260,6 +5312,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		client = p.streamClient
 	}
 	retryableStatus := map[int]bool{
+		http.StatusBadRequest:                   true,
 		http.StatusNotFound:                     true,
 		http.StatusRequestedRangeNotSatisfiable: true,
 	}
