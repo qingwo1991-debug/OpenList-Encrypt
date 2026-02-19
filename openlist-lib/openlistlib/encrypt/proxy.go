@@ -3025,6 +3025,24 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		existingPasswords := make(map[string]string)
+		p.mutex.RLock()
+		for _, ep := range p.config.EncryptPaths {
+			if ep == nil || strings.TrimSpace(ep.Path) == "" || strings.TrimSpace(ep.Password) == "" {
+				continue
+			}
+			existingPasswords[strings.TrimSpace(ep.Path)] = ep.Password
+		}
+		p.mutex.RUnlock()
+		keepPassword := func(rulePath, incoming string) string {
+			if strings.TrimSpace(incoming) != "" {
+				return incoming
+			}
+			if preserved, ok := existingPasswords[strings.TrimSpace(rulePath)]; ok {
+				return preserved
+			}
+			return incoming
+		}
 
 		// 更新 ProbeOnDownload 如果存在
 		if v, ok := bodyMap["probeOnDownload"]; ok {
@@ -3466,6 +3484,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 					if m, ok3 := item.(map[string]interface{}); ok3 {
 						pathStr, _ := m["path"].(string)
 						pwd, _ := m["password"].(string)
+						pwd = keepPassword(pathStr, pwd)
 						encTypeStr, _ := m["encType"].(string)
 						encName, _ := m["encName"].(bool)
 						encSuffix, _ := m["encSuffix"].(string)
@@ -3563,6 +3582,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 										continue
 									}
 									pwd, _ := m["password"].(string)
+									pwd = keepPassword(pstr, pwd)
 									encTypeStr, _ := m["encType"].(string)
 									encName, _ := m["encName"].(bool)
 									encSuffix, _ := m["encSuffix"].(string)
@@ -3590,6 +3610,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 								for _, epp := range vv {
 									if s, ok5 := epp.(string); ok5 {
 										pwd, _ := m["password"].(string)
+										pwd = keepPassword(s, pwd)
 										encTypeStr, _ := m["encType"].(string)
 										encName, _ := m["encName"].(bool)
 										encSuffix, _ := m["encSuffix"].(string)
@@ -5172,57 +5193,116 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rangeSuppressedByStrategy := false
-	if clientRangeHeader != "" {
-		if strategy, ok := p.lookupLocalStrategy(p.getAlistURL()+actualURLPath, filePath); ok && strategy == StreamStrategyChunked {
-			rangeSuppressedByStrategy = true
+	type downloadAttempt struct {
+		urlPath   string
+		sendRange bool
+		stage     string
+	}
+	buildDownloadRequest := func(urlPath string, sendRange bool) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, p.getAlistURL()+urlPath, nil)
+		if err != nil {
+			return nil, err
 		}
-	}
-
-	// 创建到 Alist 的请求
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, p.getAlistURL()+actualURLPath, nil)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// 复制请求头
-	for key, values := range r.Header {
-		if key != "Host" {
-			for _, value := range values {
-				req.Header.Add(key, value)
-			}
-		}
-	}
-	if clientRangeHeader != "" && rangeSuppressedByStrategy {
-		req.Header.Del("Range")
-	}
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-	if convertedURLPath && encPath != nil && encPath.EncName && resp.StatusCode == http.StatusNotFound {
-		p.debugf("filename", "download fallback to original path=%s from=%s", originalPath, actualURLPath)
-		resp.Body.Close()
-		req2, err := http.NewRequestWithContext(r.Context(), r.Method, p.getAlistURL()+originalPath, nil)
-		if err == nil {
-			for key, values := range r.Header {
-				if key != "Host" {
-					for _, value := range values {
-						req2.Header.Add(key, value)
-					}
+		for key, values := range r.Header {
+			if key != "Host" {
+				for _, value := range values {
+					req.Header.Add(key, value)
 				}
 			}
-			resp2, err2 := p.httpClient.Do(req2)
-			if err2 == nil {
-				resp = resp2
-				defer resp.Body.Close()
-				actualURLPath = originalPath
+		}
+		if clientRangeHeader != "" {
+			if sendRange {
+				req.Header.Set("Range", clientRangeHeader)
+			} else {
+				req.Header.Del("Range")
 			}
 		}
+		return req, nil
+	}
+	shouldSendRangeForPath := func(urlPath string) bool {
+		if clientRangeHeader == "" {
+			return false
+		}
+		targetURL := p.getAlistURL() + urlPath
+		if strategy, ok := p.lookupLocalStrategy(targetURL, filePath); ok && strategy == StreamStrategyChunked {
+			return false
+		}
+		if p.shouldSkipRange(targetURL) {
+			return false
+		}
+		return true
+	}
+
+	attempts := make([]downloadAttempt, 0, 4)
+	addAttempt := func(urlPath string, sendRange bool, stage string) {
+		for _, a := range attempts {
+			if a.urlPath == urlPath && a.sendRange == sendRange {
+				return
+			}
+		}
+		attempts = append(attempts, downloadAttempt{urlPath: urlPath, sendRange: sendRange, stage: stage})
+	}
+	initialURLPath := actualURLPath
+	primaryRange := shouldSendRangeForPath(actualURLPath)
+	addAttempt(actualURLPath, primaryRange, "primary")
+	if convertedURLPath && encPath != nil && encPath.EncName {
+		addAttempt(originalPath, shouldSendRangeForPath(originalPath), "fallback-original-path")
+	}
+	if clientRangeHeader != "" {
+		addAttempt(actualURLPath, !primaryRange, "fallback-toggle-range")
+		if convertedURLPath && encPath != nil && encPath.EncName {
+			addAttempt(originalPath, !shouldSendRangeForPath(originalPath), "fallback-original-toggle-range")
+		}
+	}
+
+	client := p.httpClient
+	if r.Method == http.MethodGet {
+		client = p.streamClient
+	}
+	retryableStatus := map[int]bool{
+		http.StatusNotFound:                     true,
+		http.StatusRequestedRangeNotSatisfiable: true,
+	}
+	var req *http.Request
+	var resp *http.Response
+	var err error
+	var selectedAttempt downloadAttempt
+	for i, attempt := range attempts {
+		req, err = buildDownloadRequest(attempt.urlPath, attempt.sendRange)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp, err = client.Do(req)
+		if err != nil {
+			if i < len(attempts)-1 {
+				p.debugf("download", "request attempt failed stage=%s path=%s err=%v", attempt.stage, attempt.urlPath, err)
+				continue
+			}
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		selectedAttempt = attempt
+		if retryableStatus[resp.StatusCode] && i < len(attempts)-1 {
+			p.debugf("download", "retryable download response stage=%s path=%s status=%d", attempt.stage, attempt.urlPath, resp.StatusCode)
+			resp.Body.Close()
+			resp = nil
+			continue
+		}
+		break
+	}
+	if resp == nil {
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		return
+	}
+	defer func() {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+	}()
+	actualURLPath = selectedAttempt.urlPath
+	if selectedAttempt.stage == "fallback-original-path" || selectedAttempt.stage == "fallback-original-toggle-range" {
+		p.debugf("filename", "download fallback to original path=%s from=%s", originalPath, initialURLPath)
 	}
 
 	// 处理 302/303 重定向：对于需要解密的路径，创建代理重定向
@@ -5315,20 +5395,16 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 				log.Infof("%s handleDownload: probed remote fileSize=%d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
 				// re-request resource to ensure fresh stream with streamClient
 				resp.Body.Close()
-				req2, _ := http.NewRequestWithContext(r.Context(), r.Method, p.getAlistURL()+actualURLPath, nil)
-				for key, values := range r.Header {
-					if key != "Host" {
-						for _, value := range values {
-							req2.Header.Add(key, value)
-						}
-					}
+				req2, reqErr := buildDownloadRequest(actualURLPath, selectedAttempt.sendRange)
+				if reqErr != nil {
+					http.Error(w, reqErr.Error(), http.StatusInternalServerError)
+					return
 				}
 				resp, err = p.streamClient.Do(req2)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusBadGateway)
 					return
 				}
-				defer resp.Body.Close()
 			}
 		}
 	}
@@ -5338,6 +5414,13 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusPartialContent
 	}
 	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+	if clientRangeHeader != "" && selectedAttempt.sendRange {
+		if upstreamIsRange {
+			p.markRangeCompatible(p.getAlistURL() + actualURLPath)
+		} else {
+			p.markRangeIncompatible(p.getAlistURL() + actualURLPath)
+		}
+	}
 
 	observedStrategy := StreamStrategyChunked
 	if upstreamIsRange {
