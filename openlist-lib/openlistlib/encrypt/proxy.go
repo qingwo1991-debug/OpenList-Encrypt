@@ -4040,8 +4040,17 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
-// handleRedirect 处理重定向下载
+// handleRedirect 处理重定向下载（V2 orchestrator 入口）
 func (p *ProxyServer) handleRedirect(w http.ResponseWriter, r *http.Request) {
+	if p != nil && p.streamEngineV2Enabled() {
+		newPlayOrchestrator(p).ServePlayback(w, r)
+		return
+	}
+	p.handleRedirectLegacy(w, r)
+}
+
+// handleRedirectLegacy 保留历史执行链，供 V2 orchestrator 调用
+func (p *ProxyServer) handleRedirectLegacy(w http.ResponseWriter, r *http.Request) {
 	if p.shouldFastFailUpstream() {
 		_, remain, reason := p.upstreamBackoffState()
 		retryAfter := int(remain.Seconds())
@@ -5498,8 +5507,17 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 	copyWithBuffer(w, resp.Body)
 }
 
-// handleDownload 处理下载请求
+// handleDownload 处理下载请求（V2 orchestrator 入口）
 func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
+	if p != nil && p.streamEngineV2Enabled() {
+		newPlayOrchestrator(p).ServePlayback(w, r)
+		return
+	}
+	p.handleDownloadLegacy(w, r)
+}
+
+// handleDownloadLegacy 保留历史执行链，供 V2 orchestrator 调用
+func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if p.shouldFastFailUpstream() {
 		_, remain, reason := p.upstreamBackoffState()
@@ -5933,8 +5951,17 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleWebDAV 处理 WebDAV 请求
+// handleWebDAV 处理 WebDAV 请求（V2 orchestrator 入口）
 func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
+	if p != nil && p.streamEngineV2Enabled() {
+		newPlayOrchestrator(p).ServePlayback(w, r)
+		return
+	}
+	p.handleWebDAVLegacy(w, r)
+}
+
+// handleWebDAVLegacy 保留历史执行链，供 V2 orchestrator 调用
+func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if p.shouldFastFailUpstream() {
 		_, remain, reason := p.upstreamBackoffState()

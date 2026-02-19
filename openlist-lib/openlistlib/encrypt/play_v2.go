@@ -33,6 +33,23 @@ func (p *ProxyServer) streamEngineV2Enabled() bool {
 	return p.streamEngineVersion() >= 2
 }
 
+func remapRequestPath(r *http.Request, fromPrefix, toPrefix string) *http.Request {
+	if r == nil || r.URL == nil {
+		return r
+	}
+	if !strings.HasPrefix(r.URL.Path, fromPrefix) {
+		return r
+	}
+	cloned := r.Clone(r.Context())
+	clonedURL := *r.URL
+	clonedURL.Path = toPrefix + strings.TrimPrefix(r.URL.Path, fromPrefix)
+	if r.URL.RawPath != "" && strings.HasPrefix(r.URL.RawPath, fromPrefix) {
+		clonedURL.RawPath = toPrefix + strings.TrimPrefix(r.URL.RawPath, fromPrefix)
+	}
+	cloned.URL = &clonedURL
+	return cloned
+}
+
 func cloneHeader(dst http.Header, src http.Header) {
 	for k, vals := range src {
 		for _, v := range vals {
@@ -119,8 +136,31 @@ func (o *PlayOrchestrator) streamViaRedirect(ctx context.Context, srcReq *http.R
 	req := httptest.NewRequest(srcReq.Method, redirectURL, srcReq.Body).WithContext(ctx)
 	cloneHeader(req.Header, srcReq.Header)
 	rec := httptest.NewRecorder()
-	o.proxy.handleRedirect(rec, req)
+	o.proxy.handleRedirectLegacy(rec, req)
 	return rec
+}
+
+func (o *PlayOrchestrator) ServePlayback(w http.ResponseWriter, r *http.Request) {
+	if o == nil || o.proxy == nil {
+		http.Error(w, "play orchestrator unavailable", http.StatusInternalServerError)
+		return
+	}
+	path := ""
+	if r != nil && r.URL != nil {
+		path = r.URL.Path
+	}
+	switch {
+	case strings.HasPrefix(path, "/redirect/"):
+		o.proxy.handleRedirectLegacy(w, r)
+	case strings.HasPrefix(path, "/dav2/") || path == "/dav2":
+		o.proxy.handleWebDAVLegacy(w, remapRequestPath(r, "/dav2", "/dav"))
+	case strings.HasPrefix(path, "/dav/") || path == "/dav":
+		o.proxy.handleWebDAVLegacy(w, r)
+	case strings.HasPrefix(path, "/d/") || strings.HasPrefix(path, "/p/"):
+		o.proxy.handleDownloadLegacy(w, r)
+	default:
+		http.Error(w, "unsupported playback route", http.StatusNotFound)
+	}
 }
 
 func (p *ProxyServer) handlePlayResolve(w http.ResponseWriter, r *http.Request) {
@@ -184,5 +224,5 @@ func (p *ProxyServer) handlePlayStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *ProxyServer) handleWebDAVV2(w http.ResponseWriter, r *http.Request) {
-	p.handleWebDAV(w, r)
+	newPlayOrchestrator(p).ServePlayback(w, remapRequestPath(r, "/dav2", "/dav"))
 }
