@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:dio/dio.dart';
 import '../../generated/l10n.dart';
 import '../../contant/native_bridge.dart';
 
@@ -27,6 +28,16 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   final _probeTimeoutController = TextEditingController(text: '3');
   final _probeBudgetController = TextEditingController(text: '5');
   final _upstreamBackoffController = TextEditingController(text: '20');
+  bool _enableLocalBypass = true;
+  bool _playFirstFallback = true;
+  bool _enableRangeCompatCache = true;
+  final _rangeCompatTtlController = TextEditingController(text: '43200');
+  final _rangeCompatMinFailuresController = TextEditingController(text: '2');
+  final _rangeSkipMaxBytesController = TextEditingController(text: '${8 * 1024 * 1024}');
+  bool _enableParallelDecrypt = true;
+  final _parallelDecryptConcurrencyController = TextEditingController(text: '4');
+  final _streamBufferKbController = TextEditingController(text: '512');
+  final _webdavNegativeCacheTtlController = TextEditingController(text: '10');
   
   // H2C 开关（HTTP/2 Cleartext）
   bool _enableH2C = false;
@@ -96,6 +107,22 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
               (config['probeBudgetSeconds'] ?? 5).toString();
           _upstreamBackoffController.text =
               (config['upstreamBackoffSeconds'] ?? 20).toString();
+          _enableLocalBypass = config['enableLocalBypass'] ?? true;
+          _playFirstFallback = config['playFirstFallback'] ?? true;
+          _enableRangeCompatCache = config['enableRangeCompatCache'] ?? true;
+          _rangeCompatTtlController.text =
+              (config['rangeCompatTtlMinutes'] ?? 43200).toString();
+          _rangeCompatMinFailuresController.text =
+              (config['rangeCompatMinFailures'] ?? 2).toString();
+          _rangeSkipMaxBytesController.text =
+              (config['rangeSkipMaxBytes'] ?? (8 * 1024 * 1024)).toString();
+          _enableParallelDecrypt = config['enableParallelDecrypt'] ?? true;
+          _parallelDecryptConcurrencyController.text =
+              (config['parallelDecryptConcurrency'] ?? 4).toString();
+          _streamBufferKbController.text =
+              (config['streamBufferKb'] ?? 512).toString();
+          _webdavNegativeCacheTtlController.text =
+              (config['webdavNegativeCacheTtlMinutes'] ?? 10).toString();
           _enableH2C = config['enableH2C'] ?? false;
           _enableDbExportSync = config['enableDbExportSync'] ?? false;
           _dbExportBaseUrlController.text = config['dbExportBaseUrl'] ?? '';
@@ -190,8 +217,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
         int.tryParse(_probeTimeoutController.text) ?? 3,
         int.tryParse(_probeBudgetController.text) ?? 5,
         int.tryParse(_upstreamBackoffController.text) ?? 20,
-        true, // keep bridge signature compatible; backend is direct-connect now
+        _enableLocalBypass,
       );
+      await _saveAdvancedConfigViaApi();
       
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -204,6 +232,39 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           SnackBar(content: Text('保存失败: $e')),
         );
       }
+    }
+  }
+
+  Future<void> _saveAdvancedConfigViaApi() async {
+    if (!_proxyRunning) return;
+    final proxyPort = int.tryParse(_proxyPortController.text) ?? 5344;
+    final dio = Dio(BaseOptions(
+      connectTimeout: const Duration(seconds: 3),
+      receiveTimeout: const Duration(seconds: 5),
+      sendTimeout: const Duration(seconds: 5),
+    ));
+    final resp = await dio.post(
+      'http://127.0.0.1:$proxyPort/api/encrypt/config',
+      data: {
+        'playFirstFallback': _playFirstFallback,
+        'enableRangeCompatCache': _enableRangeCompatCache,
+        'rangeCompatTtlMinutes':
+            int.tryParse(_rangeCompatTtlController.text) ?? 43200,
+        'rangeCompatMinFailures':
+            int.tryParse(_rangeCompatMinFailuresController.text) ?? 2,
+        'rangeSkipMaxBytes':
+            int.tryParse(_rangeSkipMaxBytesController.text) ?? (8 * 1024 * 1024),
+        'enableParallelDecrypt': _enableParallelDecrypt,
+        'parallelDecryptConcurrency':
+            int.tryParse(_parallelDecryptConcurrencyController.text) ?? 4,
+        'streamBufferKb': int.tryParse(_streamBufferKbController.text) ?? 512,
+        'webdavNegativeCacheTtlMinutes':
+            int.tryParse(_webdavNegativeCacheTtlController.text) ?? 10,
+      },
+      options: Options(contentType: 'application/json'),
+    );
+    if (resp.statusCode == null || resp.statusCode! < 200 || resp.statusCode! >= 300) {
+      throw Exception('advanced config save failed: ${resp.statusCode}');
     }
   }
 
@@ -473,6 +534,12 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     _probeTimeoutController.dispose();
     _probeBudgetController.dispose();
     _upstreamBackoffController.dispose();
+    _rangeCompatTtlController.dispose();
+    _rangeCompatMinFailuresController.dispose();
+    _rangeSkipMaxBytesController.dispose();
+    _parallelDecryptConcurrencyController.dispose();
+    _streamBufferKbController.dispose();
+    _webdavNegativeCacheTtlController.dispose();
     _dbExportBaseUrlController.dispose();
     _dbExportSyncIntervalController.dispose();
     _dbExportUsernameController.dispose();
@@ -592,6 +659,88 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                           ),
                         ),
                       ],
+                    ),
+                    SwitchListTile(
+                      title: const Text('本地/私网直连（绕过系统代理）'),
+                      value: _enableLocalBypass,
+                      onChanged: (value) => setState(() => _enableLocalBypass = value),
+                    ),
+                    SwitchListTile(
+                      title: const Text('播放优先兜底（解密失败时透传）'),
+                      value: _playFirstFallback,
+                      onChanged: (value) => setState(() => _playFirstFallback = value),
+                    ),
+                    SwitchListTile(
+                      title: const Text('启用 Range 兼容缓存'),
+                      value: _enableRangeCompatCache,
+                      onChanged: (value) => setState(() => _enableRangeCompatCache = value),
+                    ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextFormField(
+                            controller: _rangeCompatTtlController,
+                            decoration: const InputDecoration(
+                              labelText: 'Range 兼容缓存 TTL（分钟）',
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextFormField(
+                            controller: _rangeCompatMinFailuresController,
+                            decoration: const InputDecoration(
+                              labelText: 'Range 失败阈值',
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: _rangeSkipMaxBytesController,
+                      decoration: const InputDecoration(
+                        labelText: 'Range 跳过上限（字节）',
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                    SwitchListTile(
+                      title: const Text('启用并行解密'),
+                      value: _enableParallelDecrypt,
+                      onChanged: (value) => setState(() => _enableParallelDecrypt = value),
+                    ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextFormField(
+                            controller: _parallelDecryptConcurrencyController,
+                            decoration: const InputDecoration(
+                              labelText: '并行解密并发',
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextFormField(
+                            controller: _streamBufferKbController,
+                            decoration: const InputDecoration(
+                              labelText: '流缓冲 KB',
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: _webdavNegativeCacheTtlController,
+                      decoration: const InputDecoration(
+                        labelText: 'WebDAV 负缓存 TTL（分钟）',
+                      ),
+                      keyboardType: TextInputType.number,
                     ),
                     SwitchListTile(
                       title: const Text('使用 HTTPS'),

@@ -169,9 +169,31 @@ func (m *EncryptProxyManager) SetProxyPort(port int) error {
 	if m.configManager == nil {
 		return errors.New("config manager not initialized")
 	}
+	oldCfg := m.configManager.GetConfig()
+	oldPort := 0
+	if oldCfg != nil {
+		oldPort = oldCfg.ProxyPort
+	}
 	err := m.configManager.SetProxyPort(port)
 	if err == nil {
-		m.updateProxyServerConfig()
+		// 端口修改需要重绑监听，运行中时执行安全重启
+		if m.proxyServer != nil && m.proxyServer.IsRunning() && oldPort != port {
+			if stopErr := m.proxyServer.Stop(); stopErr != nil {
+				return stopErr
+			}
+			newCfg := m.configManager.GetConfig()
+			server, newErr := encrypt.NewProxyServer(newCfg)
+			if newErr != nil {
+				return newErr
+			}
+			if startErr := server.Start(); startErr != nil {
+				return startErr
+			}
+			m.proxyServer = server
+			log.Infof("[%s] Encrypt proxy restarted to apply new port: %d", internal.TagServer, port)
+		} else {
+			m.updateProxyServerConfig()
+		}
 	}
 	return err
 }
@@ -461,6 +483,15 @@ func GetEncryptConfigJson() string {
 		DbExportAuthEnabled      bool       `json:"dbExportAuthEnabled"`
 		DbExportUsername         string     `json:"dbExportUsername"`
 		DbExportPassword         string     `json:"dbExportPassword"`
+		PlayFirstFallback        bool       `json:"playFirstFallback"`
+		EnableRangeCompatCache   bool       `json:"enableRangeCompatCache"`
+		RangeCompatTtlMinutes    int        `json:"rangeCompatTtlMinutes"`
+		RangeCompatMinFailures   int        `json:"rangeCompatMinFailures"`
+		RangeSkipMaxBytes        int64      `json:"rangeSkipMaxBytes"`
+		EnableParallelDecrypt    bool       `json:"enableParallelDecrypt"`
+		ParallelDecryptConc      int        `json:"parallelDecryptConcurrency"`
+		StreamBufferKb           int        `json:"streamBufferKb"`
+		WebDAVNegativeCacheTtl   int        `json:"webdavNegativeCacheTtlMinutes"`
 		EncryptPaths             []PathInfo `json:"encryptPaths"`
 	}
 
@@ -492,6 +523,15 @@ func GetEncryptConfigJson() string {
 		DbExportAuthEnabled:      config.DBExportAuthEnabled,
 		DbExportUsername:         config.DBExportUsername,
 		DbExportPassword:         config.DBExportPassword,
+		PlayFirstFallback:        config.PlayFirstFallback,
+		EnableRangeCompatCache:   config.EnableRangeCompatCache,
+		RangeCompatTtlMinutes:    config.RangeCompatTTL,
+		RangeCompatMinFailures:   config.RangeCompatMinFailures,
+		RangeSkipMaxBytes:        config.RangeSkipMaxBytes,
+		EnableParallelDecrypt:    config.EnableParallelDecrypt,
+		ParallelDecryptConc:      config.ParallelDecryptConcurrency,
+		StreamBufferKb:           config.StreamBufferKB,
+		WebDAVNegativeCacheTtl:   config.WebDAVNegativeCacheTTLMinutes,
 		EncryptPaths:             paths,
 	}
 

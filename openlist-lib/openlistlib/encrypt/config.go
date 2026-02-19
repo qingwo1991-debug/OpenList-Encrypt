@@ -42,6 +42,8 @@ func DefaultConfig() *ProxyConfig {
 		RangeCompatTTL:                defaultRangeCompatTTLMinutes,
 		RangeCompatMinFailures:        2,
 		RangeSkipMaxBytes:             8 * 1024 * 1024,
+		PlayFirstFallback:             true,
+		WebDAVNegativeCacheTTLMinutes: 10,
 		RedirectCacheTTLMinutes:       1440,
 		EnableParallelDecrypt:         true,
 		ParallelDecryptConcurrency:    4,
@@ -163,6 +165,13 @@ func (m *ConfigManager) Load() error {
 	}
 	if config.RangeSkipMaxBytes <= 0 {
 		config.RangeSkipMaxBytes = 8 * 1024 * 1024
+	}
+	// 旧配置兼容：未配置时启用播放优先兜底
+	if !config.PlayFirstFallback && config.WebDAVNegativeCacheTTLMinutes == 0 {
+		config.PlayFirstFallback = true
+	}
+	if config.WebDAVNegativeCacheTTLMinutes <= 0 {
+		config.WebDAVNegativeCacheTTLMinutes = 10
 	}
 	if config.RedirectCacheTTLMinutes <= 0 {
 		config.RedirectCacheTTLMinutes = 1440
@@ -368,6 +377,11 @@ func (m *ConfigManager) UpdateEncryptPath(index int, path, password string, encT
 
 	if index < 0 || index >= len(m.config.EncryptPaths) {
 		return errors.New("index out of range")
+	}
+
+	originalPassword := m.config.EncryptPaths[index].Password
+	if strings.TrimSpace(password) == "" {
+		password = originalPassword
 	}
 
 	m.config.EncryptPaths[index] = &EncryptPath{

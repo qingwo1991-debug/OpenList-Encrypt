@@ -707,6 +707,10 @@ type ProxyConfig struct {
 	RangeCompatMinFailures int `json:"rangeCompatMinFailures,omitempty"`
 	// RangeSkipMaxBytes: 上游忽略 Range 时，本地跳过字节的上限
 	RangeSkipMaxBytes int64 `json:"rangeSkipMaxBytes,omitempty"`
+	// PlayFirstFallback: 解密失败时优先兜底直连，保证可播放
+	PlayFirstFallback bool `json:"playFirstFallback"`
+	// WebDAVNegativeCacheTTLMinutes: WebDAV 404 负缓存时间（分钟）
+	WebDAVNegativeCacheTTLMinutes int `json:"webdavNegativeCacheTtlMinutes,omitempty"`
 	// RedirectCacheTTLMinutes: redirect 缓存时间（分钟）
 	RedirectCacheTTLMinutes int `json:"redirectCacheTtlMinutes,omitempty"`
 	// EnableParallelDecrypt: 启用并行解密（大文件）
@@ -779,10 +783,13 @@ type ProxyServer struct {
 	upstreamError       string
 	upstreamFailures    int
 	prefetchRecent      *shardedAnyMap // dirPath -> time.Time
+	webdavNegativeMu    sync.Mutex
+	webdavNegativeCache map[string]time.Time // path -> expireAt
 	prefixRules         []encryptPrefixRule
 	controlHTTPStats    upstreamHTTPStats
 	probeHTTPStats      upstreamHTTPStats
 	streamHTTPStats     upstreamHTTPStats
+	playFirstCount      uint64
 }
 
 // FileInfo 文件信息
@@ -817,6 +824,13 @@ func applyLearningDefaults(cfg *ProxyConfig) {
 	if cfg.RangeCompatTTL <= 0 {
 		cfg.RangeCompatTTL = defaultRangeCompatTTLMinutes
 	}
+	// 旧配置兼容：缺省时启用播放优先兜底
+	if !cfg.PlayFirstFallback && cfg.WebDAVNegativeCacheTTLMinutes == 0 && cfg.ProbeStrategy == "" {
+		cfg.PlayFirstFallback = true
+	}
+	if cfg.WebDAVNegativeCacheTTLMinutes <= 0 {
+		cfg.WebDAVNegativeCacheTTLMinutes = 10
+	}
 	if cfg.LocalSizeRetentionDays <= 0 {
 		cfg.LocalSizeRetentionDays = defaultLocalSizeRetentionDays
 	}
@@ -838,6 +852,65 @@ func (p *ProxyServer) ensureRuntimeCaches() {
 	if p.prefetchRecent == nil {
 		p.prefetchRecent = newShardedAnyMap(cacheShardCount)
 	}
+	if p.webdavNegativeCache == nil {
+		p.webdavNegativeCache = make(map[string]time.Time)
+	}
+}
+
+func (p *ProxyServer) webdavNegativeTTL() time.Duration {
+	if p == nil || p.config == nil || p.config.WebDAVNegativeCacheTTLMinutes <= 0 {
+		return 10 * time.Minute
+	}
+	return time.Duration(p.config.WebDAVNegativeCacheTTLMinutes) * time.Minute
+}
+
+func (p *ProxyServer) webdavNegativeKey(requestPath string) string {
+	key := strings.TrimSpace(requestPath)
+	if key == "" {
+		return ""
+	}
+	if !strings.HasPrefix(key, "/") {
+		key = "/" + key
+	}
+	return normalizeCacheKey(key)
+}
+
+func (p *ProxyServer) webdavNegativeBlocked(requestPath string) bool {
+	key := p.webdavNegativeKey(requestPath)
+	if key == "" {
+		return false
+	}
+	p.webdavNegativeMu.Lock()
+	defer p.webdavNegativeMu.Unlock()
+	expireAt, ok := p.webdavNegativeCache[key]
+	if !ok {
+		return false
+	}
+	if time.Now().After(expireAt) {
+		delete(p.webdavNegativeCache, key)
+		return false
+	}
+	return true
+}
+
+func (p *ProxyServer) markWebdavNegative(requestPath string) {
+	key := p.webdavNegativeKey(requestPath)
+	if key == "" {
+		return
+	}
+	p.webdavNegativeMu.Lock()
+	defer p.webdavNegativeMu.Unlock()
+	p.webdavNegativeCache[key] = time.Now().Add(p.webdavNegativeTTL())
+}
+
+func (p *ProxyServer) clearWebdavNegative(requestPath string) {
+	key := p.webdavNegativeKey(requestPath)
+	if key == "" {
+		return
+	}
+	p.webdavNegativeMu.Lock()
+	defer p.webdavNegativeMu.Unlock()
+	delete(p.webdavNegativeCache, key)
 }
 
 func normalizeRulePrefix(raw string) (string, bool) {
@@ -1700,14 +1773,34 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		if ep.Path == "" {
 			continue
 		}
+		ep.EncSuffix = NormalizeEncSuffix(ep.EncSuffix)
 		raw := ep.Path
 		if pref, ok := normalizeRulePrefix(raw); ok {
 			ep.prefix = pref
 		} else {
 			ep.prefix = ""
 		}
+		// 处理以 /* 结尾的目录匹配
 		if strings.HasSuffix(raw, "/*") {
 			base := strings.TrimSuffix(raw, "/*")
+			converted := wildcardToRegex(base)
+			var pattern string
+			if strings.HasPrefix(base, "/") {
+				pattern = "^" + converted + "(/.*)?$"
+			} else {
+				pattern = "^/?" + converted + "(/.*)?$"
+			}
+			log.Infof("[%s] Path %s -> regex pattern: %s", internal.TagConfig, ep.Path, pattern)
+			if reg, err := regexp.Compile(pattern); err == nil {
+				ep.regex = reg
+			} else {
+				log.Warnf("[%s] Invalid path pattern update: %s, error: %v", internal.TagConfig, ep.Path, err)
+			}
+			continue
+		}
+		// 处理以 / 结尾的目录匹配（与 NewProxyServer 保持一致）
+		if strings.HasSuffix(raw, "/") {
+			base := strings.TrimSuffix(raw, "/")
 			converted := wildcardToRegex(base)
 			var pattern string
 			if strings.HasPrefix(base, "/") {
@@ -1729,9 +1822,9 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		if strings.HasPrefix(raw, "^") {
 			pattern = converted
 		} else if strings.HasPrefix(raw, "/") {
-			pattern = "^" + converted
+			pattern = "^" + converted + "(/.*)?$"
 		} else {
-			pattern = "^/?" + converted
+			pattern = "^/?" + converted + "(/.*)?$"
 		}
 		log.Infof("[%s] Path %s -> regex pattern: %s", internal.TagConfig, ep.Path, pattern)
 		if reg, err := regexp.Compile(pattern); err == nil {
@@ -2563,6 +2656,10 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 		}
 		p.rangeCompatMu.RUnlock()
 	}
+	webdavNegativeCount := 0
+	p.webdavNegativeMu.Lock()
+	webdavNegativeCount = len(p.webdavNegativeCache)
+	p.webdavNegativeMu.Unlock()
 
 	localSizeCount := 0
 	localStrategyCount := 0
@@ -2634,6 +2731,19 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 				}
 				return 0
 			}(),
+		},
+		"webdav_negative_cache": map[string]interface{}{
+			"entries": webdavNegativeCount,
+			"ttl_minutes": func() int {
+				if p.config != nil {
+					return p.config.WebDAVNegativeCacheTTLMinutes
+				}
+				return 0
+			}(),
+		},
+		"play_fallback": map[string]interface{}{
+			"enabled": p.config != nil && p.config.PlayFirstFallback,
+			"count":   atomic.LoadUint64(&p.playFirstCount),
 		},
 		"local_store": map[string]interface{}{
 			"enabled":          p.localStore != nil,
@@ -2995,6 +3105,8 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				"rangeCompatTtlMinutes":         p.config.RangeCompatTTL,
 				"rangeCompatMinFailures":        p.config.RangeCompatMinFailures,
 				"rangeSkipMaxBytes":             p.config.RangeSkipMaxBytes,
+				"playFirstFallback":             p.config.PlayFirstFallback,
+				"webdavNegativeCacheTtlMinutes": p.config.WebDAVNegativeCacheTTLMinutes,
 				"redirectCacheTtlMinutes":       p.config.RedirectCacheTTLMinutes,
 				"enableParallelDecrypt":         p.config.EnableParallelDecrypt,
 				"parallelDecryptConcurrency":    p.config.ParallelDecryptConcurrency,
@@ -3160,6 +3272,27 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				if val, err := strconv.ParseInt(vt, 10, 64); err == nil {
 					p.mutex.Lock()
 					p.config.RangeSkipMaxBytes = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["playFirstFallback"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.PlayFirstFallback = b
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["webdavNegativeCacheTtlMinutes"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.WebDAVNegativeCacheTTLMinutes = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.WebDAVNegativeCacheTTLMinutes = val
 					p.mutex.Unlock()
 				}
 			}
@@ -3553,9 +3686,9 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 					if strings.HasPrefix(raw, "^") {
 						pattern = converted
 					} else if strings.HasPrefix(raw, "/") {
-						pattern = "^" + converted
+						pattern = "^" + converted + "(/.*)?$"
 					} else {
-						pattern = "^/?" + converted
+						pattern = "^/?" + converted + "(/.*)?$"
 					}
 					if reg, err := regexp.Compile(pattern); err == nil {
 						ep.regex = reg
@@ -3678,9 +3811,9 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 					if strings.HasPrefix(raw, "^") {
 						pattern = converted
 					} else if strings.HasPrefix(raw, "/") {
-						pattern = "^" + converted
+						pattern = "^" + converted + "(/.*)?$"
 					} else {
-						pattern = "^/?" + converted
+						pattern = "^/?" + converted + "(/.*)?$"
 					}
 					if reg, err := regexp.Compile(pattern); err == nil {
 						ep.regex = reg
@@ -5542,6 +5675,12 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
 		if err != nil {
 			log.Errorf("%s handleDownload: failed to create encryptor: %v", internal.LogPrefix(ctx, internal.TagDecrypt), err)
+			if p.config != nil && p.config.PlayFirstFallback {
+				atomic.AddUint64(&p.playFirstCount, 1)
+				w.WriteHeader(statusCode)
+				copyWithBuffer(w, resp.Body)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -5676,6 +5815,17 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	targetURL := p.getAlistURL() + targetURLPath
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
+	}
+	negativeCachePath := targetURLPath
+	if strings.HasPrefix(negativeCachePath, "/dav") {
+		negativeCachePath = strings.TrimPrefix(negativeCachePath, "/dav")
+		if negativeCachePath == "" {
+			negativeCachePath = "/"
+		}
+	}
+	if r.Method == "PROPFIND" && p.webdavNegativeBlocked(negativeCachePath) {
+		http.Error(w, "object not found", http.StatusNotFound)
+		return
 	}
 
 	rangeSuppressedByStrategy := false
@@ -5834,14 +5984,29 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	}
 	p.markUpstreamSuccess()
 	if convertedTargetURL && (r.Method == "GET" || r.Method == "HEAD" || r.Method == "POST") && resp.StatusCode == http.StatusNotFound {
-		p.debugf("filename", "webdav fallback to original path method=%s from=%s to=%s", r.Method, targetURLPath, originalTargetURLPath)
 		resp.Body.Close()
-		fallbackTargetURL := p.getAlistURL() + originalTargetURLPath
-		if r.URL.RawQuery != "" {
-			fallbackTargetURL += "?" + r.URL.RawQuery
+		fallbackPaths := make([]string, 0, 2)
+		if encPath != nil && encPath.EncName && encPath.EncSuffix != "" {
+			noSuffixRealName := ConvertRealNameWithSuffix(encPath.Password, encPath.EncType, filePath, "")
+			noSuffixPath := path.Join(path.Dir(filePath), noSuffixRealName)
+			if !strings.HasPrefix(noSuffixPath, "/") {
+				noSuffixPath = "/" + noSuffixPath
+			}
+			if noSuffixPath != targetURLPath && noSuffixPath != originalTargetURLPath {
+				fallbackPaths = append(fallbackPaths, noSuffixPath)
+			}
 		}
-		retryReq, err := http.NewRequestWithContext(reqCtx, r.Method, fallbackTargetURL, nil)
-		if err == nil {
+		fallbackPaths = append(fallbackPaths, originalTargetURLPath)
+		for _, fallbackPath := range fallbackPaths {
+			p.debugf("filename", "webdav fallback path method=%s from=%s to=%s", r.Method, targetURLPath, fallbackPath)
+			fallbackTargetURL := p.getAlistURL() + fallbackPath
+			if r.URL.RawQuery != "" {
+				fallbackTargetURL += "?" + r.URL.RawQuery
+			}
+			retryReq, err := http.NewRequestWithContext(reqCtx, r.Method, fallbackTargetURL, nil)
+			if err != nil {
+				continue
+			}
 			for key, values := range r.Header {
 				if key != "Host" {
 					for _, value := range values {
@@ -5860,17 +6025,26 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				retryReq.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
 			}
 			resp2, err2 := client.Do(retryReq)
-			if err2 == nil {
-				resp = resp2
-				targetURL = fallbackTargetURL
-				targetURLPath = originalTargetURLPath
+			if err2 != nil {
+				continue
 			}
+			resp = resp2
+			targetURL = fallbackTargetURL
+			targetURLPath = fallbackPath
+			break
 		}
 	}
 
 	// 添加调试日志：记录后端响应状态码和内容长度
 	log.Infof("%s WebDAV backend response: method=%s path=%s statusCode=%d contentLength=%s contentType=%s",
 		internal.LogPrefix(ctx, internal.TagProxy), r.Method, filePath, resp.StatusCode, resp.Header.Get("Content-Length"), resp.Header.Get("Content-Type"))
+	if r.Method == "PROPFIND" {
+		if resp.StatusCode == http.StatusNotFound {
+			p.markWebdavNegative(negativeCachePath)
+		} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			p.clearWebdavNegative(negativeCachePath)
+		}
+	}
 
 	// PROPFIND 404 重试机制 (因为我们不知道请求的是目录还是加密文件)
 	// 如果默认透传 (当作目录) 失败，尝试加密文件名再试 (当作文件)
@@ -5918,6 +6092,9 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			p.markUpstreamSuccess()
+			if r.Method == "PROPFIND" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				p.clearWebdavNegative(negativeCachePath)
+			}
 		}
 	}
 	defer resp.Body.Close()
@@ -6170,6 +6347,12 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				// 无法创建解密器(如未知算法)，直接透传
 				log.Warnf("Failed to create encryptor for download: %v", err)
+				if p.config != nil && p.config.PlayFirstFallback {
+					atomic.AddUint64(&p.playFirstCount, 1)
+					w.WriteHeader(statusCode)
+					copyWithBuffer(w, resp.Body)
+					return
+				}
 				w.WriteHeader(statusCode)
 				copyWithBuffer(w, resp.Body)
 				return
