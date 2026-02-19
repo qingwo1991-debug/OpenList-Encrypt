@@ -52,7 +52,7 @@ const (
 	// maxParallelDecryptLimit 最大并行解密数上限
 	maxParallelDecryptLimit = 32
 	// defaultRangeSkipMaxBytes 当上游不支持 Range 时，本地最多跳过的字节数
-	defaultRangeSkipMaxBytes = 8 * 1024 * 1024
+	defaultRangeSkipMaxBytes = 32 * 1024 * 1024
 	// encryptedPrefetchMaxDirs 单次最多预热的子目录数
 	encryptedPrefetchMaxDirs = 20
 	// encryptedPrefetchConcurrency 预热并发
@@ -823,6 +823,18 @@ func applyLearningDefaults(cfg *ProxyConfig) {
 	}
 	if cfg.RangeCompatTTL <= 0 {
 		cfg.RangeCompatTTL = defaultRangeCompatTTLMinutes
+	}
+	if cfg.RangeCompatMinFailures <= 0 {
+		cfg.RangeCompatMinFailures = 1
+	}
+	if cfg.RangeSkipMaxBytes <= 0 {
+		cfg.RangeSkipMaxBytes = defaultRangeSkipMaxBytes
+	}
+	if cfg.ParallelDecryptConcurrency <= 0 {
+		cfg.ParallelDecryptConcurrency = 8
+	}
+	if cfg.StreamBufferKB <= 0 {
+		cfg.StreamBufferKB = 1024
 	}
 	// 旧配置兼容：缺省时启用播放优先兜底
 	if !cfg.PlayFirstFallback && cfg.WebDAVNegativeCacheTTLMinutes == 0 && cfg.ProbeStrategy == "" {
@@ -1837,6 +1849,11 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.config = config
+	if p.config.StreamBufferKB > 0 {
+		effectiveKB := clampStreamBufferKB(p.config.StreamBufferKB)
+		p.config.StreamBufferKB = effectiveKB
+		streamBufferSize = effectiveKB * 1024
+	}
 	p.rebuildEncryptPathIndex()
 	if p.httpClient != nil {
 		p.httpClient.Timeout = p.upstreamTimeout()
@@ -1849,6 +1866,36 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		p.transport.Proxy = newProxyResolver(config)
 	}
 	log.Infof("[%s] Proxy Config updated successfully", internal.TagConfig)
+}
+
+func (p *ProxyServer) persistConfigSnapshot() error {
+	p.mutex.RLock()
+	if p.config == nil || strings.TrimSpace(p.config.ConfigPath) == "" {
+		p.mutex.RUnlock()
+		return nil
+	}
+	cfg := *p.config
+	cfgPaths := make([]*EncryptPath, len(p.config.EncryptPaths))
+	for i, ep := range p.config.EncryptPaths {
+		if ep == nil {
+			continue
+		}
+		epCopy := *ep
+		cfgPaths[i] = &epCopy
+	}
+	cfg.EncryptPaths = cfgPaths
+	configPath := cfg.ConfigPath
+	p.mutex.RUnlock()
+
+	dir := filepath.Dir(configPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(&cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, data, 0644)
 }
 
 // getAlistURL 获取 Alist 服务 URL
@@ -3825,10 +3872,16 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 		p.mutex.Lock()
 		if p.config.RangeCompatMinFailures <= 0 {
-			p.config.RangeCompatMinFailures = 2
+			p.config.RangeCompatMinFailures = 1
 		}
 		if p.config.RangeSkipMaxBytes <= 0 {
-			p.config.RangeSkipMaxBytes = defaultRangeSkipMaxBytes
+			p.config.RangeSkipMaxBytes = 32 * 1024 * 1024
+		}
+		if p.config.ParallelDecryptConcurrency <= 0 {
+			p.config.ParallelDecryptConcurrency = 8
+		}
+		if p.config.StreamBufferKB <= 0 {
+			p.config.StreamBufferKB = 1024
 		}
 		if p.config.RedirectCacheTTLMinutes <= 0 {
 			p.config.RedirectCacheTTLMinutes = int(redirectCacheTTL / time.Minute)
@@ -3841,6 +3894,35 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		applyLearningDefaults(p.config)
 		p.mutex.Unlock()
+		if err := p.persistConfigSnapshot(); err != nil {
+			log.Warnf("[%s] Failed to persist config snapshot: %v", internal.TagConfig, err)
+		} else {
+			p.mutex.RLock()
+			rangeEnabled := p.config != nil && p.config.EnableRangeCompatCache
+			rangeTTL := 0
+			rangeMinFailures := 0
+			rangeSkipMaxBytes := int64(0)
+			parallelEnabled := p.config != nil && p.config.EnableParallelDecrypt
+			parallelConc := 0
+			streamBufferKB := 0
+			if p.config != nil {
+				rangeTTL = p.config.RangeCompatTTL
+				rangeMinFailures = p.config.RangeCompatMinFailures
+				rangeSkipMaxBytes = p.config.RangeSkipMaxBytes
+				parallelConc = p.config.ParallelDecryptConcurrency
+				streamBufferKB = p.config.StreamBufferKB
+			}
+			p.mutex.RUnlock()
+			p.debugf("config", "persisted advanced config: rangeCompat=%v ttl=%d minFailures=%d skipMaxBytes=%d parallel=%v parallelConc=%d streamBufferKb=%d",
+				rangeEnabled,
+				rangeTTL,
+				rangeMinFailures,
+				rangeSkipMaxBytes,
+				parallelEnabled,
+				parallelConc,
+				streamBufferKB,
+			)
+		}
 
 		json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "message": "Config updated"})
 		return
@@ -5439,6 +5521,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 			addAttempt(originalPath, !shouldSendRangeForPath(originalPath), "fallback-original-toggle-range")
 		}
 	}
+	p.debugf("playback", "download attempts path=%s range=%q count=%d", filePath, clientRangeHeader, len(attempts))
 
 	client := p.httpClient
 	if r.Method == http.MethodGet {
@@ -5454,6 +5537,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	var err error
 	var selectedAttempt downloadAttempt
 	for i, attempt := range attempts {
+		p.debugf("playback", "download attempt=%d stage=%s path=%s sendRange=%v", i+1, attempt.stage, attempt.urlPath, attempt.sendRange)
 		req, err = buildDownloadRequest(attempt.urlPath, attempt.sendRange)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -5487,6 +5571,7 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	actualURLPath = selectedAttempt.urlPath
+	p.debugf("playback", "download selected stage=%s path=%s status=%d", selectedAttempt.stage, actualURLPath, resp.StatusCode)
 	if selectedAttempt.stage == "fallback-original-path" || selectedAttempt.stage == "fallback-original-toggle-range" {
 		p.debugf("filename", "download fallback to original path=%s from=%s", originalPath, initialURLPath)
 	}
@@ -5837,6 +5922,8 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" && clientRangeHeader != "" && (rangeSuppressedByStrategy || p.shouldSkipRange(targetURL)) {
 		upstreamRangeHeader = ""
 	}
+	p.debugf("range", "webdav method=%s path=%s clientRange=%q upstreamRange=%q suppressedByStrategy=%v",
+		r.Method, filePath, clientRangeHeader, upstreamRangeHeader, rangeSuppressedByStrategy)
 
 	var body io.Reader = nil
 	if r.Body != nil {
@@ -6047,53 +6134,90 @@ func (p *ProxyServer) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// PROPFIND 404 重试机制 (因为我们不知道请求的是目录还是加密文件)
-	// 如果默认透传 (当作目录) 失败，尝试加密文件名再试 (当作文件)
+	// 候选顺序：带后缀密文 -> 无后缀密文（仅配置了后缀）-> 原始路径
 	if r.Method == "PROPFIND" && resp.StatusCode == 404 && encPath != nil && encPath.EncName &&
 		shouldRetryPropfind404(r.Header.Get("Depth"), filePath) {
-		// 关闭旧响应体
+		// 关闭首个 404 响应体
 		resp.Body.Close()
-
-		// 重新计算加密路径
 		fileName := path.Base(filePath)
 		if fileName != "/" && fileName != "." {
+			type propfindCandidate struct {
+				path  string
+				stage string
+			}
+			candidates := make([]propfindCandidate, 0, 3)
+			seen := make(map[string]bool, 3)
+			addCandidate := func(candidatePath, stage string) {
+				if candidatePath == "" {
+					return
+				}
+				if !strings.HasPrefix(candidatePath, "/") {
+					candidatePath = "/" + candidatePath
+				}
+				if seen[candidatePath] {
+					return
+				}
+				seen[candidatePath] = true
+				candidates = append(candidates, propfindCandidate{path: candidatePath, stage: stage})
+			}
+
 			realName := convertRealNameByRule(encPath, filePath)
-			newPath := path.Join(path.Dir(filePath), realName)
-			if !strings.HasPrefix(newPath, "/") {
-				newPath = "/" + newPath
+			addCandidate(path.Join(path.Dir(filePath), realName), "fallback-encrypted-with-suffix")
+			if encPath.EncSuffix != "" {
+				noSuffixRealName := ConvertRealNameWithSuffix(encPath.Password, encPath.EncType, filePath, "")
+				addCandidate(path.Join(path.Dir(filePath), noSuffixRealName), "fallback-encrypted-no-suffix")
 			}
-			log.Debugf("%s PROPFIND 404 retry with encrypt path: %s -> %s", internal.LogPrefix(ctx, internal.TagProxy), filePath, newPath)
+			addCandidate(originalTargetURLPath, "fallback-original-path")
 
-			retryTargetURL := p.getAlistURL() + newPath
-			if r.URL.RawQuery != "" {
-				retryTargetURL += "?" + r.URL.RawQuery
-			}
+			for i, candidate := range candidates {
+				if candidate.path == targetURLPath {
+					continue
+				}
+				retryTargetURL := p.getAlistURL() + candidate.path
+				if r.URL.RawQuery != "" {
+					retryTargetURL += "?" + r.URL.RawQuery
+				}
+				p.debugf("webdav", "PROPFIND 404 retry attempt=%d stage=%s from=%s to=%s", i+1, candidate.stage, targetURLPath, candidate.path)
 
-			var retryBody io.Reader
-			if len(reqBodyBytes) > 0 {
-				retryBody = bytes.NewReader(reqBodyBytes)
-			}
-
-			retryCtx, retryCancel := context.WithTimeout(r.Context(), p.propfindRetryTimeout())
-			defer retryCancel()
-			retryReq, _ := http.NewRequestWithContext(retryCtx, r.Method, retryTargetURL, retryBody)
-			// Copy headers
-			for key, values := range r.Header {
-				if key != "Host" {
-					for _, value := range values {
-						retryReq.Header.Add(key, value)
+				var retryBody io.Reader
+				if len(reqBodyBytes) > 0 {
+					retryBody = bytes.NewReader(reqBodyBytes)
+				}
+				retryCtx, retryCancel := context.WithTimeout(r.Context(), p.propfindRetryTimeout())
+				retryReq, reqErr := http.NewRequestWithContext(retryCtx, r.Method, retryTargetURL, retryBody)
+				if reqErr != nil {
+					retryCancel()
+					continue
+				}
+				for key, values := range r.Header {
+					if key != "Host" {
+						for _, value := range values {
+							retryReq.Header.Add(key, value)
+						}
 					}
 				}
-			}
-
-			resp, err = client.Do(retryReq)
-			if err != nil {
-				p.markUpstreamFailure(err)
-				http.Error(w, err.Error(), http.StatusBadGateway)
-				return
-			}
-			p.markUpstreamSuccess()
-			if r.Method == "PROPFIND" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				p.clearWebdavNegative(negativeCachePath)
+				resp, err = client.Do(retryReq)
+				retryCancel()
+				if err != nil {
+					p.debugf("webdav", "PROPFIND retry failed stage=%s path=%s err=%v", candidate.stage, candidate.path, err)
+					if i == len(candidates)-1 {
+						p.markUpstreamFailure(err)
+						http.Error(w, err.Error(), http.StatusBadGateway)
+						return
+					}
+					continue
+				}
+				p.markUpstreamSuccess()
+				p.debugf("webdav", "PROPFIND retry response stage=%s path=%s status=%d", candidate.stage, candidate.path, resp.StatusCode)
+				targetURLPath = candidate.path
+				targetURL = retryTargetURL
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					p.clearWebdavNegative(negativeCachePath)
+					break
+				}
+				if i < len(candidates)-1 {
+					resp.Body.Close()
+				}
 			}
 		}
 	}

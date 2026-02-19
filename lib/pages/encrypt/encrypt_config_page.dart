@@ -219,6 +219,8 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
         int.tryParse(_upstreamBackoffController.text) ?? 20,
         _enableLocalBypass,
       );
+      
+      // 保存解密和缓存高级配置 (通过 HTTP API 保存)
       await _saveAdvancedConfigViaApi();
       
       if (mounted) {
@@ -236,7 +238,18 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   }
 
   Future<void> _saveAdvancedConfigViaApi() async {
-    if (!_proxyRunning) return;
+    if (!_proxyRunning) {
+      // 如果代理没运行，先启动一下以便保存配置
+      try {
+        await NativeBridge.encryptProxy.startEncryptProxy();
+        await Future.delayed(const Duration(milliseconds: 500));
+        await _checkProxyStatus();
+        if (!_proxyRunning) throw Exception('启动代理失败，无法保存高级配置');
+      } catch (e) {
+        throw Exception('代理未运行，无法保存高级配置');
+      }
+    }
+
     final proxyPort = int.tryParse(_proxyPortController.text) ?? 5344;
     final dio = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 3),

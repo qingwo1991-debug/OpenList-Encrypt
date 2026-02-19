@@ -246,6 +246,21 @@ func (m *EncryptProxyManager) SetDBExportSyncConfig(enable bool, baseURL string,
 	return err
 }
 
+// SetAdvancedConfigJSON 设置解密和缓存配置（JSON）
+func (m *EncryptProxyManager) SetAdvancedConfigJSON(configJSON string) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	err := m.configManager.SetAdvancedConfigFromJSON(configJSON)
+	if err == nil {
+		m.updateProxyServerConfig()
+	}
+	return err
+}
+
 // AddEncryptPath 添加加密路径
 func (m *EncryptProxyManager) AddEncryptPath(path, password string, encType string, encName bool, encSuffix string) error {
 	m.mutex.Lock()
@@ -387,6 +402,11 @@ func SetEncryptDbExportSyncConfig(enable bool, baseURL string, intervalSeconds i
 // SetEncryptNetworkPolicy 设置网络策略（供 gomobile 调用）
 func SetEncryptNetworkPolicy(upstreamTimeoutSeconds, probeTimeoutSeconds, probeBudgetSeconds, upstreamBackoffSeconds int64, enableLocalBypass bool) error {
 	return GetEncryptManager().SetNetworkPolicy(int(upstreamTimeoutSeconds), int(probeTimeoutSeconds), int(probeBudgetSeconds), int(upstreamBackoffSeconds), enableLocalBypass)
+}
+
+// SetEncryptAdvancedConfigJson 设置解密和缓存配置（供 gomobile 调用）
+func SetEncryptAdvancedConfigJson(configJSON string) error {
+	return GetEncryptManager().SetAdvancedConfigJSON(configJSON)
 }
 
 // GetEncryptEnableH2C 获取 H2C 开关状态（供 gomobile 调用）

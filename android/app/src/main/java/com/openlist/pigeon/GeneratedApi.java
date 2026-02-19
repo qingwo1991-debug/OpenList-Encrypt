@@ -794,6 +794,8 @@ public class GeneratedApi {
         @NonNull Long upstreamBackoffSeconds,
         @NonNull Boolean enableLocalBypass);
 
+    void setEncryptAdvancedConfigJson(@NonNull String configJson);
+
     void addEncryptPath(
         @NonNull String path,
         @NonNull String password,
@@ -1105,6 +1107,29 @@ public class GeneratedApi {
                       probeBudgetSecondsArg,
                       upstreamBackoffSecondsArg,
                       enableLocalBypassArg);
+                  wrapped.add(0, null);
+                } catch (Throwable exception) {
+                  ArrayList<Object> wrappedError = wrapError(exception);
+                  wrapped = wrappedError;
+                }
+                reply.reply(wrapped);
+              });
+        } else {
+          channel.setMessageHandler(null);
+        }
+      }
+      {
+        BasicMessageChannel<Object> channel =
+            new BasicMessageChannel<>(
+                binaryMessenger, "dev.flutter.pigeon.openlist_mobile.EncryptProxy.setEncryptAdvancedConfigJson", getCodec());
+        if (api != null) {
+          channel.setMessageHandler(
+              (message, reply) -> {
+                ArrayList<Object> wrapped = new ArrayList<Object>();
+                ArrayList<Object> args = (ArrayList<Object>) message;
+                String configJsonArg = (String) args.get(0);
+                try {
+                  api.setEncryptAdvancedConfigJson(configJsonArg);
                   wrapped.add(0, null);
                 } catch (Throwable exception) {
                   ArrayList<Object> wrappedError = wrapError(exception);

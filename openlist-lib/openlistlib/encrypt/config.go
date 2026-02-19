@@ -40,14 +40,14 @@ func DefaultConfig() *ProxyConfig {
 		SizeMapTTL:                    defaultSizeMapTTLMinutes,
 		EnableRangeCompatCache:        true,
 		RangeCompatTTL:                defaultRangeCompatTTLMinutes,
-		RangeCompatMinFailures:        2,
-		RangeSkipMaxBytes:             8 * 1024 * 1024,
+		RangeCompatMinFailures:        1,
+		RangeSkipMaxBytes:             32 * 1024 * 1024,
 		PlayFirstFallback:             true,
 		WebDAVNegativeCacheTTLMinutes: 10,
 		RedirectCacheTTLMinutes:       1440,
 		EnableParallelDecrypt:         true,
-		ParallelDecryptConcurrency:    4,
-		StreamBufferKB:                512,
+		ParallelDecryptConcurrency:    8,
+		StreamBufferKB:                1024,
 		DebugEnabled:                  false,
 		DebugLevel:                    "info",
 		DebugMaskSensitive:            true,
@@ -123,6 +123,13 @@ func (m *ConfigManager) Load() error {
 	rawProbeTimeout := config.ProbeTimeoutSeconds
 	rawProbeBudget := config.ProbeBudgetSeconds
 	rawBackoff := config.UpstreamBackoffSeconds
+	rawEnableParallelDecrypt := config.EnableParallelDecrypt
+	rawParallelDecryptConcurrency := config.ParallelDecryptConcurrency
+	rawStreamBufferKB := config.StreamBufferKB
+	rawEnableRangeCompatCache := config.EnableRangeCompatCache
+	rawRangeCompatTTL := config.RangeCompatTTL
+	rawRangeCompatMinFailures := config.RangeCompatMinFailures
+	rawRangeSkipMaxBytes := config.RangeSkipMaxBytes
 	if config.UpstreamTimeoutSeconds <= 0 {
 		config.UpstreamTimeoutSeconds = 15
 	}
@@ -161,10 +168,24 @@ func (m *ConfigManager) Load() error {
 		config.RangeCompatTTL = defaultRangeCompatTTLMinutes
 	}
 	if config.RangeCompatMinFailures <= 0 {
-		config.RangeCompatMinFailures = 2
+		config.RangeCompatMinFailures = 1
 	}
 	if config.RangeSkipMaxBytes <= 0 {
-		config.RangeSkipMaxBytes = 8 * 1024 * 1024
+		config.RangeSkipMaxBytes = 32 * 1024 * 1024
+	}
+	if config.ParallelDecryptConcurrency <= 0 {
+		config.ParallelDecryptConcurrency = 8
+	}
+	if config.StreamBufferKB <= 0 {
+		config.StreamBufferKB = 1024
+	}
+	if !config.EnableParallelDecrypt && !rawEnableParallelDecrypt &&
+		rawParallelDecryptConcurrency == 0 && rawStreamBufferKB == 0 {
+		config.EnableParallelDecrypt = true
+	}
+	if !config.EnableRangeCompatCache && !rawEnableRangeCompatCache &&
+		rawRangeCompatTTL == 0 && rawRangeCompatMinFailures == 0 && rawRangeSkipMaxBytes == 0 {
+		config.EnableRangeCompatCache = true
 	}
 	// 旧配置兼容：未配置时启用播放优先兜底
 	if !config.PlayFirstFallback && config.WebDAVNegativeCacheTTLMinutes == 0 {
@@ -325,6 +346,82 @@ func (m *ConfigManager) SetDBExportSyncConfig(enable bool, baseURL string, inter
 	m.config.DBExportUsername = strings.TrimSpace(username)
 	if strings.TrimSpace(password) != "" {
 		m.config.DBExportPassword = password
+	}
+
+	return m.saveConfigLocked()
+}
+
+// SetAdvancedConfigFromJSON 设置解密和缓存高级配置（JSON）
+func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
+	type advancedConfigPayload struct {
+		PlayFirstFallback             *bool  `json:"playFirstFallback"`
+		EnableRangeCompatCache        *bool  `json:"enableRangeCompatCache"`
+		RangeCompatTTLMinutes         *int   `json:"rangeCompatTtlMinutes"`
+		RangeCompatMinFailures        *int   `json:"rangeCompatMinFailures"`
+		RangeSkipMaxBytes             *int64 `json:"rangeSkipMaxBytes"`
+		EnableParallelDecrypt         *bool  `json:"enableParallelDecrypt"`
+		ParallelDecryptConcurrency    *int   `json:"parallelDecryptConcurrency"`
+		StreamBufferKB                *int   `json:"streamBufferKb"`
+		WebDAVNegativeCacheTTLMinutes *int   `json:"webdavNegativeCacheTtlMinutes"`
+	}
+	var payload advancedConfigPayload
+	if err := json.Unmarshal([]byte(configJSON), &payload); err != nil {
+		return err
+	}
+
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if payload.PlayFirstFallback != nil {
+		m.config.PlayFirstFallback = *payload.PlayFirstFallback
+	}
+	if payload.EnableRangeCompatCache != nil {
+		m.config.EnableRangeCompatCache = *payload.EnableRangeCompatCache
+	}
+	if payload.RangeCompatTTLMinutes != nil {
+		if *payload.RangeCompatTTLMinutes <= 0 {
+			m.config.RangeCompatTTL = defaultRangeCompatTTLMinutes
+		} else {
+			m.config.RangeCompatTTL = *payload.RangeCompatTTLMinutes
+		}
+	}
+	if payload.RangeCompatMinFailures != nil {
+		if *payload.RangeCompatMinFailures <= 0 {
+			m.config.RangeCompatMinFailures = 1
+		} else {
+			m.config.RangeCompatMinFailures = *payload.RangeCompatMinFailures
+		}
+	}
+	if payload.RangeSkipMaxBytes != nil {
+		if *payload.RangeSkipMaxBytes <= 0 {
+			m.config.RangeSkipMaxBytes = 32 * 1024 * 1024
+		} else {
+			m.config.RangeSkipMaxBytes = *payload.RangeSkipMaxBytes
+		}
+	}
+	if payload.EnableParallelDecrypt != nil {
+		m.config.EnableParallelDecrypt = *payload.EnableParallelDecrypt
+	}
+	if payload.ParallelDecryptConcurrency != nil {
+		if *payload.ParallelDecryptConcurrency <= 0 {
+			m.config.ParallelDecryptConcurrency = 8
+		} else {
+			m.config.ParallelDecryptConcurrency = *payload.ParallelDecryptConcurrency
+		}
+	}
+	if payload.StreamBufferKB != nil {
+		if *payload.StreamBufferKB <= 0 {
+			m.config.StreamBufferKB = 1024
+		} else {
+			m.config.StreamBufferKB = *payload.StreamBufferKB
+		}
+	}
+	if payload.WebDAVNegativeCacheTTLMinutes != nil {
+		if *payload.WebDAVNegativeCacheTTLMinutes <= 0 {
+			m.config.WebDAVNegativeCacheTTLMinutes = 10
+		} else {
+			m.config.WebDAVNegativeCacheTTLMinutes = *payload.WebDAVNegativeCacheTTLMinutes
+		}
 	}
 
 	return m.saveConfigLocked()
