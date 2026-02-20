@@ -279,6 +279,15 @@ const (
 	routingMatchDriver    = "driver"
 )
 
+func normalizeRoutingUnmatchedDefault(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case routingActionDirect:
+		return routingActionDirect
+	default:
+		return routingActionProxy
+	}
+}
+
 var builtinDirectProviders = map[string]struct{}{
 	"aliyundriveopen": {},
 	"baidunetdisk":    {},
@@ -307,6 +316,7 @@ var providerLabelMap = map[string]string{
 	"aliyundriveopen":    "阿里云盘",
 	"baidunetdisk":       "百度网盘",
 	"baiduphoto":         "百度相册",
+	"chinatelecom":       "天翼云盘",
 	"cloud189":           "天翼云盘",
 	"cloud189pc":         "天翼云盘PC",
 	"open123":            "123网盘",
@@ -316,6 +326,9 @@ var providerLabelMap = map[string]string{
 	"wps":                "WPS网盘",
 	"onedrive":           "OneDrive",
 	"onedriveapp":        "OneDrive App",
+	"googledrive":        "Google Drive",
+	"google_drive":       "Google Drive",
+	"googlephotoapp":     "Google Photos",
 	"googlephoto":        "Google Photos",
 	"mega":               "MEGA",
 	"mediafire":          "MediaFire",
@@ -478,6 +491,9 @@ func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error)
 					return nil, nil
 				}
 				return envProxyFunc(req)
+			}
+			if normalizeRoutingUnmatchedDefault(config.RoutingUnmatchedDefault) == routingActionDirect {
+				return nil, nil
 			}
 		}
 
@@ -932,6 +948,8 @@ type ProxyConfig struct {
 	RoutingMode string `json:"routingMode,omitempty"`
 	// ProviderRuleSource: provider 路由规则来源（预留）
 	ProviderRuleSource string `json:"providerRuleSource,omitempty"`
+	// RoutingUnmatchedDefault: 未命中 provider/driver 规则时默认动作（direct/proxy）
+	RoutingUnmatchedDefault string `json:"routingUnmatchedDefault,omitempty"`
 	// StorageMapRefreshMinutes: storage driver 映射缓存刷新周期
 	StorageMapRefreshMinutes int `json:"storageMapRefreshMinutes,omitempty"`
 	// ProviderRoutingRules: provider/driver 分流规则
@@ -1135,6 +1153,7 @@ func applyLearningDefaults(cfg *ProxyConfig) {
 	if strings.TrimSpace(cfg.ProviderRuleSource) == "" {
 		cfg.ProviderRuleSource = "builtin+custom"
 	}
+	cfg.RoutingUnmatchedDefault = normalizeRoutingUnmatchedDefault(cfg.RoutingUnmatchedDefault)
 	if cfg.StorageMapRefreshMinutes <= 0 {
 		cfg.StorageMapRefreshMinutes = 30
 	}
@@ -3585,6 +3604,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				"probeBudgetSeconds":            p.config.ProbeBudgetSeconds,
 				"upstreamBackoffSeconds":        p.config.UpstreamBackoffSeconds,
 				"enableLocalBypass":             p.config.EnableLocalBypass,
+				"routingUnmatchedDefault":       p.config.RoutingUnmatchedDefault,
 				"passwdList":                    passwdList,
 				"probeOnDownload":               p.config.ProbeOnDownload,
 				"probeStrategyTtlMinutes":       p.config.ProbeStrategyTTLMinutes,
@@ -4111,6 +4131,13 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			if b, ok2 := v.(bool); ok2 {
 				p.mutex.Lock()
 				p.config.EnableLocalBypass = b
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["routingUnmatchedDefault"]; ok {
+			if s, ok2 := v.(string); ok2 {
+				p.mutex.Lock()
+				p.config.RoutingUnmatchedDefault = normalizeRoutingUnmatchedDefault(s)
 				p.mutex.Unlock()
 			}
 		}
@@ -5770,6 +5797,21 @@ func buildProviderLabel(provider string) string {
 	if strings.Contains(key, "unicom") && strings.Contains(key, "cloud") {
 		return "联通云盘"
 	}
+	if strings.Contains(key, "googledrive") || strings.Contains(key, "google_drive") {
+		return "Google Drive"
+	}
+	if strings.Contains(key, "google") && strings.Contains(key, "photo") {
+		return "Google Photos"
+	}
+	if strings.Contains(key, "google") && strings.Contains(key, "drive") {
+		return "Google Drive"
+	}
+	if strings.Contains(key, "移动") && strings.Contains(key, "云") {
+		return "移动云盘"
+	}
+	if strings.Contains(key, "联通") && strings.Contains(key, "云") {
+		return "联通云盘"
+	}
 	return ""
 }
 
@@ -5778,14 +5820,7 @@ func (p *ProxyServer) fetchAdminDriverNames(ctx context.Context, srcHeaders http
 	if err != nil {
 		return nil, true
 	}
-	for key, values := range srcHeaders {
-		if strings.EqualFold(key, "Host") || strings.EqualFold(key, "Content-Length") {
-			continue
-		}
-		for _, value := range values {
-			req.Header.Add(key, value)
-		}
-	}
+	copyForwardHeaders(req.Header, srcHeaders)
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, true
@@ -5819,6 +5854,113 @@ func (p *ProxyServer) fetchAdminDriverNames(ctx context.Context, srcHeaders http
 		names = append(names, name)
 	}
 	return names, false
+}
+
+func copyForwardHeaders(dst, src http.Header) {
+	for key, values := range src {
+		if strings.EqualFold(key, "Host") || strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func stripEncAPIPath(baseURL string) string {
+	b := normalizeDBExportBaseURL(baseURL)
+	if b == "" {
+		return ""
+	}
+	lower := strings.ToLower(b)
+	if strings.HasSuffix(lower, "/enc-api") {
+		return strings.TrimSuffix(b, b[len(b)-len("/enc-api"):])
+	}
+	return b
+}
+
+func (p *ProxyServer) tryFetchRemoteProviderRoutingCandidates(ctx context.Context) ([]string, map[string]string, bool) {
+	if p == nil {
+		return nil, nil, true
+	}
+	cfg := p.readDBExportSyncConfig()
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		return nil, nil, false
+	}
+	rootBase := stripEncAPIPath(cfg.BaseURL)
+	if rootBase == "" {
+		return nil, nil, true
+	}
+	u, err := url.Parse(rootBase)
+	if err == nil && p.config != nil {
+		port := u.Port()
+		if port == strconv.Itoa(p.config.ProxyPort) {
+			host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+			if host == "" || host == "127.0.0.1" || host == "localhost" || host == "::1" {
+				return nil, nil, false
+			}
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(rootBase, "/")+"/api/encrypt/provider-routing-candidates", nil)
+	if err != nil {
+		return nil, nil, true
+	}
+	req.Header.Set("X-Encrypt-Routing-Candidates-Fallback", "1")
+	if cfg.AuthEnabled {
+		token, err := p.dbExportLogin(ctx, cfg)
+		if err != nil {
+			return nil, nil, true
+		}
+		if strings.TrimSpace(token) != "" {
+			req.Header.Set("Authorizetoken", token)
+		}
+	}
+	resp, err := dbExportSyncHTTPClient.Do(req)
+	if err != nil {
+		return nil, nil, true
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, nil, true
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, true
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, nil, true
+	}
+	data, _ := payload["data"].(map[string]interface{})
+	if data == nil {
+		return nil, nil, true
+	}
+	rawProviders, _ := data["providers"].([]interface{})
+	providers := make([]string, 0, len(rawProviders))
+	seen := make(map[string]struct{}, len(rawProviders))
+	for _, raw := range rawProviders {
+		s, _ := raw.(string)
+		s = normalizeProviderToken(s)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		providers = append(providers, s)
+	}
+	labels := make(map[string]string)
+	rawLabels, _ := data["provider_labels"].(map[string]interface{})
+	for key, raw := range rawLabels {
+		k := normalizeProviderToken(key)
+		v := strings.TrimSpace(fmt.Sprintf("%v", raw))
+		if k == "" || v == "" {
+			continue
+		}
+		labels[k] = v
+	}
+	return providers, labels, false
 }
 
 func (p *ProxyServer) handleProviderRoutingCandidates(w http.ResponseWriter, r *http.Request) {
@@ -5878,7 +6020,37 @@ func (p *ProxyServer) handleProviderRoutingCandidates(w http.ResponseWriter, r *
 			providerLabels[provider] = label
 		}
 	}
+	remoteProvidersCount := 0
+	remoteUsed := false
 	degraded := degradedDriverNames
+	if r.Header.Get("X-Encrypt-Routing-Candidates-Fallback") != "1" {
+		remoteProviders, remoteLabels, remoteDegraded := p.tryFetchRemoteProviderRoutingCandidates(r.Context())
+		if remoteDegraded {
+			degraded = true
+		}
+		if len(remoteProviders) > 0 {
+			remoteUsed = true
+			remoteProvidersCount = len(remoteProviders)
+			existing := make(map[string]struct{}, len(providers))
+			for _, v := range providers {
+				existing[v] = struct{}{}
+			}
+			for _, v := range remoteProviders {
+				if _, ok := existing[v]; ok {
+					continue
+				}
+				providers = append(providers, v)
+				existing[v] = struct{}{}
+			}
+			sort.Strings(providers)
+			for key, value := range remoteLabels {
+				if strings.TrimSpace(value) == "" {
+					continue
+				}
+				providerLabels[key] = value
+			}
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -5892,6 +6064,8 @@ func (p *ProxyServer) handleProviderRoutingCandidates(w http.ResponseWriter, r *
 				"builtin_count":         builtinCount,
 				"driver_names_count":    len(driverNames),
 				"storage_drivers_count": len(storageDrivers),
+				"remote_used":           remoteUsed,
+				"remote_count":          remoteProvidersCount,
 				"degraded":              degraded,
 			},
 		},

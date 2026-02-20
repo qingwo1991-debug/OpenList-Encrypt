@@ -137,3 +137,41 @@ func TestHandleConfigV2ProviderRoutingRulesLegacyMatchValueCompat(t *testing.T) 
 		t.Fatalf("legacy matchValue compat failed, got matchValues=%v", got.MatchValues)
 	}
 }
+
+func TestHandleConfigV2RoutingUnmatchedDefault(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "encrypt_config.json")
+	p := &ProxyServer{config: cfg}
+
+	body := map[string]interface{}{
+		"config": map[string]interface{}{
+			"routingUnmatchedDefault": "direct",
+		},
+	}
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/encrypt/v2/config", bytes.NewReader(raw))
+	w := httptest.NewRecorder()
+	p.handleConfigV2(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	if p.config.RoutingUnmatchedDefault != routingActionDirect {
+		t.Fatalf("expected direct, got %s", p.config.RoutingUnmatchedDefault)
+	}
+
+	body = map[string]interface{}{
+		"config": map[string]interface{}{
+			"routingUnmatchedDefault": "invalid",
+		},
+	}
+	raw, _ = json.Marshal(body)
+	req = httptest.NewRequest(http.MethodPost, "/api/encrypt/v2/config", bytes.NewReader(raw))
+	w = httptest.NewRecorder()
+	p.handleConfigV2(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	if p.config.RoutingUnmatchedDefault != routingActionProxy {
+		t.Fatalf("expected invalid value fallback to proxy, got %s", p.config.RoutingUnmatchedDefault)
+	}
+}

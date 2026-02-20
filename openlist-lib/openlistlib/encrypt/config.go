@@ -33,6 +33,7 @@ func DefaultConfig() *ProxyConfig {
 		EnableLocalBypass:             true,
 		RoutingMode:                   routingModeByProvider,
 		ProviderRuleSource:            "builtin+custom",
+		RoutingUnmatchedDefault:       routingActionProxy,
 		StorageMapRefreshMinutes:      30,
 		ProbeOnDownload:               true,  // 默认开启，确保能正确获取文件大小以解密
 		EnableH2C:                     false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
@@ -157,6 +158,7 @@ func (m *ConfigManager) Load() error {
 	if strings.TrimSpace(config.ProviderRuleSource) == "" {
 		config.ProviderRuleSource = "builtin+custom"
 	}
+	config.RoutingUnmatchedDefault = normalizeRoutingUnmatchedDefault(config.RoutingUnmatchedDefault)
 	if config.StorageMapRefreshMinutes <= 0 {
 		config.StorageMapRefreshMinutes = 30
 	}

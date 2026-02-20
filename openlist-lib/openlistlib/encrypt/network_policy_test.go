@@ -108,6 +108,41 @@ func TestProxyResolverRespectsLocalBypass(t *testing.T) {
 	}
 }
 
+func TestProxyResolverUnmatchedDefaultDirect(t *testing.T) {
+	t.Setenv("http_proxy", "http://127.0.0.1:9999")
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)
+	resolver := newProxyResolver(&ProxyConfig{
+		RoutingMode:              routingModeByProvider,
+		RoutingUnmatchedDefault:  routingActionDirect,
+		ProviderRoutingRules:     nil,
+		EnableLocalBypass:        true,
+		StorageMapRefreshMinutes: 30,
+	})
+	proxyURL, err := resolver(req)
+	if err != nil {
+		t.Fatalf("resolver returned err: %v", err)
+	}
+	if proxyURL != nil {
+		t.Fatalf("expected direct connection for unmatched provider when default is direct")
+	}
+}
+
+func TestProxyResolverUnmatchedDefaultProxy(t *testing.T) {
+	t.Setenv("http_proxy", "http://127.0.0.1:9999")
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)
+	resolver := newProxyResolver(&ProxyConfig{
+		RoutingMode:             routingModeByProvider,
+		RoutingUnmatchedDefault: routingActionProxy,
+	})
+	proxyURL, err := resolver(req)
+	if err != nil {
+		t.Fatalf("resolver returned err: %v", err)
+	}
+	if proxyURL == nil {
+		t.Fatalf("expected env proxy for unmatched provider when default is proxy")
+	}
+}
+
 func TestHandleProxyDoesNotFastFailOnBackoff(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

@@ -52,6 +52,7 @@ func configV2Docs() []configDocItem {
 		{Key: "probeBudgetSeconds", Label: "探测预算", Description: "一次探测流程总时间预算", Min: 1, Max: 60, Default: defaults.ProbeBudgetSeconds, Unit: "秒"},
 		{Key: "upstreamBackoffSeconds", Label: "退避窗口", Description: "上游失败后的快速失败窗口", Min: 1, Max: 300, Default: defaults.UpstreamBackoffSeconds, Unit: "秒"},
 		{Key: "storageMapRefreshMinutes", Label: "存储映射刷新", Description: "admin storage 列表缓存刷新周期", Min: 1, Max: 1440, Default: defaults.StorageMapRefreshMinutes, Unit: "分钟"},
+		{Key: "routingUnmatchedDefault", Label: "未匹配默认动作", Description: "未命中 provider/driver 规则时默认 direct/proxy", Default: defaults.RoutingUnmatchedDefault},
 		{Key: "rangeCompatTtlMinutes", Label: "Range缓存TTL", Description: "Range不兼容缓存有效期", Min: 1, Max: 43200, Default: defaults.RangeCompatTTL, Unit: "分钟"},
 		{Key: "rangeCompatMinFailures", Label: "Range失败阈值", Description: "连续失败达到该值后标记不兼容", Min: 1, Max: 20, Default: defaults.RangeCompatMinFailures, Unit: "次"},
 		{Key: "rangeSkipMaxBytes", Label: "Range跳过上限", Description: "上游忽略Range时本地可跳过字节上限", Min: int64(1 << 20), Max: int64(2 << 30), Default: defaults.RangeSkipMaxBytes, Unit: "字节"},
@@ -98,6 +99,7 @@ func (p *ProxyServer) exportConfigV2() map[string]any {
 		"enableLocalBypass":             cfg.EnableLocalBypass,
 		"routingMode":                   cfg.RoutingMode,
 		"providerRuleSource":            cfg.ProviderRuleSource,
+		"routingUnmatchedDefault":       cfg.RoutingUnmatchedDefault,
 		"storageMapRefreshMinutes":      cfg.StorageMapRefreshMinutes,
 		"providerRoutingRules":          routingRules,
 		"playFirstFallback":             cfg.PlayFirstFallback,
@@ -218,6 +220,9 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 	}
 	if v, ok := body["providerRuleSource"].(string); ok {
 		p.config.ProviderRuleSource = strings.TrimSpace(v)
+	}
+	if v, ok := body["routingUnmatchedDefault"].(string); ok {
+		p.config.RoutingUnmatchedDefault = normalizeRoutingUnmatchedDefault(v)
 	}
 	if v, ok := parseIntAny(body["storageMapRefreshMinutes"]); ok {
 		p.config.StorageMapRefreshMinutes = clampInt(v, 1, 1440)

@@ -36,7 +36,10 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
     'wo_cloud': '联通云盘',
     'onedrive': 'OneDrive',
     'onedriveapp': 'OneDrive App',
+    'googledrive': 'Google Drive',
+    'google_drive': 'Google Drive',
     'googlephoto': 'Google Photos',
+    'googlephotoapp': 'Google Photos',
     'mega': 'MEGA',
     'mediafire': 'MediaFire',
     'protondrive': 'Proton Drive',
@@ -48,6 +51,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
   bool _saving = false;
   bool _enableLocalBypass = true;
   bool _enableRouting = true;
+  String _routingUnmatchedDefault = 'proxy';
   List<String> _providerCandidates = [];
   Map<String, String> _providerLabels = {};
   List<_RoutingRule> _rules = [];
@@ -133,6 +137,10 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
           ? config['enableLocalBypass'] as bool
           : true;
       _enableRouting = (config['routingMode'] ?? 'by_provider').toString() != 'off';
+      _routingUnmatchedDefault =
+          (config['routingUnmatchedDefault'] ?? 'proxy').toString().toLowerCase() == 'direct'
+          ? 'direct'
+          : 'proxy';
       _rules = rules;
     });
   }
@@ -185,6 +193,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
           'config': {
             'enableLocalBypass': _enableLocalBypass,
             'routingMode': _enableRouting ? 'by_provider' : 'off',
+            'routingUnmatchedDefault': _routingUnmatchedDefault,
             'providerRuleSource': 'builtin+custom',
             'providerRoutingRules': filteredRules,
           }
@@ -489,6 +498,22 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                   subtitle: const Text('仅对 localhost/私网地址生效'),
                   value: _enableLocalBypass,
                   onChanged: (v) => setState(() => _enableLocalBypass = v),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('未匹配 Provider 默认动作'),
+                  subtitle: const Text('当未命中任何规则和内置网盘分类时使用'),
+                  trailing: DropdownButton<String>(
+                    value: _routingUnmatchedDefault,
+                    items: const [
+                      DropdownMenuItem(value: 'proxy', child: Text('走代理')),
+                      DropdownMenuItem(value: 'direct', child: Text('直连')),
+                    ],
+                    onChanged: (v) {
+                      if (v == null) return;
+                      setState(() => _routingUnmatchedDefault = v);
+                    },
+                  ),
                 ),
                 const Card(
                   child: Padding(
