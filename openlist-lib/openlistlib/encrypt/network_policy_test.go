@@ -56,7 +56,7 @@ func TestUpstreamBackoffState(t *testing.T) {
 	}
 }
 
-func TestProxyResolverAlwaysDirect(t *testing.T) {
+func TestProxyResolverDefaultUsesEnvProxyForPublicHosts(t *testing.T) {
 	t.Setenv("http_proxy", "http://127.0.0.1:9999")
 	t.Setenv("https_proxy", "http://127.0.0.1:9999")
 	_ = os.Setenv("HTTP_PROXY", "http://127.0.0.1:9999")
@@ -68,8 +68,43 @@ func TestProxyResolverAlwaysDirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolver returned err: %v", err)
 	}
+	if proxyURL == nil {
+		t.Fatalf("expected env proxy for public host")
+	}
+}
+
+func TestProxyResolverByProviderRule(t *testing.T) {
+	t.Setenv("http_proxy", "http://127.0.0.1:9999")
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)
+	req.Header.Set("X-Encrypt-Provider", "onedrive")
+	resolver := newProxyResolver(&ProxyConfig{
+		RoutingMode: routingModeByProvider,
+		ProviderRoutingRules: []ProviderRoutingRule{
+			{MatchType: routingMatchProvider, MatchValue: "onedrive", Action: routingActionProxy, Enabled: true, Priority: 1},
+		},
+	})
+	proxyURL, err := resolver(req)
+	if err != nil {
+		t.Fatalf("resolver returned err: %v", err)
+	}
+	if proxyURL == nil {
+		t.Fatalf("expected proxy for matched provider rule")
+	}
+}
+
+func TestProxyResolverRespectsLocalBypass(t *testing.T) {
+	t.Setenv("http_proxy", "http://127.0.0.1:9999")
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/ping", nil)
+	resolver := newProxyResolver(&ProxyConfig{
+		EnableLocalBypass: true,
+		RoutingMode:       routingModeByProvider,
+	})
+	proxyURL, err := resolver(req)
+	if err != nil {
+		t.Fatalf("resolver returned err: %v", err)
+	}
 	if proxyURL != nil {
-		t.Fatalf("expected direct connection, got proxy=%s", proxyURL.String())
+		t.Fatalf("expected direct connection for local/private host")
 	}
 }
 

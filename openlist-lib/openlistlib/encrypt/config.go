@@ -31,6 +31,9 @@ func DefaultConfig() *ProxyConfig {
 		ProbeBudgetSeconds:            5,
 		UpstreamBackoffSeconds:        20,
 		EnableLocalBypass:             true,
+		RoutingMode:                   routingModeByProvider,
+		ProviderRuleSource:            "builtin+custom",
+		StorageMapRefreshMinutes:      30,
 		ProbeOnDownload:               true,  // 默认开启，确保能正确获取文件大小以解密
 		EnableH2C:                     false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
 		ProbeStrategyTTLMinutes:       defaultProbeStrategyTTLMinutes,
@@ -150,6 +153,17 @@ func (m *ConfigManager) Load() error {
 		rawBackoff == 0 {
 		config.EnableLocalBypass = true
 	}
+	config.RoutingMode = normalizeRoutingMode(config.RoutingMode)
+	if strings.TrimSpace(config.ProviderRuleSource) == "" {
+		config.ProviderRuleSource = "builtin+custom"
+	}
+	if config.StorageMapRefreshMinutes <= 0 {
+		config.StorageMapRefreshMinutes = 30
+	}
+	for i := range config.ProviderRoutingRules {
+		config.ProviderRoutingRules[i].MatchType = normalizeRoutingMatchType(config.ProviderRoutingRules[i].MatchType)
+		config.ProviderRoutingRules[i].Action = normalizeRoutingAction(config.ProviderRoutingRules[i].Action)
+	}
 	if config.DBExportSyncIntervalSeconds <= 0 {
 		config.DBExportSyncIntervalSeconds = defaultDBExportSyncIntervalSecs
 	}
@@ -265,6 +279,11 @@ func (m *ConfigManager) GetConfig() *ProxyConfig {
 		pathsCopy[i] = &pathCopy
 	}
 	configCopy.EncryptPaths = pathsCopy
+	if len(m.config.ProviderRoutingRules) > 0 {
+		rulesCopy := make([]ProviderRoutingRule, len(m.config.ProviderRoutingRules))
+		copy(rulesCopy, m.config.ProviderRoutingRules)
+		configCopy.ProviderRoutingRules = rulesCopy
+	}
 	configCopy.ConfigPath = m.configPath
 
 	return &configCopy

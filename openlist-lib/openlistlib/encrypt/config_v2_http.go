@@ -34,6 +34,15 @@ type configV2Data struct {
 	Config  map[string]any `json:"config"`
 }
 
+type configV2ProviderRoutingRule struct {
+	ID         string `json:"id,omitempty"`
+	MatchType  string `json:"matchType"`
+	MatchValue string `json:"matchValue"`
+	Action     string `json:"action"`
+	Enabled    bool   `json:"enabled"`
+	Priority   int    `json:"priority"`
+}
+
 func configV2Docs() []configDocItem {
 	defaults := DefaultConfig()
 	return []configDocItem{
@@ -41,6 +50,7 @@ func configV2Docs() []configDocItem {
 		{Key: "probeTimeoutSeconds", Label: "探测超时", Description: "单次探测请求最大耗时", Min: 1, Max: 30, Default: defaults.ProbeTimeoutSeconds, Unit: "秒"},
 		{Key: "probeBudgetSeconds", Label: "探测预算", Description: "一次探测流程总时间预算", Min: 1, Max: 60, Default: defaults.ProbeBudgetSeconds, Unit: "秒"},
 		{Key: "upstreamBackoffSeconds", Label: "退避窗口", Description: "上游失败后的快速失败窗口", Min: 1, Max: 300, Default: defaults.UpstreamBackoffSeconds, Unit: "秒"},
+		{Key: "storageMapRefreshMinutes", Label: "存储映射刷新", Description: "admin storage 列表缓存刷新周期", Min: 1, Max: 1440, Default: defaults.StorageMapRefreshMinutes, Unit: "分钟"},
 		{Key: "rangeCompatTtlMinutes", Label: "Range缓存TTL", Description: "Range不兼容缓存有效期", Min: 1, Max: 43200, Default: defaults.RangeCompatTTL, Unit: "分钟"},
 		{Key: "rangeCompatMinFailures", Label: "Range失败阈值", Description: "连续失败达到该值后标记不兼容", Min: 1, Max: 20, Default: defaults.RangeCompatMinFailures, Unit: "次"},
 		{Key: "rangeSkipMaxBytes", Label: "Range跳过上限", Description: "上游忽略Range时本地可跳过字节上限", Min: int64(1 << 20), Max: int64(2 << 30), Default: defaults.RangeSkipMaxBytes, Unit: "字节"},
@@ -56,12 +66,18 @@ func configV2Docs() []configDocItem {
 
 func (p *ProxyServer) exportConfigV2() map[string]any {
 	paths := make([]configV2Path, 0)
+	routingRules := make([]configV2ProviderRoutingRule, 0)
 	if p != nil && p.config != nil {
 		for _, ep := range p.config.EncryptPaths {
 			if ep == nil {
 				continue
 			}
 			paths = append(paths, configV2Path{Path: ep.Path, EncType: string(ep.EncType), EncName: ep.EncName, EncSuffix: ep.EncSuffix, Enable: ep.Enable})
+		}
+		for _, rr := range p.config.ProviderRoutingRules {
+			routingRules = append(routingRules, configV2ProviderRoutingRule{
+				ID: rr.ID, MatchType: rr.MatchType, MatchValue: rr.MatchValue, Action: rr.Action, Enabled: rr.Enabled, Priority: rr.Priority,
+			})
 		}
 	}
 	cfg := p.config
@@ -78,6 +94,10 @@ func (p *ProxyServer) exportConfigV2() map[string]any {
 		"probeBudgetSeconds":            cfg.ProbeBudgetSeconds,
 		"upstreamBackoffSeconds":        cfg.UpstreamBackoffSeconds,
 		"enableLocalBypass":             cfg.EnableLocalBypass,
+		"routingMode":                   cfg.RoutingMode,
+		"providerRuleSource":            cfg.ProviderRuleSource,
+		"storageMapRefreshMinutes":      cfg.StorageMapRefreshMinutes,
+		"providerRoutingRules":          routingRules,
 		"playFirstFallback":             cfg.PlayFirstFallback,
 		"enableRangeCompatCache":        cfg.EnableRangeCompatCache,
 		"rangeCompatTtlMinutes":         cfg.RangeCompatTTL,
@@ -191,6 +211,15 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 	if v, ok := body["enableLocalBypass"].(bool); ok {
 		p.config.EnableLocalBypass = v
 	}
+	if v, ok := body["routingMode"].(string); ok {
+		p.config.RoutingMode = normalizeRoutingMode(v)
+	}
+	if v, ok := body["providerRuleSource"].(string); ok {
+		p.config.ProviderRuleSource = strings.TrimSpace(v)
+	}
+	if v, ok := parseIntAny(body["storageMapRefreshMinutes"]); ok {
+		p.config.StorageMapRefreshMinutes = clampInt(v, 1, 1440)
+	}
 	if v, ok := body["playFirstFallback"].(bool); ok {
 		p.config.PlayFirstFallback = v
 	}
@@ -302,6 +331,38 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 			}
 			p.config.EncryptPaths = next
 		}
+	}
+
+	if rules, ok := body["providerRoutingRules"].([]interface{}); ok {
+		nextRules := make([]ProviderRoutingRule, 0, len(rules))
+		for _, raw := range rules {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			matchType, _ := item["matchType"].(string)
+			matchValue, _ := item["matchValue"].(string)
+			action, _ := item["action"].(string)
+			enabled, okEnabled := item["enabled"].(bool)
+			if !okEnabled {
+				enabled = true
+			}
+			priority, _ := parseIntAny(item["priority"])
+			id, _ := item["id"].(string)
+			matchValue = normalizeProviderToken(matchValue)
+			if matchValue == "" {
+				continue
+			}
+			nextRules = append(nextRules, ProviderRoutingRule{
+				ID:         strings.TrimSpace(id),
+				MatchType:  normalizeRoutingMatchType(matchType),
+				MatchValue: matchValue,
+				Action:     normalizeRoutingAction(action),
+				Enabled:    enabled,
+				Priority:   priority,
+			})
+		}
+		p.config.ProviderRoutingRules = nextRules
 	}
 
 	applyLearningDefaults(p.config)

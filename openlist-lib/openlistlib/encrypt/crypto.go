@@ -43,10 +43,11 @@ var crc6 = NewCRC6()
 
 // 外部添加的后缀模式（云盘/同步工具自动添加）
 var externalSuffixPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`_\d{8}_\d{6}$`), // _YYYYMMDD_HHMMSS（百度网盘等）
-	regexp.MustCompile(` \(\d+\)$`),     // " (1)", " (2)" 等（文件冲突重命名）
-	regexp.MustCompile(`\(\d+\)$`),      // "(1)", "(2)" 等（无空格冲突重命名）
-	regexp.MustCompile(`_\d+$`),         // _1, _2 等（简单数字后缀）
+	regexp.MustCompile(`_\d{8}_\d{6}$`),   // _YYYYMMDD_HHMMSS（百度网盘等）
+	regexp.MustCompile(` \(\d+\)$`),       // " (1)", " (2)" 等（文件冲突重命名）
+	regexp.MustCompile(`\(\d+\)$`),        // "(1)", "(2)" 等（无空格冲突重命名）
+	regexp.MustCompile(`_\d+$`),           // _1, _2 等（简单数字后缀）
+	regexp.MustCompile(`~q[0-9A-Za-z]+$`), // ~qxxx（部分客户端冲突后缀）
 }
 
 // 外部后缀标记常量（用于在显示名中嵌入外部后缀信息）

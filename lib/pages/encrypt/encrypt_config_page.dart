@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
 import '../../generated/l10n.dart';
 import '../../contant/native_bridge.dart';
+import 'provider_routing_page.dart';
 
 /// 加密配置页面
 class EncryptConfigPage extends StatefulWidget {
@@ -911,7 +912,24 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                     ],
                     
                     const SizedBox(height: 24),
-                    
+
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('网盘分流规则'),
+                      subtitle: const Text('按 provider/driver 配置直连或代理（白名单逻辑已收敛到网盘规则）'),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () async {
+                        final proxyPort = int.tryParse(_proxyPortController.text) ?? 5344;
+                        await Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => ProviderRoutingPage(proxyPort: proxyPort),
+                          ),
+                        );
+                        await _loadConfigViaV2Api();
+                      },
+                    ),
+                    const SizedBox(height: 8),
+
                     // 代理端口配置
                     Text(
                       '代理端口',

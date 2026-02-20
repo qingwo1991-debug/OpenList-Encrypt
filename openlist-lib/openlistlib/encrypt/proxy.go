@@ -270,13 +270,161 @@ func isLocalOrPrivateHost(host string) bool {
 	return false
 }
 
+const (
+	routingModeOff        = "off"
+	routingModeByProvider = "by_provider"
+	routingActionDirect   = "direct"
+	routingActionProxy    = "proxy"
+	routingMatchProvider  = "provider"
+	routingMatchDriver    = "driver"
+)
+
+var builtinDirectProviders = map[string]struct{}{
+	"aliyundriveopen": {},
+	"baidunetdisk":    {},
+	"baiduphoto":      {},
+	"cloud189":        {},
+	"cloud189pc":      {},
+	"open123":         {},
+	"pan115":          {},
+	"quarkoruc":       {},
+	"weiyun":          {},
+	"wps":             {},
+}
+
+var builtinProxyProviders = map[string]struct{}{
+	"onedrive":    {},
+	"onedriveapp": {},
+	"googlephoto": {},
+	"mega":        {},
+	"mediafire":   {},
+	"protondrive": {},
+	"dropbox":     {},
+	"github":      {},
+}
+
+func normalizeRoutingMode(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", routingModeByProvider:
+		return routingModeByProvider
+	case routingModeOff:
+		return routingModeOff
+	default:
+		return routingModeByProvider
+	}
+}
+
+func normalizeRoutingAction(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case routingActionProxy:
+		return routingActionProxy
+	default:
+		return routingActionDirect
+	}
+}
+
+func normalizeRoutingMatchType(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case routingMatchDriver:
+		return routingMatchDriver
+	default:
+		return routingMatchProvider
+	}
+}
+
+func normalizeProviderToken(v string) string {
+	return strings.ToLower(strings.TrimSpace(v))
+}
+
+func sortRoutingRules(rules []ProviderRoutingRule) {
+	sort.SliceStable(rules, func(i, j int) bool {
+		if rules[i].Priority == rules[j].Priority {
+			return rules[i].ID < rules[j].ID
+		}
+		return rules[i].Priority < rules[j].Priority
+	})
+}
+
+func matchRoutingRules(cfg *ProxyConfig, provider, driver string) (string, bool) {
+	if cfg == nil || len(cfg.ProviderRoutingRules) == 0 {
+		return "", false
+	}
+	rules := make([]ProviderRoutingRule, 0, len(cfg.ProviderRoutingRules))
+	rules = append(rules, cfg.ProviderRoutingRules...)
+	sortRoutingRules(rules)
+	p := normalizeProviderToken(provider)
+	d := normalizeProviderToken(driver)
+	for _, rule := range rules {
+		if !rule.Enabled {
+			continue
+		}
+		matchType := normalizeRoutingMatchType(rule.MatchType)
+		matchValue := normalizeProviderToken(rule.MatchValue)
+		if matchValue == "" {
+			continue
+		}
+		switch matchType {
+		case routingMatchDriver:
+			if d == matchValue {
+				return normalizeRoutingAction(rule.Action), true
+			}
+		default:
+			if p == matchValue {
+				return normalizeRoutingAction(rule.Action), true
+			}
+		}
+	}
+	return "", false
+}
+
+func matchBuiltinRouting(provider, driver string) (string, bool) {
+	p := normalizeProviderToken(provider)
+	d := normalizeProviderToken(driver)
+	if _, ok := builtinDirectProviders[p]; ok {
+		return routingActionDirect, true
+	}
+	if _, ok := builtinProxyProviders[p]; ok {
+		return routingActionProxy, true
+	}
+	if _, ok := builtinDirectProviders[d]; ok {
+		return routingActionDirect, true
+	}
+	if _, ok := builtinProxyProviders[d]; ok {
+		return routingActionProxy, true
+	}
+	return "", false
+}
+
 func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error) {
+	envProxyFunc := http.ProxyFromEnvironment
 	return func(req *http.Request) (*url.URL, error) {
-		// Keep behavior aligned with alist-encrypt node proxy:
-		// always connect upstream directly and do not inherit system proxy env.
-		_ = config
-		_ = req
-		return nil, nil
+		if req == nil || req.URL == nil {
+			return nil, nil
+		}
+		mode := normalizeRoutingMode(config.RoutingMode)
+		host := req.URL.Hostname()
+		provider := req.Header.Get("X-Encrypt-Provider")
+		driver := req.Header.Get("X-Encrypt-Driver")
+
+		if mode != routingModeOff {
+			if action, ok := matchRoutingRules(config, provider, driver); ok {
+				if action == routingActionDirect {
+					return nil, nil
+				}
+				return envProxyFunc(req)
+			}
+			if action, ok := matchBuiltinRouting(provider, driver); ok {
+				if action == routingActionDirect {
+					return nil, nil
+				}
+				return envProxyFunc(req)
+			}
+		}
+
+		if config != nil && config.EnableLocalBypass && isLocalOrPrivateHost(host) {
+			return nil, nil
+		}
+		return envProxyFunc(req)
 	}
 }
 
@@ -638,6 +786,8 @@ type RedirectInfo struct {
 	FileSize    int64        `json:"fileSize"`    // 文件大小
 	OriginalURL string       `json:"originalUrl"` // 原始请求URL
 	Headers     http.Header  `json:"headers"`     // 原始请求头
+	Provider    string       `json:"provider,omitempty"`
+	Driver      string       `json:"driver,omitempty"`
 }
 
 // copyWithBuffer 使用大缓冲区池进行高效复制（用于流媒体）
@@ -717,9 +867,17 @@ type ProxyConfig struct {
 	// UpstreamBackoffSeconds: 上游失败后快速失败窗口（秒）
 	UpstreamBackoffSeconds int `json:"upstreamBackoffSeconds,omitempty"`
 	// EnableLocalBypass: 对 localhost/私网地址绕过环境代理
-	EnableLocalBypass bool           `json:"enableLocalBypass,omitempty"`
-	EncryptPaths      []*EncryptPath `json:"encryptPaths"`  // 加密路径配置
-	AdminPassword     string         `json:"adminPassword"` // 管理密码
+	EnableLocalBypass bool `json:"enableLocalBypass,omitempty"`
+	// RoutingMode: 路由模式，off 或 by_provider
+	RoutingMode string `json:"routingMode,omitempty"`
+	// ProviderRuleSource: provider 路由规则来源（预留）
+	ProviderRuleSource string `json:"providerRuleSource,omitempty"`
+	// StorageMapRefreshMinutes: storage driver 映射缓存刷新周期
+	StorageMapRefreshMinutes int `json:"storageMapRefreshMinutes,omitempty"`
+	// ProviderRoutingRules: provider/driver 分流规则
+	ProviderRoutingRules []ProviderRoutingRule `json:"providerRoutingRules,omitempty"`
+	EncryptPaths         []*EncryptPath        `json:"encryptPaths"`  // 加密路径配置
+	AdminPassword        string                `json:"adminPassword"` // 管理密码
 	// ProbeOnDownload: attempt HEAD or Range=0-0 to discover remote file size when missing
 	ProbeOnDownload bool `json:"probeOnDownload"`
 	// EnableH2C: 启用 H2C (HTTP/2 Cleartext) 连接到后端，需要后端 OpenList 也开启 enable_h2c
@@ -832,10 +990,24 @@ type ProxyServer struct {
 	webdavNegativeMu    sync.Mutex
 	webdavNegativeCache map[string]time.Time // path -> expireAt
 	prefixRules         []encryptPrefixRule
+	routingMu           sync.RWMutex
+	seenProviders       map[string]time.Time
+	seenDrivers         map[string]time.Time
+	storageDriverMap    map[string]string
+	storageMapExpireAt  time.Time
 	controlHTTPStats    upstreamHTTPStats
 	probeHTTPStats      upstreamHTTPStats
 	streamHTTPStats     upstreamHTTPStats
 	playFirstCount      uint64
+}
+
+type ProviderRoutingRule struct {
+	ID         string `json:"id,omitempty"`
+	MatchType  string `json:"matchType"`
+	MatchValue string `json:"matchValue"`
+	Action     string `json:"action"`
+	Enabled    bool   `json:"enabled"`
+	Priority   int    `json:"priority"`
 }
 
 // FileInfo 文件信息
@@ -897,6 +1069,17 @@ func applyLearningDefaults(cfg *ProxyConfig) {
 	}
 	if cfg.LocalStrategyRetentionDays <= 0 {
 		cfg.LocalStrategyRetentionDays = defaultLocalStrategyRetentionDays
+	}
+	cfg.RoutingMode = normalizeRoutingMode(cfg.RoutingMode)
+	if strings.TrimSpace(cfg.ProviderRuleSource) == "" {
+		cfg.ProviderRuleSource = "builtin+custom"
+	}
+	if cfg.StorageMapRefreshMinutes <= 0 {
+		cfg.StorageMapRefreshMinutes = 30
+	}
+	for i := range cfg.ProviderRoutingRules {
+		cfg.ProviderRoutingRules[i].MatchType = normalizeRoutingMatchType(cfg.ProviderRoutingRules[i].MatchType)
+		cfg.ProviderRoutingRules[i].Action = normalizeRoutingAction(cfg.ProviderRoutingRules[i].Action)
 	}
 }
 
@@ -1008,6 +1191,61 @@ func convertShowNameByRule(ep *EncryptPath, pathText string) string {
 		return path.Base(pathText)
 	}
 	return ConvertShowNameWithSuffix(ep.Password, ep.EncType, pathText, ep.EncSuffix)
+}
+
+func appendUniquePath(dst []string, seen map[string]struct{}, candidate string) []string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return dst
+	}
+	candidate = path.Clean(candidate)
+	if _, ok := seen[candidate]; ok {
+		return dst
+	}
+	seen[candidate] = struct{}{}
+	return append(dst, candidate)
+}
+
+func buildRealPathCandidates(ep *EncryptPath, inputPath string) []string {
+	seen := make(map[string]struct{}, 8)
+	candidates := make([]string, 0, 8)
+	inputPath = strings.TrimSpace(inputPath)
+	if inputPath == "" {
+		return candidates
+	}
+	candidates = appendUniquePath(candidates, seen, inputPath)
+	if decoded, err := url.PathUnescape(inputPath); err == nil && strings.TrimSpace(decoded) != "" {
+		candidates = appendUniquePath(candidates, seen, decoded)
+	}
+	if ep == nil {
+		return candidates
+	}
+	candidates = appendUniquePath(candidates, seen, convertRealNameByRule(ep, inputPath))
+	candidates = appendUniquePath(candidates, seen, ConvertRealNameWithSuffix(ep.Password, ep.EncType, inputPath, ""))
+
+	dirPath := path.Dir(inputPath)
+	fileName := path.Base(inputPath)
+	ext := path.Ext(fileName)
+	base := strings.TrimSuffix(fileName, ext)
+
+	if idx := strings.Index(base, suffixMarker); idx != -1 {
+		if endIdx := strings.Index(base[idx:], suffixMarkerEnd); endIdx != -1 {
+			cleanBase := base[:idx] + base[idx+endIdx+1:]
+			cleaned := path.Join(dirPath, cleanBase+ext)
+			candidates = appendUniquePath(candidates, seen, cleaned)
+			candidates = appendUniquePath(candidates, seen, convertRealNameByRule(ep, cleaned))
+			candidates = appendUniquePath(candidates, seen, ConvertRealNameWithSuffix(ep.Password, ep.EncType, cleaned, ""))
+		}
+	}
+
+	strippedBase, suffix := stripExternalSuffix(base)
+	if suffix != "" && strings.TrimSpace(strippedBase) != "" {
+		stripped := path.Join(dirPath, strippedBase+ext)
+		candidates = appendUniquePath(candidates, seen, stripped)
+		candidates = appendUniquePath(candidates, seen, convertRealNameByRule(ep, stripped))
+		candidates = appendUniquePath(candidates, seen, ConvertRealNameWithSuffix(ep.Password, ep.EncType, stripped, ""))
+	}
+	return candidates
 }
 
 func (p *ProxyServer) rebuildEncryptPathIndex() {
@@ -1202,17 +1440,20 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	}
 
 	server := &ProxyServer{
-		config:         config,
-		transport:      transport,
-		h2cTransport:   h2cTransport,
-		httpClient:     httpClient,
-		probeClient:    probeClient,
-		streamClient:   streamClient,
-		fileCache:      newShardedAnyMap(cacheShardCount),
-		redirectCache:  newShardedAnyMap(cacheShardCount),
-		prefetchRecent: newShardedAnyMap(cacheShardCount),
-		cleanupDone:    make(chan struct{}),
-		metaSyncDone:   make(chan struct{}),
+		config:           config,
+		transport:        transport,
+		h2cTransport:     h2cTransport,
+		httpClient:       httpClient,
+		probeClient:      probeClient,
+		streamClient:     streamClient,
+		fileCache:        newShardedAnyMap(cacheShardCount),
+		redirectCache:    newShardedAnyMap(cacheShardCount),
+		prefetchRecent:   newShardedAnyMap(cacheShardCount),
+		seenProviders:    make(map[string]time.Time),
+		seenDrivers:      make(map[string]time.Time),
+		storageDriverMap: make(map[string]string),
+		cleanupDone:      make(chan struct{}),
+		metaSyncDone:     make(chan struct{}),
 	}
 	httpClient.Transport = &instrumentedRoundTripper{base: httpClient.Transport, stats: &server.controlHTTPStats}
 	probeClient.Transport = &instrumentedRoundTripper{base: probeClient.Transport, stats: &server.probeHTTPStats}
@@ -1752,6 +1993,7 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/api/encrypt/config", p.handleConfig)
 	mux.HandleFunc("/api/encrypt/v2/config", p.handleConfigV2)
 	mux.HandleFunc("/api/encrypt/v2/config/schema", p.handleConfigV2Schema)
+	mux.HandleFunc("/api/encrypt/provider-routing-candidates", p.handleProviderRoutingCandidates)
 	mux.HandleFunc("/api/encrypt/stats", p.handleStats)
 	mux.HandleFunc("/api/encrypt/v2/stats", p.handleStats)
 	mux.HandleFunc("/api/encrypt/sync/overview", p.handleSyncOverview)
@@ -1980,6 +2222,11 @@ func (p *ProxyServer) persistConfigSnapshot() error {
 		cfgPaths[i] = &epCopy
 	}
 	cfg.EncryptPaths = cfgPaths
+	if len(p.config.ProviderRoutingRules) > 0 {
+		cfgRules := make([]ProviderRoutingRule, len(p.config.ProviderRoutingRules))
+		copy(cfgRules, p.config.ProviderRoutingRules)
+		cfg.ProviderRoutingRules = cfgRules
+	}
 	configPath := cfg.ConfigPath
 	p.mutex.RUnlock()
 
@@ -4149,6 +4396,7 @@ func (p *ProxyServer) handleRedirectLegacy(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	p.applyRoutingHints(req, info.Provider, info.Driver)
 
 	// 复制请求头，但排除一些可能导致问题的头
 	for key, values := range r.Header {
@@ -4327,6 +4575,7 @@ func (p *ProxyServer) handleRedirectLegacy(w http.ResponseWriter, r *http.Reques
 					// 重新请求以获取新鲜的流
 					resp.Body.Close()
 					req2, _ := http.NewRequestWithContext(r.Context(), "GET", info.RedirectURL, nil)
+					p.applyRoutingHints(req2, info.Provider, info.Driver)
 					for key, values := range r.Header {
 						lowerKey := strings.ToLower(key)
 						if lowerKey == "host" || lowerKey == "referer" || lowerKey == "authorization" {
@@ -5096,8 +5345,6 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 	originalPath := reqData["path"]
 	filePath := originalPath
 	convertedPathForGet := false
-	noSuffixPathForGet := ""
-	convertedNoSuffixPathForGet := false
 
 	// 检查是否需要转换文件名
 	encPath := p.findEncryptPath(filePath)
@@ -5110,11 +5357,6 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 			reqData["path"] = filePath
 			body, _ = json.Marshal(reqData)
 			convertedPathForGet = filePath != originalPath
-			if encPath.EncSuffix != "" {
-				noSuffixRealName := ConvertRealNameWithSuffix(encPath.Password, encPath.EncType, originalPath, "")
-				noSuffixPathForGet = path.Join(path.Dir(originalPath), noSuffixRealName)
-				convertedNoSuffixPathForGet = noSuffixPathForGet != originalPath && noSuffixPathForGet != filePath
-			}
 		}
 	}
 
@@ -5218,16 +5460,26 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 					return !failed
 				}
 
-				if needsFallback && convertedNoSuffixPathForGet && tryFsGetPath(noSuffixPathForGet, "encrypted-no-suffix") {
-					needsFallback = false
-				}
 				if needsFallback {
-					_ = tryFsGetPath(originalPath, "original-path")
+					candidates := buildRealPathCandidates(encPath, originalPath)
+					for i, candidate := range candidates {
+						if candidate == filePath {
+							continue
+						}
+						if tryFsGetPath(candidate, fmt.Sprintf("candidate-%d", i)) {
+							needsFallback = false
+							break
+						}
+					}
 				}
 			}
 			if data, ok := result["data"].(map[string]interface{}); ok {
 				rawURL, _ := data["raw_url"].(string)
 				size, _ := data["size"].(float64)
+				provider, _ := data["provider"].(string)
+				driver := p.inferDriverFromPath(ctx, originalPath, r.Header)
+				p.noteProviderCandidate(provider)
+				p.noteDriverCandidate(driver)
 
 				log.Infof("%s handleFsGet: path=%s, size=%v, rawURL=%s", internal.LogPrefix(ctx, internal.TagProxy), originalPath, size, rawURL)
 
@@ -5247,6 +5499,8 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 					PasswdInfo:  encPath,
 					FileSize:    int64(size),
 					OriginalURL: originalPath,
+					Provider:    provider,
+					Driver:      driver,
 				})
 
 				// 修改返回的 URL
@@ -5291,6 +5545,192 @@ func anyToStringSlice(v interface{}) []string {
 	}
 }
 
+func (p *ProxyServer) noteProviderCandidate(provider string) {
+	token := normalizeProviderToken(provider)
+	if token == "" || p == nil {
+		return
+	}
+	p.routingMu.Lock()
+	if p.seenProviders == nil {
+		p.seenProviders = make(map[string]time.Time)
+	}
+	p.seenProviders[token] = time.Now()
+	p.routingMu.Unlock()
+}
+
+func (p *ProxyServer) noteDriverCandidate(driver string) {
+	token := normalizeProviderToken(driver)
+	if token == "" || p == nil {
+		return
+	}
+	p.routingMu.Lock()
+	if p.seenDrivers == nil {
+		p.seenDrivers = make(map[string]time.Time)
+	}
+	p.seenDrivers[token] = time.Now()
+	p.routingMu.Unlock()
+}
+
+func (p *ProxyServer) applyRoutingHints(req *http.Request, provider, driver string) {
+	if req == nil {
+		return
+	}
+	if v := strings.TrimSpace(provider); v != "" {
+		req.Header.Set("X-Encrypt-Provider", v)
+	}
+	if v := strings.TrimSpace(driver); v != "" {
+		req.Header.Set("X-Encrypt-Driver", v)
+	}
+}
+
+func mapPathToMountPrefix(pathText string) string {
+	p := strings.TrimSpace(pathText)
+	if p == "" || p == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+		return ""
+	}
+	return "/" + parts[0]
+}
+
+func (p *ProxyServer) refreshStorageDriverMapIfNeeded(ctx context.Context, srcHeaders http.Header) {
+	if p == nil || p.config == nil {
+		return
+	}
+	p.routingMu.RLock()
+	expired := time.Now().After(p.storageMapExpireAt)
+	p.routingMu.RUnlock()
+	if !expired {
+		return
+	}
+
+	reqURL := p.getAlistURL() + "/api/admin/storage/list?page=1&per_page=1000"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return
+	}
+	for key, values := range srcHeaders {
+		if strings.EqualFold(key, "Host") || strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return
+	}
+	data, _ := result["data"].(map[string]interface{})
+	content, _ := data["content"].([]interface{})
+	if len(content) == 0 {
+		return
+	}
+	nextMap := make(map[string]string, len(content))
+	for _, raw := range content {
+		item, _ := raw.(map[string]interface{})
+		if item == nil {
+			continue
+		}
+		mountPath, _ := item["mount_path"].(string)
+		driver, _ := item["driver"].(string)
+		mp := mapPathToMountPrefix(mountPath)
+		dv := normalizeProviderToken(driver)
+		if mp == "" || dv == "" {
+			continue
+		}
+		nextMap[mp] = dv
+		p.noteDriverCandidate(dv)
+	}
+	if len(nextMap) == 0 {
+		return
+	}
+	refreshMinutes := 30
+	if p.config.StorageMapRefreshMinutes > 0 {
+		refreshMinutes = p.config.StorageMapRefreshMinutes
+	}
+	p.routingMu.Lock()
+	p.storageDriverMap = nextMap
+	p.storageMapExpireAt = time.Now().Add(time.Duration(refreshMinutes) * time.Minute)
+	p.routingMu.Unlock()
+}
+
+func (p *ProxyServer) inferDriverFromPath(ctx context.Context, originalPath string, srcHeaders http.Header) string {
+	mountPrefix := mapPathToMountPrefix(originalPath)
+	if mountPrefix == "" {
+		return ""
+	}
+	p.routingMu.RLock()
+	driver := p.storageDriverMap[mountPrefix]
+	p.routingMu.RUnlock()
+	if driver != "" {
+		p.noteDriverCandidate(driver)
+		return driver
+	}
+	p.refreshStorageDriverMapIfNeeded(ctx, srcHeaders)
+	p.routingMu.RLock()
+	driver = p.storageDriverMap[mountPrefix]
+	p.routingMu.RUnlock()
+	if driver != "" {
+		p.noteDriverCandidate(driver)
+	}
+	return driver
+}
+
+func (p *ProxyServer) handleProviderRoutingCandidates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	p.routingMu.RLock()
+	providers := make([]string, 0, len(p.seenProviders)+len(builtinDirectProviders)+len(builtinProxyProviders))
+	providerSet := make(map[string]struct{}, len(p.seenProviders)+len(builtinDirectProviders)+len(builtinProxyProviders))
+	for k := range p.seenProviders {
+		providerSet[k] = struct{}{}
+	}
+	for k := range builtinDirectProviders {
+		providerSet[k] = struct{}{}
+	}
+	for k := range builtinProxyProviders {
+		providerSet[k] = struct{}{}
+	}
+	for k := range providerSet {
+		providers = append(providers, k)
+	}
+	drivers := make([]string, 0, len(p.seenDrivers))
+	for k := range p.seenDrivers {
+		drivers = append(drivers, k)
+	}
+	p.routingMu.RUnlock()
+	sort.Strings(providers)
+	sort.Strings(drivers)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"code": 200,
+		"data": map[string]interface{}{
+			"providers": providers,
+			"drivers":   drivers,
+		},
+	})
+}
+
 func (p *ProxyServer) proxyFSJSON(w http.ResponseWriter, r *http.Request, apiPath string, body []byte) {
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, p.getAlistURL()+apiPath, bytes.NewReader(body))
 	if err != nil {
@@ -5323,6 +5763,75 @@ func (p *ProxyServer) proxyFSJSON(w http.ResponseWriter, r *http.Request, apiPat
 	copyWithBuffer(w, resp.Body)
 }
 
+func (p *ProxyServer) doFSRemoveRequest(ctx context.Context, srcHeaders http.Header, reqData map[string]interface{}) (int, []byte, error) {
+	body, _ := json.Marshal(reqData)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.getAlistURL()+"/api/fs/remove", bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	for key, values := range srcHeaders {
+		if strings.EqualFold(key, "Host") || strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, respBody, nil
+}
+
+func fsRemoveNotFound(status int, body []byte) bool {
+	if status == http.StatusBadRequest || status == http.StatusNotFound {
+		return true
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+	if code, ok := payload["code"].(float64); ok {
+		if int(code) == http.StatusBadRequest || int(code) == http.StatusNotFound {
+			return true
+		}
+	}
+	msg, _ := payload["message"].(string)
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	return strings.Contains(msg, "not found") || strings.Contains(msg, "object not found")
+}
+
+func (p *ProxyServer) buildRemoveNameCandidates(encPath *EncryptPath, dirPath, name string) []string {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	inputPath := path.Join(dirPath, name)
+	pathCandidates := buildRealPathCandidates(encPath, inputPath)
+	seen := make(map[string]struct{}, len(pathCandidates))
+	out := make([]string, 0, len(pathCandidates))
+	for _, item := range pathCandidates {
+		base := strings.TrimSpace(path.Base(item))
+		if base == "" || base == "." || base == "/" {
+			continue
+		}
+		if _, ok := seen[base]; ok {
+			continue
+		}
+		seen[base] = struct{}{}
+		out = append(out, base)
+	}
+	return out
+}
+
 func (p *ProxyServer) handleFsRemove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -5340,28 +5849,69 @@ func (p *ProxyServer) handleFsRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	dir, _ := reqData["dir"].(string)
 	encPath := p.findEncryptPath(dir)
-	if encPath != nil && encPath.EncName {
-		names := anyToStringSlice(reqData["names"])
-		seen := make(map[string]bool, len(names)*2)
-		converted := make([]string, 0, len(names)*2)
-		for _, name := range names {
-			if name == "" {
-				continue
-			}
-			if !seen[name] {
-				converted = append(converted, name)
-				seen[name] = true
-			}
-			realName := convertRealNameByRule(encPath, name)
-			if realName != "" && !seen[realName] {
-				converted = append(converted, realName)
-				seen[realName] = true
+	if encPath == nil || !encPath.EncName {
+		p.proxyFSJSON(w, r, "/api/fs/remove", body)
+		return
+	}
+	originalNames := anyToStringSlice(reqData["names"])
+	seen := make(map[string]bool, len(originalNames)*4)
+	initialNames := make([]string, 0, len(originalNames)*4)
+	for _, name := range originalNames {
+		for _, candidate := range p.buildRemoveNameCandidates(encPath, dir, name) {
+			if !seen[candidate] {
+				initialNames = append(initialNames, candidate)
+				seen[candidate] = true
 			}
 		}
-		reqData["names"] = converted
-		body, _ = json.Marshal(reqData)
 	}
-	p.proxyFSJSON(w, r, "/api/fs/remove", body)
+	if len(initialNames) == 0 {
+		initialNames = originalNames
+	}
+	reqData["names"] = initialNames
+	status, respBody, err := p.doFSRemoveRequest(r.Context(), r.Header, reqData)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if !fsRemoveNotFound(status, respBody) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(respBody)
+		return
+	}
+
+	// 如果批量删除包含 not found，按条目候选逐个重试，降低误判与兼容历史命名。
+	var finalStatus = status
+	finalBody := respBody
+	for _, name := range originalNames {
+		candidates := p.buildRemoveNameCandidates(encPath, dir, name)
+		if len(candidates) == 0 {
+			continue
+		}
+		succeeded := false
+		for _, candidate := range candidates {
+			retryReq := map[string]interface{}{
+				"dir":   dir,
+				"names": []string{candidate},
+			}
+			retryStatus, retryBody, retryErr := p.doFSRemoveRequest(r.Context(), r.Header, retryReq)
+			if retryErr != nil {
+				continue
+			}
+			finalStatus = retryStatus
+			finalBody = retryBody
+			if !fsRemoveNotFound(retryStatus, retryBody) {
+				succeeded = true
+				break
+			}
+		}
+		if !succeeded {
+			p.debugf("filename", "fs/remove fallback failed name=%s dir=%s", name, dir)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(finalStatus)
+	_, _ = w.Write(finalBody)
 }
 
 func (p *ProxyServer) handleFsMove(w http.ResponseWriter, r *http.Request) {
@@ -5781,6 +6331,8 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 			internal.LogPrefix(ctx, internal.TagDownload), filePath, resp.StatusCode, location)
 
 		if encPath != nil && encPath.Enable && location != "" {
+			driver := p.inferDriverFromPath(ctx, filePath, r.Header)
+			p.noteDriverCandidate(driver)
 			// 对于需要解密的 GET 请求，创建代理重定向
 			// 生成唯一的重定向 key
 			redirectKey := fmt.Sprintf("%d-%s", time.Now().UnixNano(), path.Base(filePath))
@@ -5792,6 +6344,7 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 				FileSize:    fileSize,
 				OriginalURL: r.URL.String(),
 				Headers:     r.Header.Clone(),
+				Driver:      driver,
 			}
 			p.storeRedirectCache(redirectKey, redirectInfo)
 
@@ -6476,6 +7029,8 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			r.Method, filePath, resp.StatusCode, location)
 
 		if r.Method == "GET" && encPath != nil && encPath.Enable && location != "" {
+			driver := p.inferDriverFromPath(ctx, filePath, r.Header)
+			p.noteDriverCandidate(driver)
 			// 对于需要解密的 GET 请求，创建代理重定向
 			// 尝试获取文件大小（从缓存或响应头）
 			var fileSize int64 = 0
@@ -6539,6 +7094,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				FileSize:    fileSize,
 				OriginalURL: r.URL.String(),
 				Headers:     r.Header.Clone(),
+				Driver:      driver,
 			}
 			p.storeRedirectCache(redirectKey, redirectInfo)
 
