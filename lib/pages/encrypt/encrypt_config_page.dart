@@ -56,6 +56,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   bool _isLoading = true;
   bool _proxyRunning = false;
   bool _isInitialized = false;
+  List<Map<String, dynamic>> _configDocs = [];
 
   @override
   void initState() {
@@ -73,8 +74,12 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
         _isInitialized = true;
       }
       
-      await _loadConfig();
       await _checkProxyStatus();
+      await _loadConfig();
+      if (_proxyRunning) {
+        await _loadConfigViaV2Api();
+        await _loadConfigDocsViaV2Api();
+      }
     } catch (e) {
       debugPrint('Failed to init encrypt proxy: $e');
       // 如果初始化失败，使用默认值
@@ -148,6 +153,58 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
       }
     } catch (e) {
       debugPrint('Failed to load encrypt config: $e');
+    }
+  }
+
+  Future<void> _loadConfigViaV2Api() async {
+    final proxyPort = int.tryParse(_proxyPortController.text) ?? 5344;
+    final dio = Dio(BaseOptions(
+      connectTimeout: const Duration(seconds: 3),
+      receiveTimeout: const Duration(seconds: 5),
+      sendTimeout: const Duration(seconds: 5),
+    ));
+    try {
+      final resp = await dio.get('http://127.0.0.1:$proxyPort/api/encrypt/v2/config');
+      final data = resp.data is Map<String, dynamic> ? resp.data as Map<String, dynamic> : null;
+      final payload = data?['data'] as Map<String, dynamic>?;
+      final config = payload?['config'] as Map<String, dynamic>?;
+      if (config == null) return;
+      setState(() {
+        _rangeCompatTtlController.text = (config['rangeCompatTtlMinutes'] ?? _rangeCompatTtlController.text).toString();
+        _rangeCompatMinFailuresController.text = (config['rangeCompatMinFailures'] ?? _rangeCompatMinFailuresController.text).toString();
+        _rangeSkipMaxBytesController.text = (config['rangeSkipMaxBytes'] ?? _rangeSkipMaxBytesController.text).toString();
+        _parallelDecryptConcurrencyController.text = (config['parallelDecryptConcurrency'] ?? _parallelDecryptConcurrencyController.text).toString();
+        _streamBufferKbController.text = (config['streamBufferKb'] ?? _streamBufferKbController.text).toString();
+        _webdavNegativeCacheTtlController.text = (config['webdavNegativeCacheTtlMinutes'] ?? _webdavNegativeCacheTtlController.text).toString();
+        _playFirstFallback = config['playFirstFallback'] ?? _playFirstFallback;
+        _enableRangeCompatCache = config['enableRangeCompatCache'] ?? _enableRangeCompatCache;
+        _enableParallelDecrypt = config['enableParallelDecrypt'] ?? _enableParallelDecrypt;
+      });
+    } catch (e) {
+      debugPrint('Failed to load v2 config: $e');
+    }
+  }
+
+  Future<void> _loadConfigDocsViaV2Api() async {
+    final proxyPort = int.tryParse(_proxyPortController.text) ?? 5344;
+    final dio = Dio(BaseOptions(
+      connectTimeout: const Duration(seconds: 3),
+      receiveTimeout: const Duration(seconds: 5),
+      sendTimeout: const Duration(seconds: 5),
+    ));
+    try {
+      final resp = await dio.get('http://127.0.0.1:$proxyPort/api/encrypt/v2/config/schema');
+      final data = resp.data is Map<String, dynamic> ? resp.data as Map<String, dynamic> : null;
+      final payload = data?['data'] as Map<String, dynamic>?;
+      final docs = (payload?['docs'] as List<dynamic>? ?? [])
+          .whereType<Map>()
+          .map((e) => e.map((key, value) => MapEntry(key.toString(), value)))
+          .toList();
+      setState(() {
+        _configDocs = docs;
+      });
+    } catch (e) {
+      debugPrint('Failed to load v2 config schema: $e');
     }
   }
 
@@ -257,22 +314,25 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
       sendTimeout: const Duration(seconds: 5),
     ));
     final resp = await dio.post(
-      'http://127.0.0.1:$proxyPort/api/encrypt/config',
+      'http://127.0.0.1:$proxyPort/api/encrypt/v2/config',
       data: {
-        'playFirstFallback': _playFirstFallback,
-        'enableRangeCompatCache': _enableRangeCompatCache,
-        'rangeCompatTtlMinutes':
-            int.tryParse(_rangeCompatTtlController.text) ?? 43200,
-        'rangeCompatMinFailures':
-            int.tryParse(_rangeCompatMinFailuresController.text) ?? 2,
-        'rangeSkipMaxBytes':
-            int.tryParse(_rangeSkipMaxBytesController.text) ?? (256 * 1024 * 1024),
-        'enableParallelDecrypt': _enableParallelDecrypt,
-        'parallelDecryptConcurrency':
-            int.tryParse(_parallelDecryptConcurrencyController.text) ?? 4,
-        'streamBufferKb': int.tryParse(_streamBufferKbController.text) ?? 512,
-        'webdavNegativeCacheTtlMinutes':
-            int.tryParse(_webdavNegativeCacheTtlController.text) ?? 10,
+        'version': 2,
+        'config': {
+          'playFirstFallback': _playFirstFallback,
+          'enableRangeCompatCache': _enableRangeCompatCache,
+          'rangeCompatTtlMinutes':
+              int.tryParse(_rangeCompatTtlController.text) ?? 43200,
+          'rangeCompatMinFailures':
+              int.tryParse(_rangeCompatMinFailuresController.text) ?? 2,
+          'rangeSkipMaxBytes':
+              int.tryParse(_rangeSkipMaxBytesController.text) ?? (256 * 1024 * 1024),
+          'enableParallelDecrypt': _enableParallelDecrypt,
+          'parallelDecryptConcurrency':
+              int.tryParse(_parallelDecryptConcurrencyController.text) ?? 4,
+          'streamBufferKb': int.tryParse(_streamBufferKbController.text) ?? 512,
+          'webdavNegativeCacheTtlMinutes':
+              int.tryParse(_webdavNegativeCacheTtlController.text) ?? 10,
+        }
       },
       options: Options(contentType: 'application/json'),
     );
@@ -935,6 +995,45 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         ),
                       ],
                     ),
+                    const SizedBox(height: 24),
+
+                    Text(
+                      '参数边界说明（V2）',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    if (_configDocs.isEmpty)
+                      const Text(
+                        '未获取到说明（请先启动代理后刷新）',
+                        style: TextStyle(color: Colors.grey),
+                      )
+                    else
+                      Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            children: _configDocs.take(8).map((item) {
+                              final label = item['label']?.toString() ?? item['key']?.toString() ?? '-';
+                              final desc = item['description']?.toString() ?? '';
+                              final min = item['min']?.toString() ?? '-';
+                              final max = item['max']?.toString() ?? '-';
+                              final def = item['default']?.toString() ?? '-';
+                              final unit = item['unit']?.toString() ?? '';
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 4),
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: Text(
+                                    '$label: $desc (范围 $min-$max$unit, 默认 $def$unit)',
+                                    style: Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ),
+
                     const SizedBox(height: 24),
                     
                     // 加密路径配置

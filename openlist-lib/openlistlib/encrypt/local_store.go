@@ -3,6 +3,7 @@ package encrypt
 import (
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,6 +100,7 @@ func newLocalStore(baseDir string) (*localStore, error) {
 		return nil, err
 	}
 	dbPath := filepath.Join(baseDir, "local_media.db")
+	_ = backupLocalStoreDB(dbPath)
 	dsn := dbPath + "?_journal=WAL&_busy_timeout=5000&_foreign_keys=ON"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
@@ -124,6 +126,37 @@ func newLocalStore(baseDir string) (*localStore, error) {
 		db:             db,
 		flushThreshold: defaultFlushThreshold,
 	}, nil
+}
+
+func backupLocalStoreDB(dbPath string) error {
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.Size() <= 0 {
+		return nil
+	}
+	dir := filepath.Dir(dbPath)
+	base := filepath.Base(dbPath)
+	backupPath := filepath.Join(dir, base+".bak-"+time.Now().Format("20060102150405"))
+
+	src, err := os.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.Create(backupPath)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+	if _, err := io.Copy(dst, src); err != nil {
+		return err
+	}
+	return nil
 }
 
 func initLocalSchema(db *sql.DB) error {
@@ -188,6 +221,14 @@ func initLocalSchema(db *sql.DB) error {
 	            updated_at INTEGER NOT NULL
 	        );`,
 		`CREATE INDEX IF NOT EXISTS idx_local_sync_cycle_name_time ON local_sync_cycle(name, cycle_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS local_db_meta (
+	            key TEXT PRIMARY KEY,
+	            value TEXT NOT NULL,
+	            updated_at INTEGER NOT NULL
+	        );`,
+		`INSERT INTO local_db_meta (key, value, updated_at)
+	        VALUES ('schema_version', '2', strftime('%s','now'))
+	        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
