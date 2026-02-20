@@ -17,12 +17,32 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
     sendTimeout: const Duration(seconds: 5),
   ));
 
+  static const Map<String, String> _providerZhMap = {
+    'aliyundriveopen': '阿里云盘',
+    'baidunetdisk': '百度网盘',
+    'baiduphoto': '百度相册',
+    'cloud189': '天翼云盘',
+    'cloud189pc': '天翼云盘PC',
+    'open123': '123网盘',
+    'pan115': '115网盘',
+    'quarkoruc': '夸克/UC网盘',
+    'weiyun': '微云',
+    'wps': 'WPS网盘',
+    'onedrive': 'OneDrive',
+    'onedriveapp': 'OneDrive App',
+    'googlephoto': 'Google Photos',
+    'mega': 'MEGA',
+    'mediafire': 'MediaFire',
+    'protondrive': 'Proton Drive',
+    'dropbox': 'Dropbox',
+    'github': 'GitHub',
+  };
+
   bool _loading = true;
   bool _saving = false;
   bool _enableLocalBypass = true;
   bool _enableRouting = true;
   List<String> _providerCandidates = [];
-  List<String> _driverCandidates = [];
   List<_RoutingRule> _rules = [];
 
   String get _baseUrl => 'http://127.0.0.1:${widget.proxyPort}';
@@ -31,6 +51,15 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
   void initState() {
     super.initState();
     _loadAll();
+  }
+
+  String _providerLabel(String raw) {
+    final key = raw.trim().toLowerCase();
+    final zh = _providerZhMap[key];
+    if (zh == null || zh.isEmpty) {
+      return raw;
+    }
+    return '$raw ($zh)';
   }
 
   Future<void> _loadAll() async {
@@ -46,7 +75,9 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
 
   Future<void> _loadConfig() async {
     final resp = await _dio.get('$_baseUrl/api/encrypt/v2/config');
-    final root = resp.data is Map<String, dynamic> ? resp.data as Map<String, dynamic> : const <String, dynamic>{};
+    final root = resp.data is Map<String, dynamic>
+        ? resp.data as Map<String, dynamic>
+        : const <String, dynamic>{};
     final data = root['data'] as Map<String, dynamic>?;
     final config = data?['config'] as Map<String, dynamic>?;
     if (config == null) return;
@@ -55,15 +86,18 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
       final m = item.map((k, v) => MapEntry(k.toString(), v));
       return _RoutingRule(
         id: (m['id'] ?? '').toString(),
-        matchType: (m['matchType'] ?? 'provider').toString(),
-        matchValue: (m['matchValue'] ?? '').toString(),
+        // UI 仅保留 provider 规则，driver 规则自动收敛。
+        matchType: 'provider',
+        matchValue: (m['matchValue'] ?? '').toString().trim().toLowerCase(),
         action: (m['action'] ?? 'direct').toString(),
         enabled: m['enabled'] is bool ? m['enabled'] as bool : true,
         priority: int.tryParse((m['priority'] ?? 100).toString()) ?? 100,
       );
     }).toList();
     setState(() {
-      _enableLocalBypass = config['enableLocalBypass'] is bool ? config['enableLocalBypass'] as bool : true;
+      _enableLocalBypass = config['enableLocalBypass'] is bool
+          ? config['enableLocalBypass'] as bool
+          : true;
       _enableRouting = (config['routingMode'] ?? 'by_provider').toString() != 'off';
       _rules = rules;
     });
@@ -71,19 +105,28 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
 
   Future<void> _loadCandidates() async {
     final resp = await _dio.get('$_baseUrl/api/encrypt/provider-routing-candidates');
-    final root = resp.data is Map<String, dynamic> ? resp.data as Map<String, dynamic> : const <String, dynamic>{};
+    final root = resp.data is Map<String, dynamic>
+        ? resp.data as Map<String, dynamic>
+        : const <String, dynamic>{};
     final data = root['data'] as Map<String, dynamic>?;
-    final providers = (data?['providers'] as List<dynamic>? ?? []).map((e) => e.toString()).toList();
-    final drivers = (data?['drivers'] as List<dynamic>? ?? []).map((e) => e.toString()).toList();
+    final providers = (data?['providers'] as List<dynamic>? ?? [])
+        .map((e) => e.toString().trim().toLowerCase())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
     setState(() {
       _providerCandidates = providers;
-      _driverCandidates = drivers;
     });
   }
 
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
+      final filteredRules = _rules
+          .where((e) => e.matchValue.trim().isNotEmpty)
+          .map((e) => e.toJson())
+          .toList();
       await _dio.post(
         '$_baseUrl/api/encrypt/v2/config',
         data: {
@@ -92,17 +135,19 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
             'enableLocalBypass': _enableLocalBypass,
             'routingMode': _enableRouting ? 'by_provider' : 'off',
             'providerRuleSource': 'builtin+custom',
-            'providerRoutingRules': _rules.map((e) => e.toJson()).toList(),
+            'providerRoutingRules': filteredRules,
           }
         },
         options: Options(contentType: 'application/json'),
       );
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('网盘分流规则已保存')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('网盘分流规则已保存')));
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存失败: $e')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('保存失败: $e')));
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -114,7 +159,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
       _rules.add(_RoutingRule(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         matchType: 'provider',
-        matchValue: '',
+        matchValue: _providerCandidates.isNotEmpty ? _providerCandidates.first : '',
         action: 'direct',
         enabled: true,
         priority: _rules.length + 1,
@@ -122,9 +167,34 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
     });
   }
 
+  List<String> _candidateWithCurrent(String current) {
+    final list = <String>[];
+    list.addAll(_providerCandidates);
+    final c = current.trim().toLowerCase();
+    if (c.isNotEmpty && !list.contains(c)) {
+      list.insert(0, c);
+    }
+    return list;
+  }
+
+  Widget _buildProviderItem(String value) {
+    final label = _providerLabel(value);
+    return Tooltip(
+      message: label,
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
+
   Widget _buildRuleCard(int index) {
     final rule = _rules[index];
-    final candidates = rule.matchType == 'driver' ? _driverCandidates : _providerCandidates;
+    final candidates = _candidateWithCurrent(rule.matchValue);
+    final dropdownValue = rule.matchValue.isEmpty
+        ? (candidates.isNotEmpty ? candidates.first : null)
+        : rule.matchValue;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -134,15 +204,23 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
               children: [
                 Expanded(
                   child: DropdownButtonFormField<String>(
-                    value: rule.matchType,
-                    decoration: const InputDecoration(labelText: '匹配类型'),
-                    items: const [
-                      DropdownMenuItem(value: 'provider', child: Text('provider')),
-                      DropdownMenuItem(value: 'driver', child: Text('driver')),
-                    ],
+                    value: dropdownValue,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Provider（可选）',
+                      hintText: '选择网盘 Provider',
+                    ),
+                    items: candidates
+                        .map(
+                          (c) => DropdownMenuItem<String>(
+                            value: c,
+                            child: _buildProviderItem(c),
+                          ),
+                        )
+                        .toList(),
                     onChanged: (v) {
                       if (v == null) return;
-                      setState(() => rule.matchType = v);
+                      setState(() => rule.matchValue = v.trim().toLowerCase());
                     },
                   ),
                 ),
@@ -166,32 +244,19 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
             const SizedBox(height: 8),
             TextFormField(
               initialValue: rule.matchValue,
-              decoration: InputDecoration(
-                labelText: '匹配值',
-                hintText: candidates.isNotEmpty ? '例如: ${candidates.first}' : '例如: onedrive / aliyundriveopen',
+              decoration: const InputDecoration(
+                labelText: '自定义 Provider（可选）',
+                hintText: '下拉没有时可手动输入',
               ),
               onChanged: (v) => rule.matchValue = v.trim().toLowerCase(),
             ),
-            if (candidates.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: candidates.take(20).map((c) {
-                  return ActionChip(
-                    label: Text(c),
-                    onPressed: () => setState(() => rule.matchValue = c),
-                  );
-                }).toList(),
-              ),
-            ],
             const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(
                   child: TextFormField(
                     initialValue: rule.priority.toString(),
-                    decoration: const InputDecoration(labelText: '优先级（数值越小越先匹配）'),
+                    decoration: const InputDecoration(labelText: '优先级（数字越小越先匹配）'),
                     keyboardType: TextInputType.number,
                     onChanged: (v) => rule.priority = int.tryParse(v) ?? 100,
                   ),
@@ -203,6 +268,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                 ),
                 IconButton(
                   icon: const Icon(Icons.delete_outline),
+                  tooltip: '删除规则',
                   onPressed: () => setState(() => _rules.removeAt(index)),
                 ),
               ],
@@ -219,8 +285,16 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
       appBar: AppBar(
         title: const Text('网盘分流规则'),
         actions: [
-          IconButton(onPressed: _loadAll, icon: const Icon(Icons.refresh), tooltip: '刷新'),
-          IconButton(onPressed: _saving ? null : _save, icon: const Icon(Icons.save), tooltip: '保存'),
+          IconButton(
+            onPressed: _loadAll,
+            icon: const Icon(Icons.refresh),
+            tooltip: '刷新',
+          ),
+          IconButton(
+            onPressed: _saving ? null : _save,
+            icon: const Icon(Icons.save),
+            tooltip: '保存',
+          ),
         ],
       ),
       floatingActionButton: FloatingActionButton(
@@ -248,7 +322,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                   child: Padding(
                     padding: EdgeInsets.all(12),
                     child: Text(
-                      '说明: 规则按优先级从小到大匹配；provider 取自 /api/fs/get 返回；driver 来自上游 storage 列表映射。未命中规则时走内置分组，再回退到系统代理策略。',
+                      '说明: 规则按优先级从小到大匹配；当前页面仅使用 provider 规则。未命中规则时走内置分组，再回退系统代理策略。',
                     ),
                   ),
                 ),
@@ -257,7 +331,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                   const Card(
                     child: Padding(
                       padding: EdgeInsets.all(12),
-                      child: Text('暂无规则，可点击右下角 + 添加。'),
+                      child: Text('暂无规则，可点击右下角 + 添加。每条规则都支持删除。'),
                     ),
                   ),
                 ...List.generate(_rules.length, _buildRuleCard),
@@ -287,8 +361,8 @@ class _RoutingRule {
   Map<String, dynamic> toJson() {
     return {
       'id': id,
-      'matchType': matchType,
-      'matchValue': matchValue,
+      'matchType': 'provider',
+      'matchValue': matchValue.trim().toLowerCase(),
       'action': action,
       'enabled': enabled,
       'priority': priority,
