@@ -43,7 +43,7 @@ func configV2Docs() []configDocItem {
 		{Key: "upstreamBackoffSeconds", Label: "退避窗口", Description: "上游失败后的快速失败窗口", Min: 1, Max: 300, Default: defaults.UpstreamBackoffSeconds, Unit: "秒"},
 		{Key: "rangeCompatTtlMinutes", Label: "Range缓存TTL", Description: "Range不兼容缓存有效期", Min: 1, Max: 43200, Default: defaults.RangeCompatTTL, Unit: "分钟"},
 		{Key: "rangeCompatMinFailures", Label: "Range失败阈值", Description: "连续失败达到该值后标记不兼容", Min: 1, Max: 20, Default: defaults.RangeCompatMinFailures, Unit: "次"},
-		{Key: "rangeSkipMaxBytes", Label: "Range跳过上限", Description: "上游忽略Range时本地可跳过字节上限", Min: 1 << 20, Max: 2 << 30, Default: defaults.RangeSkipMaxBytes, Unit: "字节"},
+		{Key: "rangeSkipMaxBytes", Label: "Range跳过上限", Description: "上游忽略Range时本地可跳过字节上限", Min: int64(1 << 20), Max: int64(2 << 30), Default: defaults.RangeSkipMaxBytes, Unit: "字节"},
 		{Key: "parallelDecryptConcurrency", Label: "并行解密并发", Description: "大文件并行解密线程数", Min: 1, Max: 32, Default: defaults.ParallelDecryptConcurrency},
 		{Key: "streamBufferKb", Label: "流缓冲", Description: "流式解密缓冲区大小", Min: 64, Max: 4096, Default: defaults.StreamBufferKB, Unit: "KB"},
 		{Key: "webdavNegativeCacheTtlMinutes", Label: "WebDAV负缓存", Description: "WebDAV 404 负缓存时长", Min: 1, Max: 1440, Default: defaults.WebDAVNegativeCacheTTLMinutes, Unit: "分钟"},
