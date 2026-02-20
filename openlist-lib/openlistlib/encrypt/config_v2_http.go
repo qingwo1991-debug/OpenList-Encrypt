@@ -53,6 +53,9 @@ func configV2Docs() []configDocItem {
 		{Key: "upstreamBackoffSeconds", Label: "退避窗口", Description: "上游失败后的快速失败窗口", Min: 1, Max: 300, Default: defaults.UpstreamBackoffSeconds, Unit: "秒"},
 		{Key: "storageMapRefreshMinutes", Label: "存储映射刷新", Description: "admin storage 列表缓存刷新周期", Min: 1, Max: 1440, Default: defaults.StorageMapRefreshMinutes, Unit: "分钟"},
 		{Key: "routingUnmatchedDefault", Label: "未匹配默认动作", Description: "未命中 provider/driver 规则时默认 direct/proxy", Default: defaults.RoutingUnmatchedDefault},
+		{Key: "providerCatalogEnabled", Label: "Provider目录缓存", Description: "启用 provider 目录缓存与后台刷新", Default: defaults.ProviderCatalogEnabled},
+		{Key: "providerCatalogTtlMinutes", Label: "Provider目录TTL", Description: "provider 目录后台刷新周期", Min: 5, Max: 10080, Default: defaults.ProviderCatalogTTLMinutes, Unit: "分钟"},
+		{Key: "providerCatalogBootstrapOnStart", Label: "启动刷新目录", Description: "服务启动后异步刷新 provider 目录", Default: defaults.ProviderCatalogBootstrapOnStart},
 		{Key: "rangeCompatTtlMinutes", Label: "Range缓存TTL", Description: "Range不兼容缓存有效期", Min: 1, Max: 43200, Default: defaults.RangeCompatTTL, Unit: "分钟"},
 		{Key: "rangeCompatMinFailures", Label: "Range失败阈值", Description: "连续失败达到该值后标记不兼容", Min: 1, Max: 20, Default: defaults.RangeCompatMinFailures, Unit: "次"},
 		{Key: "rangeSkipMaxBytes", Label: "Range跳过上限", Description: "上游忽略Range时本地可跳过字节上限", Min: int64(1 << 20), Max: int64(2 << 30), Default: defaults.RangeSkipMaxBytes, Unit: "字节"},
@@ -88,47 +91,50 @@ func (p *ProxyServer) exportConfigV2() map[string]any {
 		cfg = DefaultConfig()
 	}
 	return map[string]any{
-		"alistHost":                     cfg.AlistHost,
-		"alistPort":                     cfg.AlistPort,
-		"alistHttps":                    cfg.AlistHttps,
-		"proxyPort":                     cfg.ProxyPort,
-		"upstreamTimeoutSeconds":        cfg.UpstreamTimeoutSeconds,
-		"probeTimeoutSeconds":           cfg.ProbeTimeoutSeconds,
-		"probeBudgetSeconds":            cfg.ProbeBudgetSeconds,
-		"upstreamBackoffSeconds":        cfg.UpstreamBackoffSeconds,
-		"enableLocalBypass":             cfg.EnableLocalBypass,
-		"routingMode":                   cfg.RoutingMode,
-		"providerRuleSource":            cfg.ProviderRuleSource,
-		"routingUnmatchedDefault":       cfg.RoutingUnmatchedDefault,
-		"storageMapRefreshMinutes":      cfg.StorageMapRefreshMinutes,
-		"providerRoutingRules":          routingRules,
-		"playFirstFallback":             cfg.PlayFirstFallback,
-		"enableRangeCompatCache":        cfg.EnableRangeCompatCache,
-		"rangeCompatTtlMinutes":         cfg.RangeCompatTTL,
-		"rangeCompatMinFailures":        cfg.RangeCompatMinFailures,
-		"rangeSkipMaxBytes":             cfg.RangeSkipMaxBytes,
-		"enableParallelDecrypt":         cfg.EnableParallelDecrypt,
-		"parallelDecryptConcurrency":    cfg.ParallelDecryptConcurrency,
-		"streamBufferKb":                cfg.StreamBufferKB,
-		"webdavNegativeCacheTtlMinutes": cfg.WebDAVNegativeCacheTTLMinutes,
-		"enableH2C":                     cfg.EnableH2C,
-		"enableDbExportSync":            cfg.EnableDBExportSync,
-		"dbExportBaseUrl":               cfg.DBExportBaseURL,
-		"dbExportSyncIntervalSeconds":   cfg.DBExportSyncIntervalSeconds,
-		"dbExportAuthEnabled":           cfg.DBExportAuthEnabled,
-		"dbExportUsername":              cfg.DBExportUsername,
-		"dbExportPassword":              cfg.DBExportPassword,
-		"enableSizeMap":                 cfg.EnableSizeMap,
-		"sizeMapTtlMinutes":             cfg.SizeMapTTL,
-		"streamEngineVersion":           cfg.StreamEngineVersion,
-		"localSizeRetentionDays":        cfg.LocalSizeRetentionDays,
-		"localStrategyRetentionDays":    cfg.LocalStrategyRetentionDays,
-		"debugEnabled":                  cfg.DebugEnabled,
-		"debugLevel":                    cfg.DebugLevel,
-		"debugMaskSensitive":            cfg.DebugMaskSensitive,
-		"debugSampleRate":               cfg.DebugSampleRate,
-		"debugLogBodyBytes":             cfg.DebugLogBodyBytes,
-		"encryptPaths":                  paths,
+		"alistHost":                       cfg.AlistHost,
+		"alistPort":                       cfg.AlistPort,
+		"alistHttps":                      cfg.AlistHttps,
+		"proxyPort":                       cfg.ProxyPort,
+		"upstreamTimeoutSeconds":          cfg.UpstreamTimeoutSeconds,
+		"probeTimeoutSeconds":             cfg.ProbeTimeoutSeconds,
+		"probeBudgetSeconds":              cfg.ProbeBudgetSeconds,
+		"upstreamBackoffSeconds":          cfg.UpstreamBackoffSeconds,
+		"enableLocalBypass":               cfg.EnableLocalBypass,
+		"routingMode":                     cfg.RoutingMode,
+		"providerRuleSource":              cfg.ProviderRuleSource,
+		"routingUnmatchedDefault":         cfg.RoutingUnmatchedDefault,
+		"providerCatalogEnabled":          cfg.ProviderCatalogEnabled,
+		"providerCatalogTtlMinutes":       cfg.ProviderCatalogTTLMinutes,
+		"providerCatalogBootstrapOnStart": cfg.ProviderCatalogBootstrapOnStart,
+		"storageMapRefreshMinutes":        cfg.StorageMapRefreshMinutes,
+		"providerRoutingRules":            routingRules,
+		"playFirstFallback":               cfg.PlayFirstFallback,
+		"enableRangeCompatCache":          cfg.EnableRangeCompatCache,
+		"rangeCompatTtlMinutes":           cfg.RangeCompatTTL,
+		"rangeCompatMinFailures":          cfg.RangeCompatMinFailures,
+		"rangeSkipMaxBytes":               cfg.RangeSkipMaxBytes,
+		"enableParallelDecrypt":           cfg.EnableParallelDecrypt,
+		"parallelDecryptConcurrency":      cfg.ParallelDecryptConcurrency,
+		"streamBufferKb":                  cfg.StreamBufferKB,
+		"webdavNegativeCacheTtlMinutes":   cfg.WebDAVNegativeCacheTTLMinutes,
+		"enableH2C":                       cfg.EnableH2C,
+		"enableDbExportSync":              cfg.EnableDBExportSync,
+		"dbExportBaseUrl":                 cfg.DBExportBaseURL,
+		"dbExportSyncIntervalSeconds":     cfg.DBExportSyncIntervalSeconds,
+		"dbExportAuthEnabled":             cfg.DBExportAuthEnabled,
+		"dbExportUsername":                cfg.DBExportUsername,
+		"dbExportPassword":                cfg.DBExportPassword,
+		"enableSizeMap":                   cfg.EnableSizeMap,
+		"sizeMapTtlMinutes":               cfg.SizeMapTTL,
+		"streamEngineVersion":             cfg.StreamEngineVersion,
+		"localSizeRetentionDays":          cfg.LocalSizeRetentionDays,
+		"localStrategyRetentionDays":      cfg.LocalStrategyRetentionDays,
+		"debugEnabled":                    cfg.DebugEnabled,
+		"debugLevel":                      cfg.DebugLevel,
+		"debugMaskSensitive":              cfg.DebugMaskSensitive,
+		"debugSampleRate":                 cfg.DebugSampleRate,
+		"debugLogBodyBytes":               cfg.DebugLogBodyBytes,
+		"encryptPaths":                    paths,
 	}
 }
 
@@ -223,6 +229,15 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 	}
 	if v, ok := body["routingUnmatchedDefault"].(string); ok {
 		p.config.RoutingUnmatchedDefault = normalizeRoutingUnmatchedDefault(v)
+	}
+	if v, ok := body["providerCatalogEnabled"].(bool); ok {
+		p.config.ProviderCatalogEnabled = v
+	}
+	if v, ok := parseIntAny(body["providerCatalogTtlMinutes"]); ok {
+		p.config.ProviderCatalogTTLMinutes = clampInt(v, 5, 10080)
+	}
+	if v, ok := body["providerCatalogBootstrapOnStart"].(bool); ok {
+		p.config.ProviderCatalogBootstrapOnStart = v
 	}
 	if v, ok := parseIntAny(body["storageMapRefreshMinutes"]); ok {
 		p.config.StorageMapRefreshMinutes = clampInt(v, 1, 1440)

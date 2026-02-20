@@ -341,6 +341,51 @@ var providerLabelMap = map[string]string{
 	"unicom_cloud":       "联通云盘",
 	"china_unicom_cloud": "联通云盘",
 	"wo_cloud":           "联通云盘",
+	"mobile":             "移动云盘",
+	"unicom":             "联通云盘",
+	"chinamobile":        "移动云盘",
+	"chinaunicom":        "联通云盘",
+	"google":             "Google Drive",
+	"googlephotos":       "Google Photos",
+}
+
+const (
+	providerSourceBuiltin = 1 << iota
+	providerSourceSeen
+	providerSourceDriverNames
+	providerSourceStorage
+	providerSourceRemote
+)
+
+var builtinProviderCatalog = map[string]string{
+	"aliyundriveopen":    "阿里云盘",
+	"aliyundrive":        "阿里云盘",
+	"baidunetdisk":       "百度网盘",
+	"baiduphoto":         "百度相册",
+	"cloud189":           "天翼云盘",
+	"cloud189pc":         "天翼云盘PC",
+	"open123":            "123网盘",
+	"pan115":             "115网盘",
+	"quarkoruc":          "夸克/UC网盘",
+	"weiyun":             "微云",
+	"wps":                "WPS网盘",
+	"mopan":              "移动云盘",
+	"mobile_cloud":       "移动云盘",
+	"china_mobile_cloud": "移动云盘",
+	"unicom_cloud":       "联通云盘",
+	"china_unicom_cloud": "联通云盘",
+	"wo_cloud":           "联通云盘",
+	"onedrive":           "OneDrive",
+	"onedriveapp":        "OneDrive App",
+	"googledrive":        "Google Drive",
+	"google_drive":       "Google Drive",
+	"googlephoto":        "Google Photos",
+	"googlephotoapp":     "Google Photos",
+	"mega":               "MEGA",
+	"mediafire":          "MediaFire",
+	"protondrive":        "Proton Drive",
+	"dropbox":            "Dropbox",
+	"github":             "GitHub",
 }
 
 func normalizeRoutingMode(v string) string {
@@ -950,6 +995,12 @@ type ProxyConfig struct {
 	ProviderRuleSource string `json:"providerRuleSource,omitempty"`
 	// RoutingUnmatchedDefault: 未命中 provider/driver 规则时默认动作（direct/proxy）
 	RoutingUnmatchedDefault string `json:"routingUnmatchedDefault,omitempty"`
+	// ProviderCatalogEnabled: 启用 provider 目录缓存
+	ProviderCatalogEnabled bool `json:"providerCatalogEnabled,omitempty"`
+	// ProviderCatalogTTLMinutes: provider 目录后台刷新周期
+	ProviderCatalogTTLMinutes int `json:"providerCatalogTtlMinutes,omitempty"`
+	// ProviderCatalogBootstrapOnStart: 启动时后台刷新 provider 目录
+	ProviderCatalogBootstrapOnStart bool `json:"providerCatalogBootstrapOnStart,omitempty"`
 	// StorageMapRefreshMinutes: storage driver 映射缓存刷新周期
 	StorageMapRefreshMinutes int `json:"storageMapRefreshMinutes,omitempty"`
 	// ProviderRoutingRules: provider/driver 分流规则
@@ -1073,6 +1124,12 @@ type ProxyServer struct {
 	seenDrivers         map[string]time.Time
 	storageDriverMap    map[string]string
 	storageMapExpireAt  time.Time
+	providerCatalog     map[string]string
+	providerSourceMask  map[string]int
+	catalogLastRefresh  time.Time
+	catalogLastError    string
+	catalogRefreshing   bool
+	catalogNextRefresh  time.Time
 	controlHTTPStats    upstreamHTTPStats
 	probeHTTPStats      upstreamHTTPStats
 	streamHTTPStats     upstreamHTTPStats
@@ -1154,6 +1211,15 @@ func applyLearningDefaults(cfg *ProxyConfig) {
 		cfg.ProviderRuleSource = "builtin+custom"
 	}
 	cfg.RoutingUnmatchedDefault = normalizeRoutingUnmatchedDefault(cfg.RoutingUnmatchedDefault)
+	if !cfg.ProviderCatalogEnabled && cfg.ProviderCatalogTTLMinutes == 0 && cfg.StorageMapRefreshMinutes == 0 {
+		cfg.ProviderCatalogEnabled = true
+	}
+	if cfg.ProviderCatalogTTLMinutes <= 0 {
+		cfg.ProviderCatalogTTLMinutes = 720
+	}
+	if !cfg.ProviderCatalogBootstrapOnStart && cfg.ProviderCatalogTTLMinutes == 720 {
+		cfg.ProviderCatalogBootstrapOnStart = true
+	}
 	if cfg.StorageMapRefreshMinutes <= 0 {
 		cfg.StorageMapRefreshMinutes = 30
 	}
@@ -1521,20 +1587,22 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	}
 
 	server := &ProxyServer{
-		config:           config,
-		transport:        transport,
-		h2cTransport:     h2cTransport,
-		httpClient:       httpClient,
-		probeClient:      probeClient,
-		streamClient:     streamClient,
-		fileCache:        newShardedAnyMap(cacheShardCount),
-		redirectCache:    newShardedAnyMap(cacheShardCount),
-		prefetchRecent:   newShardedAnyMap(cacheShardCount),
-		seenProviders:    make(map[string]time.Time),
-		seenDrivers:      make(map[string]time.Time),
-		storageDriverMap: make(map[string]string),
-		cleanupDone:      make(chan struct{}),
-		metaSyncDone:     make(chan struct{}),
+		config:             config,
+		transport:          transport,
+		h2cTransport:       h2cTransport,
+		httpClient:         httpClient,
+		probeClient:        probeClient,
+		streamClient:       streamClient,
+		fileCache:          newShardedAnyMap(cacheShardCount),
+		redirectCache:      newShardedAnyMap(cacheShardCount),
+		prefetchRecent:     newShardedAnyMap(cacheShardCount),
+		seenProviders:      make(map[string]time.Time),
+		seenDrivers:        make(map[string]time.Time),
+		storageDriverMap:   make(map[string]string),
+		providerCatalog:    make(map[string]string),
+		providerSourceMask: make(map[string]int),
+		cleanupDone:        make(chan struct{}),
+		metaSyncDone:       make(chan struct{}),
 	}
 	httpClient.Transport = &instrumentedRoundTripper{base: httpClient.Transport, stats: &server.controlHTTPStats}
 	probeClient.Transport = &instrumentedRoundTripper{base: probeClient.Transport, stats: &server.probeHTTPStats}
@@ -1545,6 +1613,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	server.startCacheCleanup()
 	server.initSizeMap()
 	server.initLocalStore()
+	server.initProviderCatalog()
 	server.initRangeCompat()
 	server.startRangeProbeLoop()
 	server.startDBExportSyncLoop()
@@ -1885,6 +1954,7 @@ func (p *ProxyServer) cleanupExpiredCache() {
 	if deletedCount > 0 {
 		log.Debugf("[%s] Cache cleanup: removed %d expired file entries", internal.TagCache, deletedCount)
 	}
+	p.maybeRefreshProviderCatalog(nil)
 }
 
 // normalizeCacheKey 统一缓存键（对齐 alist-encrypt：decodeURIComponent）
@@ -2075,6 +2145,7 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/api/encrypt/v2/config", p.handleConfigV2)
 	mux.HandleFunc("/api/encrypt/v2/config/schema", p.handleConfigV2Schema)
 	mux.HandleFunc("/api/encrypt/provider-routing-candidates", p.handleProviderRoutingCandidates)
+	mux.HandleFunc("/api/encrypt/provider-routing-candidates/refresh", p.handleProviderRoutingCandidatesRefresh)
 	mux.HandleFunc("/api/encrypt/stats", p.handleStats)
 	mux.HandleFunc("/api/encrypt/v2/stats", p.handleStats)
 	mux.HandleFunc("/api/encrypt/sync/overview", p.handleSyncOverview)
@@ -3136,6 +3207,7 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	localStrategyCount := 0
 	localRangeCompatCount := 0
 	localRangeProbeCount := 0
+	localProviderCatalogCount := 0
 	dbExportSince := int64(0)
 	dbExportCursor := ""
 	dbExportStrategySince := int64(0)
@@ -3153,6 +3225,9 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 			localStrategyCount = strategyCount
 			localRangeCompatCount = rangeCompatCount
 			localRangeProbeCount = rangeProbeCount
+		}
+		if count, err := p.localStore.CountProviderCatalog(); err == nil {
+			localProviderCatalogCount = count
 		}
 		if since, cursor, err := p.localStore.GetSyncCheckpoint(dbExportCheckpointName); err == nil {
 			dbExportSince = since
@@ -3245,11 +3320,12 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 			"count":   atomic.LoadUint64(&p.playFirstCount),
 		},
 		"local_store": map[string]interface{}{
-			"enabled":              p.localStore != nil,
-			"size_entries":         localSizeCount,
-			"strategy_entries":     localStrategyCount,
-			"range_compat_entries": localRangeCompatCount,
-			"range_probe_targets":  localRangeProbeCount,
+			"enabled":                  p.localStore != nil,
+			"size_entries":             localSizeCount,
+			"strategy_entries":         localStrategyCount,
+			"range_compat_entries":     localRangeCompatCount,
+			"range_probe_targets":      localRangeProbeCount,
+			"provider_catalog_entries": localProviderCatalogCount,
 			"size_retention_days": func() int {
 				if p.config != nil {
 					return p.config.LocalSizeRetentionDays
@@ -3594,49 +3670,54 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 200,
 			"data": map[string]interface{}{
-				"alistHost":                     p.config.AlistHost,
-				"alistPort":                     p.config.AlistPort,
-				"https":                         p.config.AlistHttps,
-				"alistHttps":                    p.config.AlistHttps,
-				"proxyPort":                     p.config.ProxyPort,
-				"upstreamTimeoutSeconds":        p.config.UpstreamTimeoutSeconds,
-				"probeTimeoutSeconds":           p.config.ProbeTimeoutSeconds,
-				"probeBudgetSeconds":            p.config.ProbeBudgetSeconds,
-				"upstreamBackoffSeconds":        p.config.UpstreamBackoffSeconds,
-				"enableLocalBypass":             p.config.EnableLocalBypass,
-				"routingUnmatchedDefault":       p.config.RoutingUnmatchedDefault,
-				"passwdList":                    passwdList,
-				"probeOnDownload":               p.config.ProbeOnDownload,
-				"probeStrategyTtlMinutes":       p.config.ProbeStrategyTTLMinutes,
-				"probeStrategyStableThreshold":  p.config.ProbeStrategyStableThreshold,
-				"probeStrategyFailureThreshold": p.config.ProbeStrategyFailureThreshold,
-				"enableSizeMap":                 p.config.EnableSizeMap,
-				"sizeMapTtlMinutes":             p.config.SizeMapTTL,
-				"enableRangeCompatCache":        p.config.EnableRangeCompatCache,
-				"rangeCompatTtlMinutes":         p.config.RangeCompatTTL,
-				"rangeCompatMinFailures":        p.config.RangeCompatMinFailures,
-				"rangeSkipMaxBytes":             p.config.RangeSkipMaxBytes,
-				"playFirstFallback":             p.config.PlayFirstFallback,
-				"webdavNegativeCacheTtlMinutes": p.config.WebDAVNegativeCacheTTLMinutes,
-				"redirectCacheTtlMinutes":       p.config.RedirectCacheTTLMinutes,
-				"enableParallelDecrypt":         p.config.EnableParallelDecrypt,
-				"parallelDecryptConcurrency":    p.config.ParallelDecryptConcurrency,
-				"streamBufferKb":                p.config.StreamBufferKB,
-				"streamEngineVersion":           p.config.StreamEngineVersion,
-				"debugEnabled":                  p.config.DebugEnabled,
-				"debugLevel":                    p.config.DebugLevel,
-				"debugModules":                  p.config.DebugModules,
-				"debugMaskSensitive":            p.config.DebugMaskSensitive,
-				"debugSampleRate":               p.config.DebugSampleRate,
-				"debugLogBodyBytes":             p.config.DebugLogBodyBytes,
-				"localSizeRetentionDays":        p.config.LocalSizeRetentionDays,
-				"localStrategyRetentionDays":    p.config.LocalStrategyRetentionDays,
-				"enableDbExportSync":            p.config.EnableDBExportSync,
-				"dbExportBaseUrl":               p.config.DBExportBaseURL,
-				"dbExportSyncIntervalSeconds":   p.config.DBExportSyncIntervalSeconds,
-				"dbExportAuthEnabled":           p.config.DBExportAuthEnabled,
-				"dbExportUsername":              p.config.DBExportUsername,
-				"dbExportPassword":              p.config.DBExportPassword,
+				"alistHost":                       p.config.AlistHost,
+				"alistPort":                       p.config.AlistPort,
+				"https":                           p.config.AlistHttps,
+				"alistHttps":                      p.config.AlistHttps,
+				"proxyPort":                       p.config.ProxyPort,
+				"upstreamTimeoutSeconds":          p.config.UpstreamTimeoutSeconds,
+				"probeTimeoutSeconds":             p.config.ProbeTimeoutSeconds,
+				"probeBudgetSeconds":              p.config.ProbeBudgetSeconds,
+				"upstreamBackoffSeconds":          p.config.UpstreamBackoffSeconds,
+				"enableLocalBypass":               p.config.EnableLocalBypass,
+				"routingMode":                     p.config.RoutingMode,
+				"providerRuleSource":              p.config.ProviderRuleSource,
+				"routingUnmatchedDefault":         p.config.RoutingUnmatchedDefault,
+				"providerCatalogEnabled":          p.config.ProviderCatalogEnabled,
+				"providerCatalogTtlMinutes":       p.config.ProviderCatalogTTLMinutes,
+				"providerCatalogBootstrapOnStart": p.config.ProviderCatalogBootstrapOnStart,
+				"passwdList":                      passwdList,
+				"probeOnDownload":                 p.config.ProbeOnDownload,
+				"probeStrategyTtlMinutes":         p.config.ProbeStrategyTTLMinutes,
+				"probeStrategyStableThreshold":    p.config.ProbeStrategyStableThreshold,
+				"probeStrategyFailureThreshold":   p.config.ProbeStrategyFailureThreshold,
+				"enableSizeMap":                   p.config.EnableSizeMap,
+				"sizeMapTtlMinutes":               p.config.SizeMapTTL,
+				"enableRangeCompatCache":          p.config.EnableRangeCompatCache,
+				"rangeCompatTtlMinutes":           p.config.RangeCompatTTL,
+				"rangeCompatMinFailures":          p.config.RangeCompatMinFailures,
+				"rangeSkipMaxBytes":               p.config.RangeSkipMaxBytes,
+				"playFirstFallback":               p.config.PlayFirstFallback,
+				"webdavNegativeCacheTtlMinutes":   p.config.WebDAVNegativeCacheTTLMinutes,
+				"redirectCacheTtlMinutes":         p.config.RedirectCacheTTLMinutes,
+				"enableParallelDecrypt":           p.config.EnableParallelDecrypt,
+				"parallelDecryptConcurrency":      p.config.ParallelDecryptConcurrency,
+				"streamBufferKb":                  p.config.StreamBufferKB,
+				"streamEngineVersion":             p.config.StreamEngineVersion,
+				"debugEnabled":                    p.config.DebugEnabled,
+				"debugLevel":                      p.config.DebugLevel,
+				"debugModules":                    p.config.DebugModules,
+				"debugMaskSensitive":              p.config.DebugMaskSensitive,
+				"debugSampleRate":                 p.config.DebugSampleRate,
+				"debugLogBodyBytes":               p.config.DebugLogBodyBytes,
+				"localSizeRetentionDays":          p.config.LocalSizeRetentionDays,
+				"localStrategyRetentionDays":      p.config.LocalStrategyRetentionDays,
+				"enableDbExportSync":              p.config.EnableDBExportSync,
+				"dbExportBaseUrl":                 p.config.DBExportBaseURL,
+				"dbExportSyncIntervalSeconds":     p.config.DBExportSyncIntervalSeconds,
+				"dbExportAuthEnabled":             p.config.DBExportAuthEnabled,
+				"dbExportUsername":                p.config.DBExportUsername,
+				"dbExportPassword":                p.config.DBExportPassword,
 			},
 		})
 		return
@@ -4138,6 +4219,34 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			if s, ok2 := v.(string); ok2 {
 				p.mutex.Lock()
 				p.config.RoutingUnmatchedDefault = normalizeRoutingUnmatchedDefault(s)
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["providerCatalogEnabled"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.ProviderCatalogEnabled = b
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["providerCatalogTtlMinutes"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.ProviderCatalogTTLMinutes = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.ProviderCatalogTTLMinutes = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["providerCatalogBootstrapOnStart"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.ProviderCatalogBootstrapOnStart = b
 				p.mutex.Unlock()
 			}
 		}
@@ -5645,6 +5754,7 @@ func (p *ProxyServer) noteProviderCandidate(provider string) {
 	}
 	p.seenProviders[token] = time.Now()
 	p.routingMu.Unlock()
+	p.mergeProviderCatalog(token, buildProviderLabel(token), providerSourceSeen)
 }
 
 func (p *ProxyServer) noteDriverCandidate(driver string) {
@@ -5658,6 +5768,7 @@ func (p *ProxyServer) noteDriverCandidate(driver string) {
 	}
 	p.seenDrivers[token] = time.Now()
 	p.routingMu.Unlock()
+	p.mergeProviderCatalog(token, buildProviderLabel(token), providerSourceStorage)
 }
 
 func (p *ProxyServer) applyRoutingHints(req *http.Request, provider, driver string) {
@@ -5688,7 +5799,7 @@ func mapPathToMountPrefix(pathText string) string {
 }
 
 func (p *ProxyServer) refreshStorageDriverMapIfNeeded(ctx context.Context, srcHeaders http.Header) {
-	if p == nil || p.config == nil {
+	if p == nil || p.config == nil || p.httpClient == nil {
 		return
 	}
 	p.routingMu.RLock()
@@ -5816,6 +5927,9 @@ func buildProviderLabel(provider string) string {
 }
 
 func (p *ProxyServer) fetchAdminDriverNames(ctx context.Context, srcHeaders http.Header) ([]string, bool) {
+	if p == nil || p.httpClient == nil {
+		return nil, true
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.getAlistURL()+"/api/admin/driver/names", nil)
 	if err != nil {
 		return nil, true
@@ -5964,110 +6078,106 @@ func (p *ProxyServer) tryFetchRemoteProviderRoutingCandidates(ctx context.Contex
 }
 
 func (p *ProxyServer) handleProviderRoutingCandidates(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		p.maybeRefreshProviderCatalog(r.Header)
+		providers, providerLabels, sourceMasks, lastRefreshAt, nextRefreshAt, lastError := p.providerCatalogSnapshot()
+		p.routingMu.RLock()
+		drivers := make([]string, 0, len(p.seenDrivers))
+		for k := range p.seenDrivers {
+			drivers = append(drivers, k)
+		}
+		seenCount := len(p.seenProviders)
+		catalogRefreshing := p.catalogRefreshing
+		p.routingMu.RUnlock()
+		sort.Strings(drivers)
+		builtinCount := len(builtinDirectProviders) + len(builtinProxyProviders)
+		providerCount := len(providers)
+		stale := nextRefreshAt.IsZero() || time.Now().After(nextRefreshAt)
+		sourceStats := map[string]int{
+			"builtin": 0,
+			"seen":    0,
+			"driver":  0,
+			"storage": 0,
+			"remote":  0,
+		}
+		for _, mask := range sourceMasks {
+			if mask&providerSourceBuiltin != 0 {
+				sourceStats["builtin"]++
+			}
+			if mask&providerSourceSeen != 0 {
+				sourceStats["seen"]++
+			}
+			if mask&providerSourceDriverNames != 0 {
+				sourceStats["driver"]++
+			}
+			if mask&providerSourceStorage != 0 {
+				sourceStats["storage"]++
+			}
+			if mask&providerSourceRemote != 0 {
+				sourceStats["remote"]++
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"code": 200,
+			"data": map[string]interface{}{
+				"providers":       providers,
+				"provider_labels": providerLabels,
+				"drivers":         drivers,
+				"meta": map[string]interface{}{
+					"seen_count":    seenCount,
+					"builtin_count": builtinCount,
+					"catalog_total": providerCount,
+					"catalog_last_refresh_at": func() string {
+						if lastRefreshAt.IsZero() {
+							return ""
+						}
+						return lastRefreshAt.Format(time.RFC3339)
+					}(),
+					"catalog_next_refresh_at": func() string {
+						if nextRefreshAt.IsZero() {
+							return ""
+						}
+						return nextRefreshAt.Format(time.RFC3339)
+					}(),
+					"catalog_stale":      stale,
+					"catalog_refreshing": catalogRefreshing,
+					"sources":            sourceStats,
+					"degraded":           strings.TrimSpace(lastError) != "",
+					"last_error":         lastError,
+				},
+			},
+		})
+		return
+	case http.MethodPost:
+		p.refreshProviderCatalogAsync(r.Header, true)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"code": 200,
+			"data": map[string]interface{}{
+				"accepted": true,
+			},
+		})
+		return
+	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	p.routingMu.RLock()
-	providerSet := make(map[string]struct{}, len(p.seenProviders)+len(builtinDirectProviders)+len(builtinProxyProviders))
-	seenCount := len(p.seenProviders)
-	for k := range p.seenProviders {
-		providerSet[k] = struct{}{}
-	}
-	builtinSet := make(map[string]struct{}, len(builtinDirectProviders)+len(builtinProxyProviders))
-	for k := range builtinDirectProviders {
-		providerSet[k] = struct{}{}
-		builtinSet[k] = struct{}{}
-	}
-	for k := range builtinProxyProviders {
-		providerSet[k] = struct{}{}
-		builtinSet[k] = struct{}{}
-	}
-	builtinCount := len(builtinSet)
-	drivers := make([]string, 0, len(p.seenDrivers))
-	for k := range p.seenDrivers {
-		drivers = append(drivers, k)
-	}
-	p.routingMu.RUnlock()
+}
 
-	driverNames, degradedDriverNames := p.fetchAdminDriverNames(r.Context(), r.Header)
-	for _, name := range driverNames {
-		providerSet[name] = struct{}{}
+func (p *ProxyServer) handleProviderRoutingCandidatesRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	p.refreshStorageDriverMapIfNeeded(r.Context(), r.Header)
-	p.routingMu.RLock()
-	storageDrivers := make([]string, 0, len(p.storageDriverMap))
-	for _, drv := range p.storageDriverMap {
-		drv = normalizeProviderToken(drv)
-		if drv == "" {
-			continue
-		}
-		storageDrivers = append(storageDrivers, drv)
-		providerSet[drv] = struct{}{}
-	}
-	p.routingMu.RUnlock()
-
-	providers := make([]string, 0, len(providerSet))
-	for k := range providerSet {
-		providers = append(providers, k)
-	}
-	sort.Strings(providers)
-	sort.Strings(drivers)
-	sort.Strings(storageDrivers)
-	providerLabels := make(map[string]string, len(providers))
-	for _, provider := range providers {
-		if label := buildProviderLabel(provider); label != "" {
-			providerLabels[provider] = label
-		}
-	}
-	remoteProvidersCount := 0
-	remoteUsed := false
-	degraded := degradedDriverNames
-	if r.Header.Get("X-Encrypt-Routing-Candidates-Fallback") != "1" {
-		remoteProviders, remoteLabels, remoteDegraded := p.tryFetchRemoteProviderRoutingCandidates(r.Context())
-		if remoteDegraded {
-			degraded = true
-		}
-		if len(remoteProviders) > 0 {
-			remoteUsed = true
-			remoteProvidersCount = len(remoteProviders)
-			existing := make(map[string]struct{}, len(providers))
-			for _, v := range providers {
-				existing[v] = struct{}{}
-			}
-			for _, v := range remoteProviders {
-				if _, ok := existing[v]; ok {
-					continue
-				}
-				providers = append(providers, v)
-				existing[v] = struct{}{}
-			}
-			sort.Strings(providers)
-			for key, value := range remoteLabels {
-				if strings.TrimSpace(value) == "" {
-					continue
-				}
-				providerLabels[key] = value
-			}
-		}
-	}
-
+	p.refreshProviderCatalogAsync(r.Header, true)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"code": 200,
 		"data": map[string]interface{}{
-			"providers":       providers,
-			"provider_labels": providerLabels,
-			"drivers":         drivers,
-			"meta": map[string]interface{}{
-				"seen_count":            seenCount,
-				"builtin_count":         builtinCount,
-				"driver_names_count":    len(driverNames),
-				"storage_drivers_count": len(storageDrivers),
-				"remote_used":           remoteUsed,
-				"remote_count":          remoteProvidersCount,
-				"degraded":              degraded,
-			},
+			"accepted": true,
 		},
 	})
 }

@@ -52,6 +52,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
   bool _enableLocalBypass = true;
   bool _enableRouting = true;
   String _routingUnmatchedDefault = 'proxy';
+  String _catalogStatus = '';
   List<String> _providerCandidates = [];
   Map<String, String> _providerLabels = {};
   List<_RoutingRule> _rules = [];
@@ -174,7 +175,34 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
     setState(() {
       _providerCandidates = providers;
       _providerLabels = labels;
+      final meta = data?['meta'] as Map<String, dynamic>?;
+      if (meta != null) {
+        final total = (meta['catalog_total'] ?? providers.length).toString();
+        final stale = meta['catalog_stale'] == true ? '过期' : '正常';
+        final refreshing = meta['catalog_refreshing'] == true ? '（刷新中）' : '';
+        _catalogStatus = '目录$total 项，状态:$stale$refreshing';
+      } else {
+        _catalogStatus = '目录${providers.length} 项';
+      }
     });
+  }
+
+  Future<void> _refreshCatalogNow() async {
+    try {
+      await _dio.post('$_baseUrl/api/encrypt/provider-routing-candidates/refresh');
+      await Future.delayed(const Duration(milliseconds: 400));
+      await _loadCandidates();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已触发后台刷新，列表已更新')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('刷新失败: $e')));
+      }
+    }
   }
 
   Future<void> _save() async {
@@ -523,6 +551,16 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                     ),
                   ),
                 ),
+                if (_catalogStatus.isNotEmpty)
+                  Card(
+                    child: ListTile(
+                      title: Text(_catalogStatus),
+                      trailing: FilledButton.tonal(
+                        onPressed: _refreshCatalogNow,
+                        child: const Text('刷新目录'),
+                      ),
+                    ),
+                  ),
                 const SizedBox(height: 8),
                 if (_rules.isEmpty)
                   const Card(

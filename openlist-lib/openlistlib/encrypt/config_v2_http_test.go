@@ -175,3 +175,34 @@ func TestHandleConfigV2RoutingUnmatchedDefault(t *testing.T) {
 		t.Fatalf("expected invalid value fallback to proxy, got %s", p.config.RoutingUnmatchedDefault)
 	}
 }
+
+func TestHandleConfigV2ProviderCatalogConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "encrypt_config.json")
+	p := &ProxyServer{config: cfg}
+
+	body := map[string]interface{}{
+		"config": map[string]interface{}{
+			"providerCatalogEnabled":          true,
+			"providerCatalogTtlMinutes":       2,
+			"providerCatalogBootstrapOnStart": true,
+		},
+	}
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/encrypt/v2/config", bytes.NewReader(raw))
+	w := httptest.NewRecorder()
+	p.handleConfigV2(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	// ttl has minimum clamp of 5 minutes
+	if p.config.ProviderCatalogTTLMinutes != 5 {
+		t.Fatalf("expected ttl clamp=5, got %d", p.config.ProviderCatalogTTLMinutes)
+	}
+	if !p.config.ProviderCatalogEnabled {
+		t.Fatalf("expected provider catalog enabled")
+	}
+	if !p.config.ProviderCatalogBootstrapOnStart {
+		t.Fatalf("expected bootstrap on start enabled")
+	}
+}

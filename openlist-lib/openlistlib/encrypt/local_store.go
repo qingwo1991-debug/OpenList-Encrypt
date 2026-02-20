@@ -90,6 +90,15 @@ type LocalSyncCycleRecord struct {
 	ErrorSummary string `json:"error_summary"`
 }
 
+type LocalProviderCatalogRecord struct {
+	ProviderKey string `json:"provider_key"`
+	DisplayName string `json:"display_name"`
+	SourceMask  int    `json:"source_mask"`
+	FirstSeenAt int64  `json:"first_seen_at"`
+	LastSeenAt  int64  `json:"last_seen_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
 const defaultFlushThreshold = 20
 
 func newLocalStore(baseDir string) (*localStore, error) {
@@ -221,13 +230,22 @@ func initLocalSchema(db *sql.DB) error {
 	            updated_at INTEGER NOT NULL
 	        );`,
 		`CREATE INDEX IF NOT EXISTS idx_local_sync_cycle_name_time ON local_sync_cycle(name, cycle_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS local_provider_catalog (
+	            provider_key TEXT PRIMARY KEY,
+	            display_name TEXT NOT NULL DEFAULT '',
+	            source_mask INTEGER NOT NULL DEFAULT 0,
+	            first_seen_at INTEGER NOT NULL DEFAULT 0,
+	            last_seen_at INTEGER NOT NULL DEFAULT 0,
+	            updated_at INTEGER NOT NULL
+	        );`,
+		`CREATE INDEX IF NOT EXISTS idx_local_provider_catalog_updated_at ON local_provider_catalog(updated_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS local_db_meta (
 	            key TEXT PRIMARY KEY,
 	            value TEXT NOT NULL,
 	            updated_at INTEGER NOT NULL
 	        );`,
 		`INSERT INTO local_db_meta (key, value, updated_at)
-	        VALUES ('schema_version', '2', strftime('%s','now'))
+	        VALUES ('schema_version', '3', strftime('%s','now'))
 	        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;`,
 	}
 	for _, stmt := range stmts {
@@ -971,4 +989,127 @@ func (s *localStore) ListRecentSyncCycles(name string, limit int) ([]LocalSyncCy
 		return nil, err
 	}
 	return out, nil
+}
+
+func (s *localStore) ListProviderCatalog() ([]LocalProviderCatalogRecord, error) {
+	if s == nil || s.db == nil {
+		return []LocalProviderCatalogRecord{}, nil
+	}
+	rows, err := s.db.Query(`SELECT provider_key, display_name, source_mask, first_seen_at, last_seen_at, updated_at
+        FROM local_provider_catalog ORDER BY provider_key ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]LocalProviderCatalogRecord, 0, 64)
+	for rows.Next() {
+		var rec LocalProviderCatalogRecord
+		if err := rows.Scan(&rec.ProviderKey, &rec.DisplayName, &rec.SourceMask, &rec.FirstSeenAt, &rec.LastSeenAt, &rec.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *localStore) UpsertProviderCatalog(entries []LocalProviderCatalogRecord) error {
+	if s == nil || s.db == nil || len(entries) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	stmt, err := tx.Prepare(`INSERT INTO local_provider_catalog
+        (provider_key, display_name, source_mask, first_seen_at, last_seen_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider_key) DO UPDATE SET
+        display_name=CASE WHEN excluded.display_name != '' THEN excluded.display_name ELSE local_provider_catalog.display_name END,
+        source_mask=(local_provider_catalog.source_mask | excluded.source_mask),
+        first_seen_at=CASE
+            WHEN local_provider_catalog.first_seen_at <= 0 THEN excluded.first_seen_at
+            WHEN excluded.first_seen_at > 0 AND excluded.first_seen_at < local_provider_catalog.first_seen_at THEN excluded.first_seen_at
+            ELSE local_provider_catalog.first_seen_at
+        END,
+        last_seen_at=CASE
+            WHEN excluded.last_seen_at > local_provider_catalog.last_seen_at THEN excluded.last_seen_at
+            ELSE local_provider_catalog.last_seen_at
+        END,
+        updated_at=excluded.updated_at`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	now := time.Now().Unix()
+	for _, rec := range entries {
+		key := normalizeProviderToken(rec.ProviderKey)
+		if key == "" {
+			continue
+		}
+		displayName := strings.TrimSpace(rec.DisplayName)
+		sourceMask := rec.SourceMask
+		if sourceMask < 0 {
+			sourceMask = 0
+		}
+		firstSeenAt := rec.FirstSeenAt
+		if firstSeenAt <= 0 {
+			firstSeenAt = now
+		}
+		lastSeenAt := rec.LastSeenAt
+		if lastSeenAt <= 0 {
+			lastSeenAt = now
+		}
+		updatedAt := rec.UpdatedAt
+		if updatedAt <= 0 {
+			updatedAt = now
+		}
+		if _, err := stmt.Exec(key, displayName, sourceMask, firstSeenAt, lastSeenAt, updatedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *localStore) CountProviderCatalog() (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	row := s.db.QueryRow("SELECT COUNT(1) FROM local_provider_catalog")
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *localStore) GetMeta(key string) (string, int64, error) {
+	if s == nil || s.db == nil || strings.TrimSpace(key) == "" {
+		return "", 0, nil
+	}
+	row := s.db.QueryRow("SELECT value, updated_at FROM local_db_meta WHERE key = ?", key)
+	var value string
+	var updatedAt int64
+	if err := row.Scan(&value, &updatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return "", 0, nil
+		}
+		return "", 0, err
+	}
+	return value, updatedAt, nil
+}
+
+func (s *localStore) SetMeta(key, value string) error {
+	if s == nil || s.db == nil || strings.TrimSpace(key) == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`INSERT INTO local_db_meta (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, key, value, time.Now().Unix())
+	return err
 }

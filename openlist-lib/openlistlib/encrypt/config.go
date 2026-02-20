@@ -22,50 +22,53 @@ type ConfigManager struct {
 // DefaultConfig 默认配置
 func DefaultConfig() *ProxyConfig {
 	return &ProxyConfig{
-		AlistHost:                     "127.0.0.1",
-		AlistPort:                     5244,
-		AlistHttps:                    false,
-		ProxyPort:                     5344,
-		UpstreamTimeoutSeconds:        8,
-		ProbeTimeoutSeconds:           3,
-		ProbeBudgetSeconds:            5,
-		UpstreamBackoffSeconds:        20,
-		EnableLocalBypass:             true,
-		RoutingMode:                   routingModeByProvider,
-		ProviderRuleSource:            "builtin+custom",
-		RoutingUnmatchedDefault:       routingActionProxy,
-		StorageMapRefreshMinutes:      30,
-		ProbeOnDownload:               true,  // 默认开启，确保能正确获取文件大小以解密
-		EnableH2C:                     false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
-		ProbeStrategyTTLMinutes:       defaultProbeStrategyTTLMinutes,
-		ProbeStrategyStableThreshold:  int(defaultProbeStrategyStableThreshold),
-		ProbeStrategyFailureThreshold: int(defaultProbeStrategyFailureThreshold),
-		EnableSizeMap:                 true,
-		SizeMapTTL:                    defaultSizeMapTTLMinutes,
-		EnableRangeCompatCache:        true,
-		RangeCompatTTL:                defaultRangeCompatTTLMinutes,
-		RangeCompatMinFailures:        2,
-		RangeSkipMaxBytes:             defaultRangeSkipMaxBytes,
-		PlayFirstFallback:             true,
-		WebDAVNegativeCacheTTLMinutes: 10,
-		RedirectCacheTTLMinutes:       1440,
-		EnableParallelDecrypt:         true,
-		ParallelDecryptConcurrency:    8,
-		StreamBufferKB:                1024,
-		StreamEngineVersion:           defaultStreamEngineVersion,
-		DebugEnabled:                  false,
-		DebugLevel:                    "info",
-		DebugMaskSensitive:            true,
-		DebugSampleRate:               100,
-		DebugLogBodyBytes:             0,
-		LocalSizeRetentionDays:        defaultLocalSizeRetentionDays,
-		LocalStrategyRetentionDays:    defaultLocalStrategyRetentionDays,
-		EnableDBExportSync:            false,
-		DBExportBaseURL:               "",
-		DBExportSyncIntervalSeconds:   defaultDBExportSyncIntervalSecs,
-		DBExportAuthEnabled:           false,
-		DBExportUsername:              "admin",
-		DBExportPassword:              "",
+		AlistHost:                       "127.0.0.1",
+		AlistPort:                       5244,
+		AlistHttps:                      false,
+		ProxyPort:                       5344,
+		UpstreamTimeoutSeconds:          8,
+		ProbeTimeoutSeconds:             3,
+		ProbeBudgetSeconds:              5,
+		UpstreamBackoffSeconds:          20,
+		EnableLocalBypass:               true,
+		RoutingMode:                     routingModeByProvider,
+		ProviderRuleSource:              "builtin+custom",
+		RoutingUnmatchedDefault:         routingActionProxy,
+		ProviderCatalogEnabled:          true,
+		ProviderCatalogTTLMinutes:       720,
+		ProviderCatalogBootstrapOnStart: true,
+		StorageMapRefreshMinutes:        30,
+		ProbeOnDownload:                 true,  // 默认开启，确保能正确获取文件大小以解密
+		EnableH2C:                       false, // H2C 默认关闭，需要后端 OpenList 也开启 enable_h2c 才有效
+		ProbeStrategyTTLMinutes:         defaultProbeStrategyTTLMinutes,
+		ProbeStrategyStableThreshold:    int(defaultProbeStrategyStableThreshold),
+		ProbeStrategyFailureThreshold:   int(defaultProbeStrategyFailureThreshold),
+		EnableSizeMap:                   true,
+		SizeMapTTL:                      defaultSizeMapTTLMinutes,
+		EnableRangeCompatCache:          true,
+		RangeCompatTTL:                  defaultRangeCompatTTLMinutes,
+		RangeCompatMinFailures:          2,
+		RangeSkipMaxBytes:               defaultRangeSkipMaxBytes,
+		PlayFirstFallback:               true,
+		WebDAVNegativeCacheTTLMinutes:   10,
+		RedirectCacheTTLMinutes:         1440,
+		EnableParallelDecrypt:           true,
+		ParallelDecryptConcurrency:      8,
+		StreamBufferKB:                  1024,
+		StreamEngineVersion:             defaultStreamEngineVersion,
+		DebugEnabled:                    false,
+		DebugLevel:                      "info",
+		DebugMaskSensitive:              true,
+		DebugSampleRate:                 100,
+		DebugLogBodyBytes:               0,
+		LocalSizeRetentionDays:          defaultLocalSizeRetentionDays,
+		LocalStrategyRetentionDays:      defaultLocalStrategyRetentionDays,
+		EnableDBExportSync:              false,
+		DBExportBaseURL:                 "",
+		DBExportSyncIntervalSeconds:     defaultDBExportSyncIntervalSecs,
+		DBExportAuthEnabled:             false,
+		DBExportUsername:                "admin",
+		DBExportPassword:                "",
 		EncryptPaths: []*EncryptPath{
 			{
 				Path:     "encrypt_folder/*",
@@ -159,6 +162,15 @@ func (m *ConfigManager) Load() error {
 		config.ProviderRuleSource = "builtin+custom"
 	}
 	config.RoutingUnmatchedDefault = normalizeRoutingUnmatchedDefault(config.RoutingUnmatchedDefault)
+	if !config.ProviderCatalogEnabled && config.ProviderCatalogTTLMinutes == 0 && config.StorageMapRefreshMinutes == 0 {
+		config.ProviderCatalogEnabled = true
+	}
+	if config.ProviderCatalogTTLMinutes <= 0 {
+		config.ProviderCatalogTTLMinutes = 720
+	}
+	if !config.ProviderCatalogBootstrapOnStart && config.ProviderCatalogTTLMinutes == 720 {
+		config.ProviderCatalogBootstrapOnStart = true
+	}
 	if config.StorageMapRefreshMinutes <= 0 {
 		config.StorageMapRefreshMinutes = 30
 	}
