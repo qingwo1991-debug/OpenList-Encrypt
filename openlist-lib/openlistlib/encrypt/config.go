@@ -163,6 +163,7 @@ func (m *ConfigManager) Load() error {
 	for i := range config.ProviderRoutingRules {
 		config.ProviderRoutingRules[i].MatchType = normalizeRoutingMatchType(config.ProviderRoutingRules[i].MatchType)
 		config.ProviderRoutingRules[i].Action = normalizeRoutingAction(config.ProviderRoutingRules[i].Action)
+		config.ProviderRoutingRules[i].MatchValues = normalizeRoutingMatchValues(&config.ProviderRoutingRules[i])
 	}
 	if config.DBExportSyncIntervalSeconds <= 0 {
 		config.DBExportSyncIntervalSeconds = defaultDBExportSyncIntervalSecs

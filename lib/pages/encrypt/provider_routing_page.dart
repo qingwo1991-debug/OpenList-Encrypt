@@ -17,7 +17,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
     sendTimeout: const Duration(seconds: 5),
   ));
 
-  static const Map<String, String> _providerZhMap = {
+  static const Map<String, String> _fallbackProviderZhMap = {
     'aliyundriveopen': '阿里云盘',
     'baidunetdisk': '百度网盘',
     'baiduphoto': '百度相册',
@@ -28,6 +28,12 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
     'quarkoruc': '夸克/UC网盘',
     'weiyun': '微云',
     'wps': 'WPS网盘',
+    'mopan': '移动云盘',
+    'mobile_cloud': '移动云盘',
+    'china_mobile_cloud': '移动云盘',
+    'unicom_cloud': '联通云盘',
+    'china_unicom_cloud': '联通云盘',
+    'wo_cloud': '联通云盘',
     'onedrive': 'OneDrive',
     'onedriveapp': 'OneDrive App',
     'googlephoto': 'Google Photos',
@@ -43,6 +49,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
   bool _enableLocalBypass = true;
   bool _enableRouting = true;
   List<String> _providerCandidates = [];
+  Map<String, String> _providerLabels = {};
   List<_RoutingRule> _rules = [];
 
   String get _baseUrl => 'http://127.0.0.1:${widget.proxyPort}';
@@ -55,7 +62,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
 
   String _providerLabel(String raw) {
     final key = raw.trim().toLowerCase();
-    final zh = _providerZhMap[key];
+    final zh = _providerLabels[key] ?? _fallbackProviderZhMap[key];
     if (zh == null || zh.isEmpty) {
       return raw;
     }
@@ -66,10 +73,25 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
     setState(() => _loading = true);
     try {
       await Future.wait([_loadConfig(), _loadCandidates()]);
+      _normalizeRuleValues();
     } catch (_) {
       // keep page usable with partial data
     } finally {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  void _normalizeRuleValues() {
+    for (final rule in _rules) {
+      final uniq = <String>{};
+      final next = <String>[];
+      for (final raw in rule.matchValues) {
+        final v = raw.trim().toLowerCase();
+        if (v.isEmpty || uniq.contains(v)) continue;
+        uniq.add(v);
+        next.add(v);
+      }
+      rule.matchValues = next;
     }
   }
 
@@ -81,19 +103,31 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
     final data = root['data'] as Map<String, dynamic>?;
     final config = data?['config'] as Map<String, dynamic>?;
     if (config == null) return;
+
     final rawRules = (config['providerRoutingRules'] as List<dynamic>? ?? []);
     final rules = rawRules.whereType<Map>().map((item) {
       final m = item.map((k, v) => MapEntry(k.toString(), v));
+      final values = <String>[];
+      final rawValues = m['matchValues'];
+      if (rawValues is List) {
+        for (final raw in rawValues) {
+          final v = raw.toString().trim().toLowerCase();
+          if (v.isNotEmpty) values.add(v);
+        }
+      }
+      if (values.isEmpty) {
+        final single = (m['matchValue'] ?? '').toString().trim().toLowerCase();
+        if (single.isNotEmpty) values.add(single);
+      }
       return _RoutingRule(
         id: (m['id'] ?? '').toString(),
-        // UI 仅保留 provider 规则，driver 规则自动收敛。
-        matchType: 'provider',
-        matchValue: (m['matchValue'] ?? '').toString().trim().toLowerCase(),
         action: (m['action'] ?? 'direct').toString(),
         enabled: m['enabled'] is bool ? m['enabled'] as bool : true,
         priority: int.tryParse((m['priority'] ?? 100).toString()) ?? 100,
+        matchValues: values,
       );
     }).toList();
+
     setState(() {
       _enableLocalBypass = config['enableLocalBypass'] is bool
           ? config['enableLocalBypass'] as bool
@@ -109,24 +143,41 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
         ? resp.data as Map<String, dynamic>
         : const <String, dynamic>{};
     final data = root['data'] as Map<String, dynamic>?;
+
     final providers = (data?['providers'] as List<dynamic>? ?? [])
         .map((e) => e.toString().trim().toLowerCase())
         .where((e) => e.isNotEmpty)
         .toSet()
         .toList()
       ..sort();
+
+    final labels = <String, String>{};
+    final rawLabels = data?['provider_labels'];
+    if (rawLabels is Map) {
+      for (final entry in rawLabels.entries) {
+        final key = entry.key.toString().trim().toLowerCase();
+        final value = entry.value.toString().trim();
+        if (key.isNotEmpty && value.isNotEmpty) {
+          labels[key] = value;
+        }
+      }
+    }
+
     setState(() {
       _providerCandidates = providers;
+      _providerLabels = labels;
     });
   }
 
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
+      _normalizeRuleValues();
       final filteredRules = _rules
-          .where((e) => e.matchValue.trim().isNotEmpty)
+          .where((e) => e.matchValues.isNotEmpty)
           .map((e) => e.toJson())
           .toList();
+
       await _dio.post(
         '$_baseUrl/api/encrypt/v2/config',
         data: {
@@ -141,8 +192,9 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
         options: Options(contentType: 'application/json'),
       );
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('网盘分流规则已保存')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('网盘分流规则已保存')),
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -158,73 +210,183 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
     setState(() {
       _rules.add(_RoutingRule(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
-        matchType: 'provider',
-        matchValue: _providerCandidates.isNotEmpty ? _providerCandidates.first : '',
         action: 'direct',
         enabled: true,
         priority: _rules.length + 1,
+        matchValues: const [],
       ));
     });
   }
 
-  List<String> _candidateWithCurrent(String current) {
-    final list = <String>[];
-    list.addAll(_providerCandidates);
-    final c = current.trim().toLowerCase();
-    if (c.isNotEmpty && !list.contains(c)) {
-      list.insert(0, c);
-    }
-    return list;
+  Future<void> _pickProviders(_RoutingRule rule) async {
+    final selected = Set<String>.from(rule.matchValues);
+    var keyword = '';
+    final customController = TextEditingController();
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            List<String> filtered = _providerCandidates;
+            final q = keyword.trim().toLowerCase();
+            if (q.isNotEmpty) {
+              filtered = _providerCandidates.where((p) {
+                final label = (_providerLabels[p] ?? _fallbackProviderZhMap[p] ?? '').toLowerCase();
+                return p.contains(q) || label.contains(q);
+              }).toList();
+            }
+
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 16,
+                bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+              ),
+              child: SizedBox(
+                height: MediaQuery.of(ctx).size.height * 0.72,
+                child: Column(
+                  children: [
+                    const Text('选择 Provider（可多选）', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 12),
+                    TextField(
+                      decoration: const InputDecoration(
+                        labelText: '搜索 Provider/中文名',
+                        prefixIcon: Icon(Icons.search),
+                      ),
+                      onChanged: (v) => setSheetState(() => keyword = v),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: customController,
+                            decoration: const InputDecoration(
+                              labelText: '手动添加 provider',
+                              hintText: '例如: china_mobile_cloud',
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        FilledButton.tonal(
+                          onPressed: () {
+                            final custom = customController.text.trim().toLowerCase();
+                            if (custom.isNotEmpty) {
+                              setSheetState(() {
+                                selected.add(custom);
+                                if (!_providerCandidates.contains(custom)) {
+                                  _providerCandidates = [..._providerCandidates, custom]..sort();
+                                }
+                                customController.clear();
+                              });
+                            }
+                          },
+                          child: const Text('添加'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: filtered.isEmpty
+                          ? const Center(child: Text('没有匹配项'))
+                          : ListView.builder(
+                              itemCount: filtered.length,
+                              itemBuilder: (_, i) {
+                                final p = filtered[i];
+                                final checked = selected.contains(p);
+                                return CheckboxListTile(
+                                  value: checked,
+                                  onChanged: (v) {
+                                    setSheetState(() {
+                                      if (v == true) {
+                                        selected.add(p);
+                                      } else {
+                                        selected.remove(p);
+                                      }
+                                    });
+                                  },
+                                  title: Text(
+                                    p,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: Text(
+                                    _providerLabels[p] ?? _fallbackProviderZhMap[p] ?? '-',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  controlAffinity: ListTileControlAffinity.leading,
+                                );
+                              },
+                            ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            child: const Text('取消'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: () {
+                              setState(() {
+                                rule.matchValues = selected.toList()..sort();
+                              });
+                              Navigator.pop(ctx);
+                            },
+                            child: const Text('确定'),
+                          ),
+                        ),
+                      ],
+                    )
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    customController.dispose();
   }
 
-  Widget _buildProviderItem(String value) {
-    final label = _providerLabel(value);
-    return Tooltip(
-      message: label,
-      child: Text(
-        label,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
+  Widget _buildProviderChip(String provider, _RoutingRule rule) {
+    final label = _providerLabel(provider);
+    return InputChip(
+      label: SizedBox(
+        width: 180,
+        child: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
       ),
+      onDeleted: () {
+        setState(() {
+          rule.matchValues.removeWhere((e) => e == provider);
+        });
+      },
     );
   }
 
   Widget _buildRuleCard(int index) {
     final rule = _rules[index];
-    final candidates = _candidateWithCurrent(rule.matchValue);
-    final dropdownValue = rule.matchValue.isEmpty
-        ? (candidates.isNotEmpty ? candidates.first : null)
-        : rule.matchValue;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    value: dropdownValue,
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                      labelText: 'Provider（可选）',
-                      hintText: '选择网盘 Provider',
-                    ),
-                    items: candidates
-                        .map(
-                          (c) => DropdownMenuItem<String>(
-                            value: c,
-                            child: _buildProviderItem(c),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (v) {
-                      if (v == null) return;
-                      setState(() => rule.matchValue = v.trim().toLowerCase());
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
                 Expanded(
                   child: DropdownButtonFormField<String>(
                     value: rule.action,
@@ -239,26 +401,25 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                     },
                   ),
                 ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextFormField(
+                    initialValue: rule.priority.toString(),
+                    decoration: const InputDecoration(labelText: '优先级（小优先）'),
+                    keyboardType: TextInputType.number,
+                    onChanged: (v) => rule.priority = int.tryParse(v) ?? 100,
+                  ),
+                ),
               ],
-            ),
-            const SizedBox(height: 8),
-            TextFormField(
-              initialValue: rule.matchValue,
-              decoration: const InputDecoration(
-                labelText: '自定义 Provider（可选）',
-                hintText: '下拉没有时可手动输入',
-              ),
-              onChanged: (v) => rule.matchValue = v.trim().toLowerCase(),
             ),
             const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(
-                  child: TextFormField(
-                    initialValue: rule.priority.toString(),
-                    decoration: const InputDecoration(labelText: '优先级（数字越小越先匹配）'),
-                    keyboardType: TextInputType.number,
-                    onChanged: (v) => rule.priority = int.tryParse(v) ?? 100,
+                  child: FilledButton.tonalIcon(
+                    onPressed: () => _pickProviders(rule),
+                    icon: const Icon(Icons.playlist_add_check),
+                    label: Text('选择 Provider（已选 ${rule.matchValues.length}）'),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -272,7 +433,18 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                   onPressed: () => setState(() => _rules.removeAt(index)),
                 ),
               ],
-            )
+            ),
+            const SizedBox(height: 8),
+            if (rule.matchValues.isEmpty)
+              const Text('未选择 Provider', style: TextStyle(color: Colors.grey))
+            else
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: rule.matchValues
+                    .map((provider) => _buildProviderChip(provider, rule))
+                    .toList(),
+              ),
           ],
         ),
       ),
@@ -322,7 +494,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                   child: Padding(
                     padding: EdgeInsets.all(12),
                     child: Text(
-                      '说明: 规则按优先级从小到大匹配；当前页面仅使用 provider 规则。未命中规则时走内置分组，再回退系统代理策略。',
+                      '说明: 一条规则可选择多个 Provider，命中其中任意一个即应用该规则。',
                     ),
                   ),
                 ),
@@ -331,7 +503,7 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                   const Card(
                     child: Padding(
                       padding: EdgeInsets.all(12),
-                      child: Text('暂无规则，可点击右下角 + 添加。每条规则都支持删除。'),
+                      child: Text('暂无规则，可点击右下角 + 添加。'),
                     ),
                   ),
                 ...List.generate(_rules.length, _buildRuleCard),
@@ -344,25 +516,30 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
 class _RoutingRule {
   _RoutingRule({
     required this.id,
-    required this.matchType,
-    required this.matchValue,
     required this.action,
     required this.enabled,
     required this.priority,
+    required this.matchValues,
   });
 
   String id;
-  String matchType;
-  String matchValue;
   String action;
   bool enabled;
   int priority;
+  List<String> matchValues;
 
   Map<String, dynamic> toJson() {
+    final values = matchValues
+        .map((e) => e.trim().toLowerCase())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
     return {
       'id': id,
       'matchType': 'provider',
-      'matchValue': matchValue.trim().toLowerCase(),
+      'matchValues': values,
+      'matchValue': values.isNotEmpty ? values.first : '',
       'action': action,
       'enabled': enabled,
       'priority': priority,

@@ -64,3 +64,76 @@ func TestHandleConfigV2PostClampsAndPersists(t *testing.T) {
 		t.Fatalf("sync interval clamp failed: %d", p.config.DBExportSyncIntervalSeconds)
 	}
 }
+
+func TestHandleConfigV2ProviderRoutingRulesMatchValues(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "encrypt_config.json")
+	p := &ProxyServer{config: cfg}
+
+	body := map[string]interface{}{
+		"config": map[string]interface{}{
+			"providerRoutingRules": []map[string]interface{}{
+				{
+					"id":          "r1",
+					"matchType":   "provider",
+					"matchValues": []string{"baidunetdisk", "weiyun", "mopan"},
+					"action":      "direct",
+					"enabled":     true,
+					"priority":    1,
+				},
+			},
+		},
+	}
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/encrypt/v2/config", bytes.NewReader(raw))
+	w := httptest.NewRecorder()
+	p.handleConfigV2(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	if len(p.config.ProviderRoutingRules) != 1 {
+		t.Fatalf("expected one routing rule, got %d", len(p.config.ProviderRoutingRules))
+	}
+	got := p.config.ProviderRoutingRules[0]
+	if len(got.MatchValues) != 3 {
+		t.Fatalf("expected 3 matchValues, got %d", len(got.MatchValues))
+	}
+	if got.MatchValue == "" {
+		t.Fatalf("expected legacy MatchValue to be populated")
+	}
+}
+
+func TestHandleConfigV2ProviderRoutingRulesLegacyMatchValueCompat(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "encrypt_config.json")
+	p := &ProxyServer{config: cfg}
+
+	body := map[string]interface{}{
+		"config": map[string]interface{}{
+			"providerRoutingRules": []map[string]interface{}{
+				{
+					"id":         "legacy",
+					"matchType":  "provider",
+					"matchValue": "onedrive",
+					"action":     "proxy",
+					"enabled":    true,
+					"priority":   5,
+				},
+			},
+		},
+	}
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/encrypt/v2/config", bytes.NewReader(raw))
+	w := httptest.NewRecorder()
+	p.handleConfigV2(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	if len(p.config.ProviderRoutingRules) != 1 {
+		t.Fatalf("expected one routing rule, got %d", len(p.config.ProviderRoutingRules))
+	}
+	got := p.config.ProviderRoutingRules[0]
+	if len(got.MatchValues) != 1 || got.MatchValues[0] != "onedrive" {
+		t.Fatalf("legacy matchValue compat failed, got matchValues=%v", got.MatchValues)
+	}
+}

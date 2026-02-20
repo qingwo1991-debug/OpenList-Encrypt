@@ -35,12 +35,13 @@ type configV2Data struct {
 }
 
 type configV2ProviderRoutingRule struct {
-	ID         string `json:"id,omitempty"`
-	MatchType  string `json:"matchType"`
-	MatchValue string `json:"matchValue"`
-	Action     string `json:"action"`
-	Enabled    bool   `json:"enabled"`
-	Priority   int    `json:"priority"`
+	ID          string   `json:"id,omitempty"`
+	MatchType   string   `json:"matchType"`
+	MatchValue  string   `json:"matchValue,omitempty"`
+	MatchValues []string `json:"matchValues,omitempty"`
+	Action      string   `json:"action"`
+	Enabled     bool     `json:"enabled"`
+	Priority    int      `json:"priority"`
 }
 
 func configV2Docs() []configDocItem {
@@ -75,8 +76,9 @@ func (p *ProxyServer) exportConfigV2() map[string]any {
 			paths = append(paths, configV2Path{Path: ep.Path, EncType: string(ep.EncType), EncName: ep.EncName, EncSuffix: ep.EncSuffix, Enable: ep.Enable})
 		}
 		for _, rr := range p.config.ProviderRoutingRules {
+			matchValues := normalizeRoutingMatchValues(&rr)
 			routingRules = append(routingRules, configV2ProviderRoutingRule{
-				ID: rr.ID, MatchType: rr.MatchType, MatchValue: rr.MatchValue, Action: rr.Action, Enabled: rr.Enabled, Priority: rr.Priority,
+				ID: rr.ID, MatchType: rr.MatchType, MatchValue: rr.MatchValue, MatchValues: matchValues, Action: rr.Action, Enabled: rr.Enabled, Priority: rr.Priority,
 			})
 		}
 	}
@@ -342,6 +344,23 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 			}
 			matchType, _ := item["matchType"].(string)
 			matchValue, _ := item["matchValue"].(string)
+			matchValues := make([]string, 0, 4)
+			if mv, ok := item["matchValues"].([]interface{}); ok {
+				for _, rawValue := range mv {
+					s, _ := rawValue.(string)
+					s = normalizeProviderToken(s)
+					if s == "" {
+						continue
+					}
+					matchValues = append(matchValues, s)
+				}
+			}
+			if len(matchValues) == 0 {
+				matchValue = normalizeProviderToken(matchValue)
+				if matchValue != "" {
+					matchValues = append(matchValues, matchValue)
+				}
+			}
 			action, _ := item["action"].(string)
 			enabled, okEnabled := item["enabled"].(bool)
 			if !okEnabled {
@@ -349,17 +368,17 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 			}
 			priority, _ := parseIntAny(item["priority"])
 			id, _ := item["id"].(string)
-			matchValue = normalizeProviderToken(matchValue)
-			if matchValue == "" {
+			if len(matchValues) == 0 {
 				continue
 			}
 			nextRules = append(nextRules, ProviderRoutingRule{
-				ID:         strings.TrimSpace(id),
-				MatchType:  normalizeRoutingMatchType(matchType),
-				MatchValue: matchValue,
-				Action:     normalizeRoutingAction(action),
-				Enabled:    enabled,
-				Priority:   priority,
+				ID:          strings.TrimSpace(id),
+				MatchType:   normalizeRoutingMatchType(matchType),
+				MatchValue:  matchValues[0],
+				MatchValues: matchValues,
+				Action:      normalizeRoutingAction(action),
+				Enabled:     enabled,
+				Priority:    priority,
 			})
 		}
 		p.config.ProviderRoutingRules = nextRules

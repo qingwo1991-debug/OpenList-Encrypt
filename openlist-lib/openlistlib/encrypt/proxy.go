@@ -303,6 +303,33 @@ var builtinProxyProviders = map[string]struct{}{
 	"github":      {},
 }
 
+var providerLabelMap = map[string]string{
+	"aliyundriveopen":    "阿里云盘",
+	"baidunetdisk":       "百度网盘",
+	"baiduphoto":         "百度相册",
+	"cloud189":           "天翼云盘",
+	"cloud189pc":         "天翼云盘PC",
+	"open123":            "123网盘",
+	"pan115":             "115网盘",
+	"quarkoruc":          "夸克/UC网盘",
+	"weiyun":             "微云",
+	"wps":                "WPS网盘",
+	"onedrive":           "OneDrive",
+	"onedriveapp":        "OneDrive App",
+	"googlephoto":        "Google Photos",
+	"mega":               "MEGA",
+	"mediafire":          "MediaFire",
+	"protondrive":        "Proton Drive",
+	"dropbox":            "Dropbox",
+	"github":             "GitHub",
+	"mopan":              "移动云盘",
+	"china_mobile_cloud": "移动云盘",
+	"mobile_cloud":       "移动云盘",
+	"unicom_cloud":       "联通云盘",
+	"china_unicom_cloud": "联通云盘",
+	"wo_cloud":           "联通云盘",
+}
+
 func normalizeRoutingMode(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", routingModeByProvider:
@@ -336,6 +363,37 @@ func normalizeProviderToken(v string) string {
 	return strings.ToLower(strings.TrimSpace(v))
 }
 
+func normalizeRoutingMatchValues(rule *ProviderRoutingRule) []string {
+	if rule == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(rule.MatchValues)+1)
+	out := make([]string, 0, len(rule.MatchValues)+1)
+	for _, raw := range rule.MatchValues {
+		v := normalizeProviderToken(raw)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	legacy := normalizeProviderToken(rule.MatchValue)
+	if legacy != "" {
+		if _, ok := seen[legacy]; !ok {
+			out = append(out, legacy)
+		}
+	}
+	if len(out) > 0 {
+		rule.MatchValue = out[0]
+	} else {
+		rule.MatchValue = ""
+	}
+	return out
+}
+
 func sortRoutingRules(rules []ProviderRoutingRule) {
 	sort.SliceStable(rules, func(i, j int) bool {
 		if rules[i].Priority == rules[j].Priority {
@@ -359,18 +417,20 @@ func matchRoutingRules(cfg *ProxyConfig, provider, driver string) (string, bool)
 			continue
 		}
 		matchType := normalizeRoutingMatchType(rule.MatchType)
-		matchValue := normalizeProviderToken(rule.MatchValue)
-		if matchValue == "" {
+		matchValues := normalizeRoutingMatchValues(&rule)
+		if len(matchValues) == 0 {
 			continue
 		}
-		switch matchType {
-		case routingMatchDriver:
-			if d == matchValue {
-				return normalizeRoutingAction(rule.Action), true
-			}
-		default:
-			if p == matchValue {
-				return normalizeRoutingAction(rule.Action), true
+		for _, matchValue := range matchValues {
+			switch matchType {
+			case routingMatchDriver:
+				if d == matchValue {
+					return normalizeRoutingAction(rule.Action), true
+				}
+			default:
+				if p == matchValue {
+					return normalizeRoutingAction(rule.Action), true
+				}
 			}
 		}
 	}
@@ -1002,12 +1062,13 @@ type ProxyServer struct {
 }
 
 type ProviderRoutingRule struct {
-	ID         string `json:"id,omitempty"`
-	MatchType  string `json:"matchType"`
-	MatchValue string `json:"matchValue"`
-	Action     string `json:"action"`
-	Enabled    bool   `json:"enabled"`
-	Priority   int    `json:"priority"`
+	ID          string   `json:"id,omitempty"`
+	MatchType   string   `json:"matchType"`
+	MatchValue  string   `json:"matchValue"`
+	MatchValues []string `json:"matchValues,omitempty"`
+	Action      string   `json:"action"`
+	Enabled     bool     `json:"enabled"`
+	Priority    int      `json:"priority"`
 }
 
 // FileInfo 文件信息
@@ -1080,6 +1141,7 @@ func applyLearningDefaults(cfg *ProxyConfig) {
 	for i := range cfg.ProviderRoutingRules {
 		cfg.ProviderRoutingRules[i].MatchType = normalizeRoutingMatchType(cfg.ProviderRoutingRules[i].MatchType)
 		cfg.ProviderRoutingRules[i].Action = normalizeRoutingAction(cfg.ProviderRoutingRules[i].Action)
+		cfg.ProviderRoutingRules[i].MatchValues = normalizeRoutingMatchValues(&cfg.ProviderRoutingRules[i])
 	}
 }
 
@@ -5694,39 +5756,144 @@ func (p *ProxyServer) inferDriverFromPath(ctx context.Context, originalPath stri
 	return driver
 }
 
+func buildProviderLabel(provider string) string {
+	key := normalizeProviderToken(provider)
+	if key == "" {
+		return ""
+	}
+	if label, ok := providerLabelMap[key]; ok && strings.TrimSpace(label) != "" {
+		return label
+	}
+	if strings.Contains(key, "mobile") && strings.Contains(key, "cloud") {
+		return "移动云盘"
+	}
+	if strings.Contains(key, "unicom") && strings.Contains(key, "cloud") {
+		return "联通云盘"
+	}
+	return ""
+}
+
+func (p *ProxyServer) fetchAdminDriverNames(ctx context.Context, srcHeaders http.Header) ([]string, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.getAlistURL()+"/api/admin/driver/names", nil)
+	if err != nil {
+		return nil, true
+	}
+	for key, values := range srcHeaders {
+		if strings.EqualFold(key, "Host") || strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, true
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, true
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, true
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, true
+	}
+	data, ok := payload["data"].([]interface{})
+	if !ok {
+		return nil, true
+	}
+	names := make([]string, 0, len(data))
+	for _, raw := range data {
+		name, ok := raw.(string)
+		if !ok {
+			continue
+		}
+		name = normalizeProviderToken(name)
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names, false
+}
+
 func (p *ProxyServer) handleProviderRoutingCandidates(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	p.routingMu.RLock()
-	providers := make([]string, 0, len(p.seenProviders)+len(builtinDirectProviders)+len(builtinProxyProviders))
 	providerSet := make(map[string]struct{}, len(p.seenProviders)+len(builtinDirectProviders)+len(builtinProxyProviders))
+	seenCount := len(p.seenProviders)
 	for k := range p.seenProviders {
 		providerSet[k] = struct{}{}
 	}
+	builtinSet := make(map[string]struct{}, len(builtinDirectProviders)+len(builtinProxyProviders))
 	for k := range builtinDirectProviders {
 		providerSet[k] = struct{}{}
+		builtinSet[k] = struct{}{}
 	}
 	for k := range builtinProxyProviders {
 		providerSet[k] = struct{}{}
+		builtinSet[k] = struct{}{}
 	}
-	for k := range providerSet {
-		providers = append(providers, k)
-	}
+	builtinCount := len(builtinSet)
 	drivers := make([]string, 0, len(p.seenDrivers))
 	for k := range p.seenDrivers {
 		drivers = append(drivers, k)
 	}
 	p.routingMu.RUnlock()
+
+	driverNames, degradedDriverNames := p.fetchAdminDriverNames(r.Context(), r.Header)
+	for _, name := range driverNames {
+		providerSet[name] = struct{}{}
+	}
+	p.refreshStorageDriverMapIfNeeded(r.Context(), r.Header)
+	p.routingMu.RLock()
+	storageDrivers := make([]string, 0, len(p.storageDriverMap))
+	for _, drv := range p.storageDriverMap {
+		drv = normalizeProviderToken(drv)
+		if drv == "" {
+			continue
+		}
+		storageDrivers = append(storageDrivers, drv)
+		providerSet[drv] = struct{}{}
+	}
+	p.routingMu.RUnlock()
+
+	providers := make([]string, 0, len(providerSet))
+	for k := range providerSet {
+		providers = append(providers, k)
+	}
 	sort.Strings(providers)
 	sort.Strings(drivers)
+	sort.Strings(storageDrivers)
+	providerLabels := make(map[string]string, len(providers))
+	for _, provider := range providers {
+		if label := buildProviderLabel(provider); label != "" {
+			providerLabels[provider] = label
+		}
+	}
+	degraded := degradedDriverNames
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"code": 200,
 		"data": map[string]interface{}{
-			"providers": providers,
-			"drivers":   drivers,
+			"providers":       providers,
+			"provider_labels": providerLabels,
+			"drivers":         drivers,
+			"meta": map[string]interface{}{
+				"seen_count":            seenCount,
+				"builtin_count":         builtinCount,
+				"driver_names_count":    len(driverNames),
+				"storage_drivers_count": len(storageDrivers),
+				"degraded":              degraded,
+			},
 		},
 	})
 }
