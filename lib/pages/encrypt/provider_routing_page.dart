@@ -219,7 +219,6 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
         data: {
           'version': 2,
           'config': {
-            'enableLocalBypass': _enableLocalBypass,
             'routingMode': _enableRouting ? 'by_provider' : 'off',
             'routingUnmatchedDefault': _routingUnmatchedDefault,
             'providerRuleSource': 'builtin+custom',
@@ -521,11 +520,13 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                   value: _enableRouting,
                   onChanged: (v) => setState(() => _enableRouting = v),
                 ),
-                SwitchListTile(
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
                   title: const Text('本地/私网直连（全局）'),
-                  subtitle: const Text('同【加密页面-网络策略】开关；仅对 localhost/私网地址生效'),
-                  value: _enableLocalBypass,
-                  onChanged: (v) => setState(() => _enableLocalBypass = v),
+                  subtitle: const Text('该开关已统一到【加密页面 > 网络策略】配置；本页仅展示当前状态'),
+                  trailing: Text(
+                    _enableLocalBypass ? '已开启' : '已关闭',
+                  ),
                 ),
                 ListTile(
                   contentPadding: EdgeInsets.zero,
