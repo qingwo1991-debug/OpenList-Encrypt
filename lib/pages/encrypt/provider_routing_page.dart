@@ -522,8 +522,8 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                   onChanged: (v) => setState(() => _enableRouting = v),
                 ),
                 SwitchListTile(
-                  title: const Text('本地/私网直连'),
-                  subtitle: const Text('仅对 localhost/私网地址生效'),
+                  title: const Text('本地/私网直连（全局）'),
+                  subtitle: const Text('同【加密页面-网络策略】开关；仅对 localhost/私网地址生效'),
                   value: _enableLocalBypass,
                   onChanged: (v) => setState(() => _enableLocalBypass = v),
                 ),

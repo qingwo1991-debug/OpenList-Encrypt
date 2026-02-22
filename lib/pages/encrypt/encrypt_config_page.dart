@@ -735,7 +735,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                       ],
                     ),
                     SwitchListTile(
-                      title: const Text('本地/私网直连（绕过系统代理）'),
+                      title: const Text('本地/私网直连（全局，绕过系统代理）'),
                       value: _enableLocalBypass,
                       onChanged: (value) => setState(() => _enableLocalBypass = value),
                     ),
