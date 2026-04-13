@@ -377,29 +377,48 @@ jobs:
 
       - name: Build iOS IPA (No Code Signing for sideloading)
         run: |
-          # Flutter iOS build
+          # Flutter build ios with no codesign (may fail due to signing requirement)
+          cd ios
           flutter build ios --release --no-codesign \
             --build-name=${{ steps.version.outputs.VERSION_NAME }} \
-            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee ios_build.log
+            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee ../ios_build.log || true
+          cd ..
 
-          # Check build result
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "Flutter iOS build failed!"
-            cat ios_build.log
-            exit 1
+          # If flutter build ios did not produce app, use xcodebuild directly
+          if [ ! -d "build/ios/iphoneos/Runner.app" ] && [ ! -d "build/ios/Release-iphoneos/Runner.app" ]; then
+            echo "flutter build ios did not produce .app, using xcodebuild directly..."
+            cd ios
+            xcodebuild -workspace Runner.xcworkspace -scheme Runner \
+              -configuration Release \
+              -sdk iphoneos \
+              -destination 'generic/platform=iOS' \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGN_IDENTITY="" \
+              DEVELOPMENT_TEAM="" \
+              build 2>&1 | tee ../ios_xcodebuild.log
+            BUILD_EXIT=${PIPESTATUS[0]}
+            cd ..
+            if [ "$BUILD_EXIT" -ne 0 ]; then
+              echo "xcodebuild also failed!"
+              cat ios_xcodebuild.log
+              exit 1
+            fi
           fi
 
-          # Find the .app file (may be in different locations)
+          # Find the .app file
           APP_DIR=""
           if [ -d "build/ios/iphoneos/Runner.app" ]; then
             APP_DIR="build/ios/iphoneos"
           elif [ -d "build/ios/Release-iphoneos/Runner.app" ]; then
             APP_DIR="build/ios/Release-iphoneos"
-          else
+          fi
+
+          if [ -z "$APP_DIR" ]; then
             echo "Runner.app not found. Build directory contents:"
             find build/ios -maxdepth 3 -type d 2>/dev/null | head -30
             echo "Full build log:"
-            cat ios_build.log
+            cat ios_build.log 2>/dev/null || true
+            cat ios_xcodebuild.log 2>/dev/null || true
             exit 1
           fi
 
@@ -409,8 +428,8 @@ jobs:
           cd "$APP_DIR"
           mkdir -p Payload
           cp -r Runner.app Payload/
-          zip -r OpenList-Encrypt-${{ steps.version.outputs.VERSION }}-ios.ipa Payload
-          mv OpenList-Encrypt-${{ steps.version.outputs.VERSION }}-ios.ipa ../../..
+          zip -qr "OpenList-Encrypt-${{ steps.version.outputs.VERSION }}-ios.ipa" Payload
+          mv "OpenList-Encrypt-${{ steps.version.outputs.VERSION }}-ios.ipa" ../../..
           cd ../..
 
           echo "IPA created successfully:"
