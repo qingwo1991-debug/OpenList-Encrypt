@@ -377,22 +377,44 @@ jobs:
 
       - name: Build iOS IPA (No Code Signing for sideloading)
         run: |
+          # Flutter iOS build
           flutter build ios --release --no-codesign \
             --build-name=${{ steps.version.outputs.VERSION_NAME }} \
-            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee ios_build.log || {
-              echo "Flutter iOS build failed, attempting to get build logs..."
-              cat ios_build.log
-              exit 1
-            }
+            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee ios_build.log
 
-      - name: Create IPA from build output
-        run: |
-          cd build/ios/iphoneos
+          # Check build result
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "Flutter iOS build failed!"
+            cat ios_build.log
+            exit 1
+          fi
+
+          # Find the .app file (may be in different locations)
+          APP_DIR=""
+          if [ -d "build/ios/iphoneos/Runner.app" ]; then
+            APP_DIR="build/ios/iphoneos"
+          elif [ -d "build/ios/Release-iphoneos/Runner.app" ]; then
+            APP_DIR="build/ios/Release-iphoneos"
+          else
+            echo "Runner.app not found. Build directory contents:"
+            find build/ios -maxdepth 3 -type d 2>/dev/null | head -30
+            echo "Full build log:"
+            cat ios_build.log
+            exit 1
+          fi
+
+          echo "Found Runner.app in: $APP_DIR"
+
+          # Create IPA
+          cd "$APP_DIR"
           mkdir -p Payload
           cp -r Runner.app Payload/
           zip -r OpenList-Encrypt-${{ steps.version.outputs.VERSION }}-ios.ipa Payload
           mv OpenList-Encrypt-${{ steps.version.outputs.VERSION }}-ios.ipa ../../..
-          cd ../../..
+          cd ../..
+
+          echo "IPA created successfully:"
+          ls -la OpenList-Encrypt-*.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
