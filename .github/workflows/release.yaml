@@ -78,7 +78,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '16'
+          node-version: '20'
 
       - name: Build and Setup WebUI
         env:
@@ -289,7 +289,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '16'
+          node-version: '20'
 
       - name: Build and Setup WebUI
         env:
@@ -306,7 +306,7 @@ jobs:
           echo "Building Encrypt WebUI..."
           npm install -g pnpm@7.9.0
           cd enc-webui
-          pnpm install
+          pnpm install --ignore-scripts
           npm run build
           mkdir -p ../openlist-lib/public/dist/enc
           cp -r dist/* ../openlist-lib/public/dist/enc/
