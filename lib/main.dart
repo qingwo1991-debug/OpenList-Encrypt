@@ -21,21 +21,30 @@ import 'contant/native_bridge.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   // 初始化语言控制器
   Get.put(LanguageController());
-  
+
   // 初始化通知管理器
   await NotificationManager.initialize();
-  
+
   // 初始化服务管理器
   await ServiceManager.instance.initialize();
-  
+
   // Android
   if (!kIsWeb &&
       kDebugMode &&
       defaultTargetPlatform == TargetPlatform.android) {
     await InAppWebViewController.setWebContentsDebuggingEnabled(kDebugMode);
+  }
+
+  // iOS: auto-start service if it should be running
+  if (defaultTargetPlatform == TargetPlatform.iOS) {
+    // Check if service should be auto-started
+    final autoStart = await NativeBridge.appConfig.isStartAtBootEnabled();
+    if (autoStart) {
+      await ServiceManager.instance.startService();
+    }
   }
 
   runApp(const MyApp());

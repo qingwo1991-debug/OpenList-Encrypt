@@ -82,3 +82,9 @@ encrypt_config*.json
 *token*.yaml
 *token*.yml
 *token*.env
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+key.properties
