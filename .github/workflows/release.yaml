@@ -377,81 +377,62 @@ jobs:
 
       - name: Build iOS IPA (No Code Signing for sideloading)
         run: |
-          PROJECT_ROOT=$(pwd)
-          echo "Project root: $PROJECT_ROOT"
+          set +e  # Don't exit on flutter build error (signing warning)
 
-          # Flutter build ios from project root (do NOT cd into ios/)
+          echo "=== Project root: $(pwd) ==="
+
+          # Clean previous build
+          flutter clean
+          rm -rf ios/Pods ios/Podfile.lock ios/.symlinks
+
+          # Install pods
+          cd ios
+          pod install
+          cd ..
+
+          # Build iOS (exits with error due to no dev team, but still produces output)
           flutter build ios --release --no-codesign \
             --build-name=${{ steps.version.outputs.VERSION_NAME }} \
-            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee ios_build.log || true
+            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee ios_build.log
+          FLUTTER_EXIT=${PIPESTATUS[0]}
+          echo "flutter build ios exit code: $FLUTTER_EXIT"
 
-          # Find the .app file - check both possible locations
-          APP_DIR=""
-          if [ -d "build/ios/iphoneos/Runner.app" ]; then
-            APP_DIR="build/ios/iphoneos"
-          elif [ -d "build/ios/Release-iphoneos/Runner.app" ]; then
-            APP_DIR="build/ios/Release-iphoneos"
-          fi
-
-          # Check if the app is actually substantial (not just a stub)
-          if [ -n "$APP_DIR" ]; then
-            APP_SIZE=$(du -sm "$APP_DIR/Runner.app" 2>/dev/null | awk '{print $1}')
-            echo "Runner.app found in: $APP_DIR, size: ${APP_SIZE}MB"
-            if [ "$APP_SIZE" -lt 50 ] 2>/dev/null; then
-              echo "App is too small (${APP_SIZE}MB), likely a stub. Trying xcodebuild directly..."
-              APP_DIR=""
+          # Find .app in both possible locations
+          APP_PATH=""
+          for dir in build/ios/iphoneos build/ios/Release-iphoneos; do
+            if [ -f "$dir/Runner.app/Frameworks/App.framework/App" ]; then
+              APP_PATH="$dir"
+              break
             fi
-          fi
+          done
 
-          # If app not found or too small, use xcodebuild directly
-          if [ -z "$APP_DIR" ]; then
-            echo "Using xcodebuild directly for unsigned build..."
-            xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner \
-              -configuration Release \
-              -sdk iphoneos \
-              -destination 'generic/platform=iOS' \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGN_IDENTITY="" \
-              DEVELOPMENT_TEAM="" \
-              CONFIGURATION_BUILD_DIR="$PROJECT_ROOT/build/ios/Release-iphoneos" \
-              build 2>&1 | tee ios_xcodebuild.log
-            if [ ${PIPESTATUS[0]} -ne 0 ]; then
-              echo "xcodebuild failed!"
-              cat ios_xcodebuild.log
-              exit 1
-            fi
-            APP_DIR="build/ios/Release-iphoneos"
-            APP_SIZE=$(du -sm "$APP_DIR/Runner.app" 2>/dev/null | awk '{print $1}')
-            echo "xcodebuild Runner.app size: ${APP_SIZE}MB"
-            if [ "$APP_SIZE" -lt 50 ] 2>/dev/null; then
-              echo "xcodebuild also produced a tiny app (${APP_SIZE}MB)! Listing contents:"
-              find "$APP_DIR/Runner.app" -type f 2>/dev/null
-              exit 1
-            fi
-          fi
-
-          if [ -z "$APP_DIR" ]; then
-            echo "Runner.app not found anywhere. Build directory contents:"
-            find build/ios -maxdepth 3 -type d 2>/dev/null | head -30
-            echo "Full build log:"
-            cat ios_build.log 2>/dev/null || true
+          if [ -z "$APP_PATH" ]; then
+            echo "=== App not found or incomplete build ==="
+            echo "Checking for any .app directories:"
+            find build/ios -name "*.app" -type d 2>/dev/null
+            echo "Checking build/ios/iphoneos:"
+            ls -la build/ios/iphoneos/ 2>/dev/null || echo "  (does not exist)"
+            echo "Checking build/ios/Release-iphoneos:"
+            ls -la build/ios/Release-iphoneos/ 2>/dev/null || echo "  (does not exist)"
+            echo "=== Last 200 lines of build log ==="
+            tail -200 ios_build.log
             exit 1
           fi
 
-          echo "Final Runner.app in: $APP_DIR"
+          APP_SIZE=$(du -sm "$APP_PATH/Runner.app" | awk '{print $1}')
+          echo "=== Runner.app in: $APP_PATH, size: ${APP_SIZE}MB ==="
 
           # Create IPA
-          cd "$APP_DIR"
+          cd "$APP_PATH"
           mkdir -p Payload
-          rm -rf Payload/Runner.app
           cp -r Runner.app Payload/
           IPA_NAME="OpenList-Encrypt-${{ steps.version.outputs.VERSION }}-ios.ipa"
           zip -qr "$IPA_NAME" Payload/
-          cp "$IPA_NAME" "$PROJECT_ROOT/"
-          cd "$PROJECT_ROOT"
+          mv "$IPA_NAME" ../../
+          cd ../..
 
-          FINAL_SIZE=$(du -sm "$IPA_NAME" 2>/dev/null | awk '{print $1}')
-          echo "IPA created: $IPA_NAME (${FINAL_SIZE}MB)"
+          FINAL_SIZE=$(du -sm "$IPA_NAME" | awk '{print $1}')
+          echo "=== IPA: $IPA_NAME (${FINAL_SIZE}MB) ==="
           ls -lh "$IPA_NAME"
 
       - name: Upload IPA artifact
