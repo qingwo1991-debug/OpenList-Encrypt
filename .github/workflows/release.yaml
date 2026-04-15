@@ -371,6 +371,8 @@ jobs:
 
       - name: Install CocoaPods dependencies
         run: |
+          # First generate Flutter configuration files required by pod install
+          flutter pub get
           cd ios
           pod install || echo "pod install failed, continuing anyway"
           cd ..
