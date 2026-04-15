@@ -393,7 +393,18 @@ jobs:
           pod install
           cd ..
 
-          # Build iOS (exits with error due to no dev team, but still produces output)
+          # Configure Xcode project for automatic signing without team
+          # This allows building for archiving without a development team
+          sed -i '' 's/DEVELOPMENT_TEAM = [A-Z0-9]*/DEVELOPMENT_TEAM = ""/' ios/Runner.xcodeproj/project.pbxproj || true
+          sed -i '' 's/CODE_SIGN_STYLE = Manual/CODE_SIGN_STYLE = Automatic/' ios/Runner.xcodeproj/project.pbxproj || true
+          
+          # Disable code signing requirements for archive
+          cat >> ios/Flutter/Release.xcconfig <<EOF
+          CODE_SIGNING_REQUIRED = NO
+          CODE_SIGNING_ALLOWED = NO
+          EOF
+
+          # Build iOS for archiving (creates .app for IPA packaging)
           flutter build ios --release --no-codesign \
             --build-name=${{ steps.version.outputs.VERSION_NAME }} \
             --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee ios_build.log
