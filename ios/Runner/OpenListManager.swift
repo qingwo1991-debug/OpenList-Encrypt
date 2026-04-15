@@ -1,5 +1,28 @@
 import Foundation
 
+// MARK: - Stub Protocols (when Openlistlib is not available)
+#if !canImport(Openlistlib)
+@objc protocol OpenlistlibEventProtocol {
+    func onStartError(_ t: String?, err: String?)
+    func onShutdown(_ t: String?)
+    func onProcessExit(_ code: Int)
+}
+
+@objc protocol OpenlistlibLogCallbackProtocol {
+    func onLog(_ level: Int16, time: Int64, message: String?)
+}
+
+// Stub functions when Openlistlib is not available
+func OpenlistlibSetConfigData(_ path: String) {}
+func OpenlistlibSetConfigLogStd(_ enabled: Bool) {}
+func OpenlistlibInit(_ event: OpenlistlibEventProtocol, _ logger: OpenlistlibLogCallbackProtocol, _ error: NSErrorPointer) {}
+func OpenlistlibStart() {}
+func OpenlistlibShutdown(_ timeout: Int64, _ error: NSErrorPointer) {}
+func OpenlistlibIsRunning(_ service: String) -> Bool { return false }
+func OpenlistlibSetAdminPassword(_ pwd: String) {}
+func OpenlistlibForceDBSync(_ error: NSErrorPointer) {}
+#endif
+
 /// Manages OpenList core server lifecycle (iOS)
 /// Android 逻辑不受任何影响
 class OpenListManager: NSObject {
@@ -18,6 +41,7 @@ class OpenListManager: NSObject {
     }
 
     private func ensureInitializedForConfig() throws {
+        #if canImport(Openlistlib)
         if isInitialized { return }
 
         let eventHandler = OpenListEventHandler()
@@ -31,11 +55,15 @@ class OpenListManager: NSObject {
         self.logCallback = logCallback
 
         try initialize(event: eventHandler, logger: logCallback)
+        #else
+        print("[OpenListManager] Openlistlib not available, skipping initialization")
+        #endif
     }
 
     // MARK: - Initialization
 
     func initialize(event: OpenListEventHandler, logger: OpenListLogCallback) throws {
+        #if canImport(Openlistlib)
         guard !isInitialized else {
             print("[OpenListManager] Already initialized")
             return
@@ -68,11 +96,16 @@ class OpenListManager: NSObject {
 
         isInitialized = true
         print("[OpenListManager] Initialized successfully with data directory: \(dataDirPath)")
+        #else
+        print("[OpenListManager] Openlistlib not available, running in Flutter-only mode")
+        isInitialized = true
+        #endif
     }
 
     // MARK: - Server Control
 
     func startServer() {
+        #if canImport(Openlistlib)
         print("[OpenListManager] Start server request received")
 
         if !isInitialized {
@@ -122,9 +155,13 @@ class OpenListManager: NSObject {
                 }
             }
         }
+        #else
+        print("[OpenListManager] Openlistlib not available, cannot start server")
+        #endif
     }
 
     func stopServer(timeout: Int64 = 5000) {
+        #if canImport(Openlistlib)
         guard isServerRunning else {
             print("[OpenListManager] Server not running")
             return
@@ -139,10 +176,17 @@ class OpenListManager: NSObject {
         }
         isServerRunning = false
         print("[OpenListManager] Server stopped")
+        #else
+        print("[OpenListManager] Openlistlib not available, cannot stop server")
+        #endif
     }
 
     func isRunning() -> Bool {
+        #if canImport(Openlistlib)
         return isServerRunning && OpenlistlibIsRunning("http")
+        #else
+        return false
+        #endif
     }
 
     func getHttpPort() -> Int {
@@ -150,6 +194,7 @@ class OpenListManager: NSObject {
     }
 
     func setAdminPassword(_ pwd: String) throws {
+        #if canImport(Openlistlib)
         try ensureInitializedForConfig()
 
         if let dataDir = dataDir {
@@ -158,9 +203,13 @@ class OpenListManager: NSObject {
 
         OpenlistlibSetAdminPassword(pwd)
         print("[OpenListManager] Admin password updated")
+        #else
+        print("[OpenListManager] Openlistlib not available, cannot set admin password")
+        #endif
     }
 
     func forceDBSync() {
+        #if canImport(Openlistlib)
         var error: NSError?
         OpenlistlibForceDBSync(&error)
         if let err = error {
@@ -168,11 +217,15 @@ class OpenListManager: NSObject {
             return
         }
         print("[OpenListManager] Database sync completed")
+        #else
+        print("[OpenListManager] Openlistlib not available, cannot sync database")
+        #endif
     }
 }
 
 // MARK: - Event Handler
 
+#if canImport(Openlistlib)
 class OpenListEventHandler: NSObject, OpenlistlibEventProtocol {
     weak var eventAPI: Event?
 
@@ -188,9 +241,27 @@ class OpenListEventHandler: NSObject, OpenlistlibEventProtocol {
         print("[OpenListEvent] Process exit - Code: \(code)")
     }
 }
+#else
+class OpenListEventHandler: NSObject, OpenlistlibEventProtocol {
+    weak var eventAPI: Event?
+
+    func onStartError(_ t: String?, err: String?) {
+        print("[OpenListEvent] Start error - Type: \(t ?? "unknown"), Error: \(err ?? "unknown")")
+    }
+
+    func onShutdown(_ t: String?) {
+        print("[OpenListEvent] Shutdown - Type: \(t ?? "unknown")")
+    }
+
+    func onProcessExit(_ code: Int) {
+        print("[OpenListEvent] Process exit - Code: \(code)")
+    }
+}
+#endif
 
 // MARK: - Log Callback
 
+#if canImport(Openlistlib)
 class OpenListLogCallback: NSObject, OpenlistlibLogCallbackProtocol {
     weak var eventAPI: Event?
 
@@ -207,3 +278,21 @@ class OpenListLogCallback: NSObject, OpenlistlibLogCallbackProtocol {
         }
     }
 }
+#else
+class OpenListLogCallback: NSObject, OpenlistlibLogCallbackProtocol {
+    weak var eventAPI: Event?
+
+    func onLog(_ level: Int16, time: Int64, message: String?) {
+        let logMessage = message ?? ""
+        print("[OpenListLog] Level: \(level), Message: \(logMessage)")
+
+        if let api = eventAPI {
+            api.onServerLog(level: Int64(level), time: "\(time)", log: logMessage) { result in
+                if case .failure(let error) = result {
+                    print("[OpenListLog] Failed to send log to Flutter: \(error)")
+                }
+            }
+        }
+    }
+}
+#endif
