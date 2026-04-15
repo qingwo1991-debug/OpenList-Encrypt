@@ -385,6 +385,9 @@ jobs:
           flutter clean
           rm -rf ios/Pods ios/Podfile.lock ios/.symlinks
 
+          # Regenerate Flutter configuration files required by pod install
+          flutter pub get
+
           # Install pods
           cd ios
           pod install
