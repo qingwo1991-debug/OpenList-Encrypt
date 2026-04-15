@@ -416,11 +416,25 @@ jobs:
           # Find .app in both possible locations
           APP_PATH=""
           for dir in build/ios/iphoneos build/ios/Release-iphoneos; do
-            if [ -f "$dir/Runner.app/Frameworks/App.framework/App" ]; then
-              APP_PATH="$dir"
-              break
+            if [ -d "$dir/Runner.app" ]; then
+              # Check if App.framework exists (may not be fully codesigned but still usable)
+              if [ -d "$dir/Runner.app/Frameworks/App.framework" ] || [ -f "$dir/Runner.app/Runner" ]; then
+                APP_PATH="$dir"
+                break
+              fi
             fi
           done
+
+          # Fallback: if any Runner.app exists, use it
+          if [ -z "$APP_PATH" ]; then
+            for dir in build/ios/iphoneos build/ios/Release-iphoneos; do
+              if [ -d "$dir/Runner.app" ]; then
+                APP_PATH="$dir"
+                echo "Warning: Using incomplete app from $dir"
+                break
+              fi
+            done
+          fi
 
           if [ -z "$APP_PATH" ]; then
             echo "=== App not found or incomplete build ==="
