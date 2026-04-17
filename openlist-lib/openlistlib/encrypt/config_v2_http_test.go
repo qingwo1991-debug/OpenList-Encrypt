@@ -54,11 +54,11 @@ func TestHandleConfigV2PostClampsAndPersists(t *testing.T) {
 	if p.config.ProbeTimeoutSeconds != 30 {
 		t.Fatalf("probe timeout clamp failed: %d", p.config.ProbeTimeoutSeconds)
 	}
-	if p.config.RangeCompatMinFailures != 1 {
-		t.Fatalf("range failures clamp failed: %d", p.config.RangeCompatMinFailures)
+	if p.config.RangeCompatMinFailures != fixedPlaybackRangeCompatMinFailures {
+		t.Fatalf("range failures should stay fixed: %d", p.config.RangeCompatMinFailures)
 	}
-	if p.config.ParallelDecryptConcurrency != 32 {
-		t.Fatalf("parallel clamp failed: %d", p.config.ParallelDecryptConcurrency)
+	if p.config.ParallelDecryptConcurrency != fixedPlaybackParallelDecryptConcurrency() {
+		t.Fatalf("parallel concurrency should stay fixed: %d", p.config.ParallelDecryptConcurrency)
 	}
 	if p.config.DBExportSyncIntervalSeconds != minDBExportSyncIntervalSecs {
 		t.Fatalf("sync interval clamp failed: %d", p.config.DBExportSyncIntervalSeconds)
