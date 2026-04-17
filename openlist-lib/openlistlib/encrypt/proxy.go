@@ -53,8 +53,6 @@ const (
 	maxParallelDecryptLimit = 32
 	// defaultRangeSkipMaxBytes 当上游不支持 Range 时，本地最多跳过的字节数
 	defaultRangeSkipMaxBytes = 256 * 1024 * 1024
-	// fixedVideoRangeSkipMaxBytes 视频播放固定的本地跳过上限
-	fixedVideoRangeSkipMaxBytes = 64 * 1024 * 1024
 	// rangePreferUpstreamStartBytes 当偏移超过该值时优先保留上游 Range，避免本地大跨度 skip
 	rangePreferUpstreamStartBytes = 4 * 1024 * 1024
 	// encryptedPrefetchMaxDirs 单次最多预热的子目录数
@@ -69,16 +67,8 @@ const (
 	defaultStreamEngineVersion = 2
 )
 
-const (
-	fixedPlaybackRangeCompatTTLMinutes    = 30 * 24 * 60
-	fixedPlaybackRangeCompatMinFailures   = 1
-	fixedPlaybackWebDAVNegativeTTLMinutes = 60
-	fixedPlaybackStreamBufferKB           = 2048
-	fixedPlaybackPlayFirstFallback        = true
-)
-
-// streamBufferSize 流传输缓冲区大小 (视频播放固定 2MB)
-var streamBufferSize = prefetchBufferSize
+// streamBufferSize 流传输缓冲区大小 (默认 512KB)
+var streamBufferSize = 512 * 1024
 
 func clampStreamBufferKB(kb int) int {
 	if kb < 32 {
@@ -88,33 +78,6 @@ func clampStreamBufferKB(kb int) int {
 		return 4096
 	}
 	return kb
-}
-
-func fixedPlaybackParallelDecryptConcurrency() int {
-	parallel := runtime.NumCPU() * 2
-	if parallel < 4 {
-		parallel = 4
-	}
-	if parallel > 16 {
-		parallel = 16
-	}
-	return parallel
-}
-
-func applyFixedPlaybackProfile(cfg *ProxyConfig) {
-	if cfg == nil {
-		return
-	}
-	cfg.PlayFirstFallback = fixedPlaybackPlayFirstFallback
-	cfg.EnableRangeCompatCache = true
-	cfg.RangeCompatTTL = fixedPlaybackRangeCompatTTLMinutes
-	cfg.RangeCompatMinFailures = fixedPlaybackRangeCompatMinFailures
-	cfg.RangeSkipMaxBytes = fixedVideoRangeSkipMaxBytes
-	cfg.EnableParallelDecrypt = true
-	cfg.ParallelDecryptConcurrency = fixedPlaybackParallelDecryptConcurrency()
-	cfg.StreamBufferKB = fixedPlaybackStreamBufferKB
-	cfg.WebDAVNegativeCacheTTLMinutes = fixedPlaybackWebDAVNegativeTTLMinutes
-	streamBufferSize = fixedPlaybackStreamBufferKB * 1024
 }
 
 func clampSeconds(v, def, minV, maxV int) int {
@@ -148,21 +111,6 @@ func parseRangeStart(rangeHeader string) (int64, bool) {
 		return 0, false
 	}
 	return start, true
-}
-
-func hasValidContentRangeHeader(header http.Header) bool {
-	if header == nil {
-		return false
-	}
-	raw := strings.TrimSpace(header.Get("Content-Range"))
-	if raw == "" || !strings.HasPrefix(strings.ToLower(raw), "bytes ") {
-		return false
-	}
-	parts := strings.SplitN(strings.TrimPrefix(raw, "bytes "), "/", 2)
-	if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
-		return false
-	}
-	return strings.Contains(parts[0], "-")
 }
 
 func pathScopeKey(rawPath string) string {
@@ -603,11 +551,20 @@ func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error)
 
 // 动态计算的并行解密数，根据 CPU 核心数自动调整
 var maxParallelDecrypt = func() int {
-	parallel := fixedPlaybackParallelDecryptConcurrency()
-	if parallel <= 0 {
+	numCPU := runtime.NumCPU()
+	if numCPU <= 0 {
+		// 无法获取核心数，使用默认值
 		return defaultParallelDecrypt
 	}
-	log.Infof("[%s] Auto-detected playback profile uses %d parallel decrypt workers", internal.TagServer, parallel)
+	// 并发数 = CPU 核心数 * 2，范围 [4, maxParallelDecryptLimit]
+	parallel := numCPU * 2
+	if parallel < 4 {
+		parallel = 4
+	}
+	if parallel > maxParallelDecryptLimit {
+		parallel = maxParallelDecryptLimit
+	}
+	log.Infof("[%s] Auto-detected %d CPU cores, using %d parallel decrypt workers", internal.TagServer, numCPU, parallel)
 	return parallel
 }()
 
@@ -633,10 +590,10 @@ var coverExtensions = map[string]bool{
 
 // 分级缓冲区池，根据文件大小选择合适的缓冲区
 var (
-	// largeBufferPool 大文件缓冲区池 (固定 2MB 视频缓冲)
+	// largeBufferPool 大文件缓冲区池 (512KB)
 	largeBufferPool = sync.Pool{
 		New: func() interface{} {
-			buf := make([]byte, fixedPlaybackStreamBufferKB*1024)
+			buf := make([]byte, streamBufferSize)
 			return &buf
 		},
 	}
@@ -957,13 +914,8 @@ type RedirectInfo struct {
 // copyWithBuffer 使用大缓冲区池进行高效复制（用于流媒体）
 func copyWithBuffer(dst io.Writer, src io.Reader) (int64, error) {
 	bufPtr := largeBufferPool.Get().(*[]byte)
-	if cap(*bufPtr) < streamBufferSize {
-		buf := make([]byte, streamBufferSize)
-		bufPtr = &buf
-	}
-	buf := (*bufPtr)[:streamBufferSize]
 	defer largeBufferPool.Put(bufPtr)
-	return io.CopyBuffer(dst, src, buf)
+	return io.CopyBuffer(dst, src, *bufPtr)
 }
 
 // copyWithSmallBuffer 使用小缓冲区池进行复制（用于小文件/API）
@@ -1129,63 +1081,59 @@ type ProxyConfig struct {
 
 // ProxyServer 加密代理服务器
 type ProxyServer struct {
-	config                    *ProxyConfig
-	httpClient                *http.Client
-	probeClient               *http.Client
-	streamClient              *http.Client
-	transport                 *http.Transport
-	h2cTransport              *http2.Transport // H2C Transport (如果启用)
-	server                    *http.Server
-	running                   bool
-	mutex                     sync.RWMutex
-	fileCache                 *shardedAnyMap
-	fileCacheCount            int64 // 缓存条目计数
-	redirectCache             *shardedAnyMap
-	sizeMapMu                 sync.RWMutex
-	sizeMap                   map[string]SizeMapEntry
-	sizeMapPath               string
-	sizeMapDirty              bool
-	sizeMapDone               chan struct{}
-	rangeCompatMu             sync.RWMutex
-	rangeCompat               map[string]time.Time
-	rangeCompatFailures       map[string]int
-	rangeProbeMu              sync.Mutex
-	rangeProbeTargets         map[string]rangeProbeTarget
-	rangeProbeQueue           chan string
-	rangeProbeDone            chan struct{}
-	rangeProbeWG              sync.WaitGroup
-	cleanupTicker             *time.Ticker
-	cleanupDone               chan struct{}
-	localStore                *localStore
-	metaSyncDone              chan struct{}
-	metaSyncWG                sync.WaitGroup
-	upstreamMu                sync.RWMutex
-	upstreamDownAt            time.Time
-	upstreamError             string
-	upstreamFailures          int
-	prefetchRecent            *shardedAnyMap // dirPath -> time.Time
-	webdavNegativeMu          sync.Mutex
-	webdavNegativeCache       map[string]time.Time // path -> expireAt
-	prefixRules               []encryptPrefixRule
-	routingMu                 sync.RWMutex
-	seenProviders             map[string]time.Time
-	seenDrivers               map[string]time.Time
-	storageDriverMap          map[string]string
-	storageMapExpireAt        time.Time
-	providerCatalog           map[string]string
-	providerSourceMask        map[string]int
-	catalogLastRefresh        time.Time
-	catalogLastError          string
-	catalogRefreshing         bool
-	catalogNextRefresh        time.Time
-	controlHTTPStats          upstreamHTTPStats
-	probeHTTPStats            upstreamHTTPStats
-	streamHTTPStats           upstreamHTTPStats
-	playFirstCount            uint64
-	webdavRangeDowngradeCount uint64
-	compatCacheHitCount       uint64
-	sizeCacheHitCount         uint64
-	localRangeResponseCount   uint64
+	config              *ProxyConfig
+	httpClient          *http.Client
+	probeClient         *http.Client
+	streamClient        *http.Client
+	transport           *http.Transport
+	h2cTransport        *http2.Transport // H2C Transport (如果启用)
+	server              *http.Server
+	running             bool
+	mutex               sync.RWMutex
+	fileCache           *shardedAnyMap
+	fileCacheCount      int64 // 缓存条目计数
+	redirectCache       *shardedAnyMap
+	sizeMapMu           sync.RWMutex
+	sizeMap             map[string]SizeMapEntry
+	sizeMapPath         string
+	sizeMapDirty        bool
+	sizeMapDone         chan struct{}
+	rangeCompatMu       sync.RWMutex
+	rangeCompat         map[string]time.Time
+	rangeCompatFailures map[string]int
+	rangeProbeMu        sync.Mutex
+	rangeProbeTargets   map[string]rangeProbeTarget
+	rangeProbeQueue     chan string
+	rangeProbeDone      chan struct{}
+	rangeProbeWG        sync.WaitGroup
+	cleanupTicker       *time.Ticker
+	cleanupDone         chan struct{}
+	localStore          *localStore
+	metaSyncDone        chan struct{}
+	metaSyncWG          sync.WaitGroup
+	upstreamMu          sync.RWMutex
+	upstreamDownAt      time.Time
+	upstreamError       string
+	upstreamFailures    int
+	prefetchRecent      *shardedAnyMap // dirPath -> time.Time
+	webdavNegativeMu    sync.Mutex
+	webdavNegativeCache map[string]time.Time // path -> expireAt
+	prefixRules         []encryptPrefixRule
+	routingMu           sync.RWMutex
+	seenProviders       map[string]time.Time
+	seenDrivers         map[string]time.Time
+	storageDriverMap    map[string]string
+	storageMapExpireAt  time.Time
+	providerCatalog     map[string]string
+	providerSourceMask  map[string]int
+	catalogLastRefresh  time.Time
+	catalogLastError    string
+	catalogRefreshing   bool
+	catalogNextRefresh  time.Time
+	controlHTTPStats    upstreamHTTPStats
+	probeHTTPStats      upstreamHTTPStats
+	streamHTTPStats     upstreamHTTPStats
+	playFirstCount      uint64
 }
 
 type ProviderRoutingRule struct {
@@ -1227,8 +1175,30 @@ func applyLearningDefaults(cfg *ProxyConfig) {
 	if cfg.SizeMapTTL <= 0 {
 		cfg.SizeMapTTL = defaultSizeMapTTLMinutes
 	}
+	if cfg.RangeCompatTTL <= 0 {
+		cfg.RangeCompatTTL = defaultRangeCompatTTLMinutes
+	}
+	if cfg.RangeCompatMinFailures <= 0 {
+		cfg.RangeCompatMinFailures = 2
+	}
+	if cfg.RangeSkipMaxBytes <= 0 {
+		cfg.RangeSkipMaxBytes = defaultRangeSkipMaxBytes
+	}
+	if cfg.ParallelDecryptConcurrency <= 0 {
+		cfg.ParallelDecryptConcurrency = 8
+	}
+	if cfg.StreamBufferKB <= 0 {
+		cfg.StreamBufferKB = 1024
+	}
 	if cfg.StreamEngineVersion <= 0 {
 		cfg.StreamEngineVersion = defaultStreamEngineVersion
+	}
+	// 旧配置兼容：缺省时启用播放优先兜底
+	if !cfg.PlayFirstFallback && cfg.WebDAVNegativeCacheTTLMinutes == 0 && cfg.ProbeStrategy == "" {
+		cfg.PlayFirstFallback = true
+	}
+	if cfg.WebDAVNegativeCacheTTLMinutes <= 0 {
+		cfg.WebDAVNegativeCacheTTLMinutes = 10
 	}
 	if cfg.LocalSizeRetentionDays <= 0 {
 		cfg.LocalSizeRetentionDays = defaultLocalSizeRetentionDays
@@ -1236,7 +1206,6 @@ func applyLearningDefaults(cfg *ProxyConfig) {
 	if cfg.LocalStrategyRetentionDays <= 0 {
 		cfg.LocalStrategyRetentionDays = defaultLocalStrategyRetentionDays
 	}
-	applyFixedPlaybackProfile(cfg)
 	cfg.RoutingMode = normalizeRoutingMode(cfg.RoutingMode)
 	if strings.TrimSpace(cfg.ProviderRuleSource) == "" {
 		cfg.ProviderRuleSource = "builtin+custom"
@@ -1312,7 +1281,6 @@ func (p *ProxyServer) webdavNegativeBlocked(requestPath string) bool {
 		delete(p.webdavNegativeCache, key)
 		return false
 	}
-	atomic.AddUint64(&p.compatCacheHitCount, 1)
 	return true
 }
 
@@ -1530,8 +1498,11 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		}
 	}
 
-	// Playback tuning is fixed for video-first WebDAV clients.
-	applyFixedPlaybackProfile(config)
+	// ProbeOnDownload is controlled by configuration / frontend; do not override here.
+	if config.StreamBufferKB > 0 {
+		effectiveKB := clampStreamBufferKB(config.StreamBufferKB)
+		streamBufferSize = effectiveKB * 1024
+	}
 
 	upstreamTimeout := time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 15, 2, 120)) * time.Second
 	probeTimeout := time.Duration(clampSeconds(config.ProbeTimeoutSeconds, 5, 1, 30)) * time.Second
@@ -2030,7 +2001,6 @@ func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
 	if value, ok := p.fileCache.Get(key); ok {
 		if cached, ok := value.(*CachedFileInfo); ok {
 			if time.Now().Before(cached.ExpireAt) {
-				atomic.AddUint64(&p.sizeCacheHitCount, 1)
 				return cached.Info, true
 			}
 			// 过期了，删除
@@ -2042,7 +2012,6 @@ func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
 		if value, ok := p.fileCache.Get(filePath); ok {
 			if cached, ok := value.(*CachedFileInfo); ok {
 				if time.Now().Before(cached.ExpireAt) {
-					atomic.AddUint64(&p.sizeCacheHitCount, 1)
 					return cached.Info, true
 				}
 				p.fileCache.Delete(filePath)
@@ -2050,7 +2019,6 @@ func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
 		}
 	}
 	if entry, ok := p.getSizeMap(key); ok {
-		atomic.AddUint64(&p.sizeCacheHitCount, 1)
 		info := &FileInfo{
 			Name:  path.Base(filePath),
 			Size:  entry.Size,
@@ -2371,7 +2339,11 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.config = config
-	applyFixedPlaybackProfile(p.config)
+	if p.config.StreamBufferKB > 0 {
+		effectiveKB := clampStreamBufferKB(p.config.StreamBufferKB)
+		p.config.StreamBufferKB = effectiveKB
+		streamBufferSize = effectiveKB * 1024
+	}
 	p.rebuildEncryptPathIndex()
 	if p.httpClient != nil {
 		p.httpClient.Timeout = p.upstreamTimeout()
@@ -3347,12 +3319,6 @@ func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
 			"enabled": p.config != nil && p.config.PlayFirstFallback,
 			"count":   atomic.LoadUint64(&p.playFirstCount),
 		},
-		"playback_metrics": map[string]interface{}{
-			"webdav_range_downgrades": atomic.LoadUint64(&p.webdavRangeDowngradeCount),
-			"compat_cache_hits":       atomic.LoadUint64(&p.compatCacheHitCount),
-			"size_cache_hits":         atomic.LoadUint64(&p.sizeCacheHitCount),
-			"local_range_responses":   atomic.LoadUint64(&p.localRangeResponseCount),
-		},
 		"local_store": map[string]interface{}{
 			"enabled":                  p.localStore != nil,
 			"size_entries":             localSizeCount,
@@ -3727,7 +3693,16 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				"probeStrategyFailureThreshold":   p.config.ProbeStrategyFailureThreshold,
 				"enableSizeMap":                   p.config.EnableSizeMap,
 				"sizeMapTtlMinutes":               p.config.SizeMapTTL,
+				"enableRangeCompatCache":          p.config.EnableRangeCompatCache,
+				"rangeCompatTtlMinutes":           p.config.RangeCompatTTL,
+				"rangeCompatMinFailures":          p.config.RangeCompatMinFailures,
+				"rangeSkipMaxBytes":               p.config.RangeSkipMaxBytes,
+				"playFirstFallback":               p.config.PlayFirstFallback,
+				"webdavNegativeCacheTtlMinutes":   p.config.WebDAVNegativeCacheTTLMinutes,
 				"redirectCacheTtlMinutes":         p.config.RedirectCacheTTLMinutes,
+				"enableParallelDecrypt":           p.config.EnableParallelDecrypt,
+				"parallelDecryptConcurrency":      p.config.ParallelDecryptConcurrency,
+				"streamBufferKb":                  p.config.StreamBufferKB,
 				"streamEngineVersion":             p.config.StreamEngineVersion,
 				"debugEnabled":                    p.config.DebugEnabled,
 				"debugLevel":                      p.config.DebugLevel,
@@ -3845,6 +3820,76 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if v, ok := bodyMap["enableRangeCompatCache"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.EnableRangeCompatCache = b
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["rangeCompatTtlMinutes"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.RangeCompatTTL = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.RangeCompatTTL = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["rangeCompatMinFailures"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.RangeCompatMinFailures = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.RangeCompatMinFailures = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["rangeSkipMaxBytes"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.RangeSkipMaxBytes = int64(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.ParseInt(vt, 10, 64); err == nil {
+					p.mutex.Lock()
+					p.config.RangeSkipMaxBytes = val
+					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["playFirstFallback"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.PlayFirstFallback = b
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["webdavNegativeCacheTtlMinutes"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.WebDAVNegativeCacheTTLMinutes = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.WebDAVNegativeCacheTTLMinutes = val
+					p.mutex.Unlock()
+				}
+			}
+		}
 		if v, ok := bodyMap["redirectCacheTtlMinutes"]; ok {
 			switch vt := v.(type) {
 			case float64:
@@ -3887,17 +3932,52 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if v, ok := bodyMap["streamEngineVersion"]; ok {
+		if v, ok := bodyMap["enableParallelDecrypt"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				p.mutex.Lock()
+				p.config.EnableParallelDecrypt = b
+				p.mutex.Unlock()
+			}
+		}
+		if v, ok := bodyMap["parallelDecryptConcurrency"]; ok {
 			switch vt := v.(type) {
 			case float64:
 				p.mutex.Lock()
-				p.config.StreamEngineVersion = int(vt)
+				p.config.ParallelDecryptConcurrency = int(vt)
 				p.mutex.Unlock()
 			case string:
 				if val, err := strconv.Atoi(vt); err == nil {
 					p.mutex.Lock()
-					p.config.StreamEngineVersion = val
+					p.config.ParallelDecryptConcurrency = val
 					p.mutex.Unlock()
+				}
+			}
+		}
+		if v, ok := bodyMap["streamBufferKb"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				p.mutex.Lock()
+				p.config.StreamBufferKB = int(vt)
+				p.mutex.Unlock()
+			case string:
+				if val, err := strconv.Atoi(vt); err == nil {
+					p.mutex.Lock()
+					p.config.StreamBufferKB = val
+					p.mutex.Unlock()
+				}
+			}
+			if v, ok := bodyMap["streamEngineVersion"]; ok {
+				switch vt := v.(type) {
+				case float64:
+					p.mutex.Lock()
+					p.config.StreamEngineVersion = int(vt)
+					p.mutex.Unlock()
+				case string:
+					if val, err := strconv.Atoi(vt); err == nil {
+						p.mutex.Lock()
+						p.config.StreamEngineVersion = val
+						p.mutex.Unlock()
+					}
 				}
 			}
 		}
@@ -6891,7 +6971,6 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 			if upstreamIsRange {
 				encryptor.SetPosition(startPos)
 			} else {
-				atomic.AddUint64(&p.localRangeResponseCount, 1)
 				if startPos > p.rangeSkipMaxBytes() {
 					log.Warnf("%s handleDownload: skip exceeds limit start=%d limit=%d upstreamRange=%v status=%d contentRange=%q path=%s",
 						internal.LogPrefix(ctx, internal.TagDecrypt), startPos, p.rangeSkipMaxBytes(), upstreamIsRange, resp.StatusCode, resp.Header.Get("Content-Range"), filePath)
@@ -7493,19 +7572,6 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 
 	// 6. 处理 GET 下载解密
 	if r.Method == "GET" && encPath != nil {
-		hasClientRange := clientRangeHeader != ""
-		validContentRange := hasValidContentRangeHeader(resp.Header)
-		if hasClientRange {
-			switch {
-			case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
-				p.markRangeIncompatible(targetURL, filePath)
-			case resp.StatusCode == http.StatusPartialContent && !validContentRange:
-				p.markRangeIncompatible(targetURL, filePath)
-			case resp.StatusCode == http.StatusOK && !validContentRange:
-				p.markRangeIncompatible(targetURL, filePath)
-			}
-		}
-
 		// 只有响应状态码是 2xx 时才尝试解密
 		// 非 2xx 状态码（如 4xx、5xx 错误）直接透传，不尝试解密
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -7627,21 +7693,19 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				return
 			}
 
-			upstreamIsRange := resp.StatusCode == http.StatusPartialContent || validContentRange
+			upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
 			if clientRangeHeader != "" && !upstreamIsRange {
 				p.markRangeIncompatible(targetURL, filePath)
 			} else if clientRangeHeader != "" && upstreamIsRange {
 				p.markRangeCompatible(targetURL, filePath)
 			}
 			if clientRangeHeader != "" && !upstreamIsRange && startPos > 0 {
-				atomic.AddUint64(&p.webdavRangeDowngradeCount, 1)
 				endPos := fileSize - 1
 				if endPos >= startPos {
 					statusCode = http.StatusPartialContent
 					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, endPos, fileSize))
 					w.Header().Set("Content-Length", strconv.FormatInt(fileSize-startPos, 10))
 					w.Header().Set("Accept-Ranges", "bytes")
-					atomic.AddUint64(&p.localRangeResponseCount, 1)
 				} else {
 					startPos = 0
 				}

@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
-	"sync/atomic"
 )
 
 type PlayOrchestrator struct {
@@ -217,14 +216,9 @@ func (p *ProxyServer) handlePlayStats(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"code": 200,
 		"data": map[string]interface{}{
-			"streamEngineVersion":   p.streamEngineVersion(),
-			"rangeCompatEntries":    rangeCompatCount,
-			"rangeProbeTargets":     targetCount,
-			"webdavRangeDowngrades": atomic.LoadUint64(&p.webdavRangeDowngradeCount),
-			"compatCacheHits":       atomic.LoadUint64(&p.compatCacheHitCount),
-			"sizeCacheHits":         atomic.LoadUint64(&p.sizeCacheHitCount),
-			"localRangeResponses":   atomic.LoadUint64(&p.localRangeResponseCount),
-			"playFirstFallbacks":    atomic.LoadUint64(&p.playFirstCount),
+			"streamEngineVersion": p.streamEngineVersion(),
+			"rangeCompatEntries":  rangeCompatCount,
+			"rangeProbeTargets":   targetCount,
 		},
 	})
 }

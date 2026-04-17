@@ -56,6 +56,12 @@ func configV2Docs() []configDocItem {
 		{Key: "providerCatalogEnabled", Label: "Provider目录缓存", Description: "启用 provider 目录缓存与后台刷新", Default: defaults.ProviderCatalogEnabled},
 		{Key: "providerCatalogTtlMinutes", Label: "Provider目录TTL", Description: "provider 目录后台刷新周期", Min: 5, Max: 10080, Default: defaults.ProviderCatalogTTLMinutes, Unit: "分钟"},
 		{Key: "providerCatalogBootstrapOnStart", Label: "启动刷新目录", Description: "服务启动后异步刷新 provider 目录", Default: defaults.ProviderCatalogBootstrapOnStart},
+		{Key: "rangeCompatTtlMinutes", Label: "Range缓存TTL", Description: "Range不兼容缓存有效期", Min: 1, Max: 43200, Default: defaults.RangeCompatTTL, Unit: "分钟"},
+		{Key: "rangeCompatMinFailures", Label: "Range失败阈值", Description: "连续失败达到该值后标记不兼容", Min: 1, Max: 20, Default: defaults.RangeCompatMinFailures, Unit: "次"},
+		{Key: "rangeSkipMaxBytes", Label: "Range跳过上限", Description: "上游忽略Range时本地可跳过字节上限", Min: int64(1 << 20), Max: int64(2 << 30), Default: defaults.RangeSkipMaxBytes, Unit: "字节"},
+		{Key: "parallelDecryptConcurrency", Label: "并行解密并发", Description: "大文件并行解密线程数", Min: 1, Max: 32, Default: defaults.ParallelDecryptConcurrency},
+		{Key: "streamBufferKb", Label: "流缓冲", Description: "流式解密缓冲区大小", Min: 64, Max: 4096, Default: defaults.StreamBufferKB, Unit: "KB"},
+		{Key: "webdavNegativeCacheTtlMinutes", Label: "WebDAV负缓存", Description: "WebDAV 404 负缓存时长", Min: 1, Max: 1440, Default: defaults.WebDAVNegativeCacheTTLMinutes, Unit: "分钟"},
 		{Key: "dbExportSyncIntervalSeconds", Label: "同步周期", Description: "DB_EXPORT 增量同步轮询间隔", Min: minDBExportSyncIntervalSecs, Max: 3600, Default: defaults.DBExportSyncIntervalSeconds, Unit: "秒"},
 		{Key: "localSizeRetentionDays", Label: "Size保留", Description: "本地 size 记录保留时长", Min: 1, Max: 3650, Default: defaults.LocalSizeRetentionDays, Unit: "天"},
 		{Key: "localStrategyRetentionDays", Label: "策略保留", Description: "本地 strategy 记录保留时长", Min: 1, Max: 3650, Default: defaults.LocalStrategyRetentionDays, Unit: "天"},
@@ -102,6 +108,15 @@ func (p *ProxyServer) exportConfigV2() map[string]any {
 		"providerCatalogBootstrapOnStart": cfg.ProviderCatalogBootstrapOnStart,
 		"storageMapRefreshMinutes":        cfg.StorageMapRefreshMinutes,
 		"providerRoutingRules":            routingRules,
+		"playFirstFallback":               cfg.PlayFirstFallback,
+		"enableRangeCompatCache":          cfg.EnableRangeCompatCache,
+		"rangeCompatTtlMinutes":           cfg.RangeCompatTTL,
+		"rangeCompatMinFailures":          cfg.RangeCompatMinFailures,
+		"rangeSkipMaxBytes":               cfg.RangeSkipMaxBytes,
+		"enableParallelDecrypt":           cfg.EnableParallelDecrypt,
+		"parallelDecryptConcurrency":      cfg.ParallelDecryptConcurrency,
+		"streamBufferKb":                  cfg.StreamBufferKB,
+		"webdavNegativeCacheTtlMinutes":   cfg.WebDAVNegativeCacheTTLMinutes,
 		"enableH2C":                       cfg.EnableH2C,
 		"enableDbExportSync":              cfg.EnableDBExportSync,
 		"dbExportBaseUrl":                 cfg.DBExportBaseURL,
@@ -226,6 +241,33 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 	}
 	if v, ok := parseIntAny(body["storageMapRefreshMinutes"]); ok {
 		p.config.StorageMapRefreshMinutes = clampInt(v, 1, 1440)
+	}
+	if v, ok := body["playFirstFallback"].(bool); ok {
+		p.config.PlayFirstFallback = v
+	}
+	if v, ok := body["enableRangeCompatCache"].(bool); ok {
+		p.config.EnableRangeCompatCache = v
+	}
+	if v, ok := parseIntAny(body["rangeCompatTtlMinutes"]); ok {
+		p.config.RangeCompatTTL = clampInt(v, 1, 43200)
+	}
+	if v, ok := parseIntAny(body["rangeCompatMinFailures"]); ok {
+		p.config.RangeCompatMinFailures = clampInt(v, 1, 20)
+	}
+	if v, ok := parseInt64Any(body["rangeSkipMaxBytes"]); ok {
+		p.config.RangeSkipMaxBytes = clampInt64(v, 1<<20, 2<<30)
+	}
+	if v, ok := body["enableParallelDecrypt"].(bool); ok {
+		p.config.EnableParallelDecrypt = v
+	}
+	if v, ok := parseIntAny(body["parallelDecryptConcurrency"]); ok {
+		p.config.ParallelDecryptConcurrency = clampInt(v, 1, 32)
+	}
+	if v, ok := parseIntAny(body["streamBufferKb"]); ok {
+		p.config.StreamBufferKB = clampInt(v, 64, 4096)
+	}
+	if v, ok := parseIntAny(body["webdavNegativeCacheTtlMinutes"]); ok {
+		p.config.WebDAVNegativeCacheTTLMinutes = clampInt(v, 1, 1440)
 	}
 	if v, ok := body["enableH2C"].(bool); ok {
 		p.config.EnableH2C = v

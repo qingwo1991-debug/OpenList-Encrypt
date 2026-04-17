@@ -33,13 +33,13 @@ func TestSetAdvancedConfigFromJSON_Persisted(t *testing.T) {
 		t.Fatalf("reload config failed: %v", err)
 	}
 	cfg := reloaded.GetConfig()
-	if !cfg.EnableParallelDecrypt || cfg.ParallelDecryptConcurrency != fixedPlaybackParallelDecryptConcurrency() {
+	if !cfg.EnableParallelDecrypt || cfg.ParallelDecryptConcurrency != 8 {
 		t.Fatalf("unexpected parallel decrypt config: enabled=%v conc=%d", cfg.EnableParallelDecrypt, cfg.ParallelDecryptConcurrency)
 	}
-	if !cfg.EnableRangeCompatCache || cfg.RangeCompatMinFailures != fixedPlaybackRangeCompatMinFailures || cfg.RangeSkipMaxBytes != fixedVideoRangeSkipMaxBytes {
+	if !cfg.EnableRangeCompatCache || cfg.RangeCompatMinFailures != 2 || cfg.RangeSkipMaxBytes != defaultRangeSkipMaxBytes {
 		t.Fatalf("unexpected range config: enabled=%v min=%d skip=%d", cfg.EnableRangeCompatCache, cfg.RangeCompatMinFailures, cfg.RangeSkipMaxBytes)
 	}
-	if cfg.StreamBufferKB != fixedPlaybackStreamBufferKB {
+	if cfg.StreamBufferKB != 1024 {
 		t.Fatalf("unexpected stream buffer: %d", cfg.StreamBufferKB)
 	}
 }
@@ -62,19 +62,19 @@ func TestSetAdvancedConfigFromJSON_ClampDefaults(t *testing.T) {
 		t.Fatalf("SetAdvancedConfigFromJSON failed: %v", err)
 	}
 	cfg := manager.GetConfig()
-	if cfg.RangeCompatMinFailures != fixedPlaybackRangeCompatMinFailures {
+	if cfg.RangeCompatMinFailures != 2 {
 		t.Fatalf("unexpected range min failures: %d", cfg.RangeCompatMinFailures)
 	}
-	if cfg.RangeSkipMaxBytes != fixedVideoRangeSkipMaxBytes {
+	if cfg.RangeSkipMaxBytes != defaultRangeSkipMaxBytes {
 		t.Fatalf("unexpected range skip max bytes: %d", cfg.RangeSkipMaxBytes)
 	}
-	if cfg.ParallelDecryptConcurrency != fixedPlaybackParallelDecryptConcurrency() {
+	if cfg.ParallelDecryptConcurrency != 8 {
 		t.Fatalf("unexpected parallel decrypt concurrency: %d", cfg.ParallelDecryptConcurrency)
 	}
-	if cfg.StreamBufferKB != fixedPlaybackStreamBufferKB {
+	if cfg.StreamBufferKB != 1024 {
 		t.Fatalf("unexpected stream buffer kb: %d", cfg.StreamBufferKB)
 	}
-	if cfg.WebDAVNegativeCacheTTLMinutes != fixedPlaybackWebDAVNegativeTTLMinutes {
+	if cfg.WebDAVNegativeCacheTTLMinutes != 10 {
 		t.Fatalf("unexpected webdav negative ttl: %d", cfg.WebDAVNegativeCacheTTLMinutes)
 	}
 }
@@ -104,10 +104,10 @@ func TestLoadLegacyDefaultsForBoolAdvancedFlags(t *testing.T) {
 	if !cfg.EnableRangeCompatCache {
 		t.Fatalf("expected legacy default enableRangeCompatCache=true")
 	}
-	if cfg.ParallelDecryptConcurrency != fixedPlaybackParallelDecryptConcurrency() || cfg.StreamBufferKB != fixedPlaybackStreamBufferKB {
+	if cfg.ParallelDecryptConcurrency != 8 || cfg.StreamBufferKB != 1024 {
 		t.Fatalf("unexpected parallel defaults: conc=%d stream=%d", cfg.ParallelDecryptConcurrency, cfg.StreamBufferKB)
 	}
-	if cfg.RangeCompatMinFailures != fixedPlaybackRangeCompatMinFailures || cfg.RangeSkipMaxBytes != fixedVideoRangeSkipMaxBytes {
+	if cfg.RangeCompatMinFailures != 2 || cfg.RangeSkipMaxBytes != defaultRangeSkipMaxBytes {
 		t.Fatalf("unexpected range defaults: min=%d skip=%d", cfg.RangeCompatMinFailures, cfg.RangeSkipMaxBytes)
 	}
 }

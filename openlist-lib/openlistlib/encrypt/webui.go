@@ -510,12 +510,39 @@ const webUIHTML = `
                             </label>
                             启用长期文件大小映射缓存
                         </label>
-                        <div class="form-group" style="margin-bottom:0;">
-                            <label>映射缓存 TTL（分钟）</label>
-                            <input type="number" id="size-map-ttl" placeholder="1440">
+                        <div class="form-row">
+                            <div class="form-group" style="margin-bottom:0;">
+                                <label>映射缓存 TTL（分钟）</label>
+                                <input type="number" id="size-map-ttl" placeholder="1440">
+                            </div>
+                            <div class="form-group" style="margin-bottom:0;">
+                                <label>Range 兼容缓存 TTL（分钟）</label>
+                                <input type="number" id="range-compat-ttl" placeholder="60">
+                            </div>
                         </div>
-                        <div style="color:#666; font-size:0.9em;">
-                            视频播放策略已固定为高性能兼容模式：长期 Range 兼容缓存、并行解密、2MB 流缓冲与更积极的 WebDAV 回退已在后端启用。
+                        <label style="display: flex; align-items: center; gap: 10px;">
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="enable-range-compat">
+                                <span class="toggle-slider"></span>
+                            </label>
+                            记录不支持 Range 的上游并降级
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 10px;">
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="enable-parallel-decrypt">
+                                <span class="toggle-slider"></span>
+                            </label>
+                            启用并行解密（大文件）
+                        </label>
+                        <div class="form-row">
+                            <div class="form-group" style="margin-bottom:0;">
+                                <label>并行解密并发数</label>
+                                <input type="number" id="parallel-decrypt-concurrency" placeholder="4">
+                            </div>
+                            <div class="form-group" style="margin-bottom:0;">
+                                <label>流式缓冲区（KB）</label>
+                                <input type="number" id="stream-buffer-kb" placeholder="512">
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -641,6 +668,11 @@ const webUIHTML = `
                         if (data.data.probeOnDownload !== undefined) document.getElementById('probe-download').checked = data.data.probeOnDownload;
                         if (data.data.enableSizeMap !== undefined) document.getElementById('enable-size-map').checked = data.data.enableSizeMap;
                         if (data.data.sizeMapTtlMinutes !== undefined) document.getElementById('size-map-ttl').value = data.data.sizeMapTtlMinutes;
+                        if (data.data.enableRangeCompatCache !== undefined) document.getElementById('enable-range-compat').checked = data.data.enableRangeCompatCache;
+                        if (data.data.rangeCompatTtlMinutes !== undefined) document.getElementById('range-compat-ttl').value = data.data.rangeCompatTtlMinutes;
+                        if (data.data.enableParallelDecrypt !== undefined) document.getElementById('enable-parallel-decrypt').checked = data.data.enableParallelDecrypt;
+                        if (data.data.parallelDecryptConcurrency !== undefined) document.getElementById('parallel-decrypt-concurrency').value = data.data.parallelDecryptConcurrency;
+                        if (data.data.streamBufferKb !== undefined) document.getElementById('stream-buffer-kb').value = data.data.streamBufferKb;
                         renderPaths();
                     }
                 } catch (error) {
@@ -683,6 +715,11 @@ const webUIHTML = `
             const probe = document.getElementById('probe-download').checked;
             const enableSizeMap = document.getElementById('enable-size-map').checked;
             const sizeMapTtlMinutes = parseInt(document.getElementById('size-map-ttl').value) || 0;
+            const enableRangeCompatCache = document.getElementById('enable-range-compat').checked;
+            const rangeCompatTtlMinutes = parseInt(document.getElementById('range-compat-ttl').value) || 0;
+            const enableParallelDecrypt = document.getElementById('enable-parallel-decrypt').checked;
+            const parallelDecryptConcurrency = parseInt(document.getElementById('parallel-decrypt-concurrency').value) || 0;
+            const streamBufferKb = parseInt(document.getElementById('stream-buffer-kb').value) || 0;
 
             try {
                 const response = await fetch('/api/encrypt/config', {
@@ -694,7 +731,12 @@ const webUIHTML = `
                         alistHttps: https,
                         probeOnDownload: probe,
                         enableSizeMap: enableSizeMap,
-                        sizeMapTtlMinutes: sizeMapTtlMinutes
+                        sizeMapTtlMinutes: sizeMapTtlMinutes,
+                        enableRangeCompatCache: enableRangeCompatCache,
+                        rangeCompatTtlMinutes: rangeCompatTtlMinutes,
+                        enableParallelDecrypt: enableParallelDecrypt,
+                        parallelDecryptConcurrency: parallelDecryptConcurrency,
+                        streamBufferKb: streamBufferKb
                     })
                 });
 

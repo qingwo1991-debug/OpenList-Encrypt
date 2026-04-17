@@ -46,15 +46,15 @@ func DefaultConfig() *ProxyConfig {
 		EnableSizeMap:                   true,
 		SizeMapTTL:                      defaultSizeMapTTLMinutes,
 		EnableRangeCompatCache:          true,
-		RangeCompatTTL:                  fixedPlaybackRangeCompatTTLMinutes,
-		RangeCompatMinFailures:          fixedPlaybackRangeCompatMinFailures,
-		RangeSkipMaxBytes:               fixedVideoRangeSkipMaxBytes,
-		PlayFirstFallback:               fixedPlaybackPlayFirstFallback,
-		WebDAVNegativeCacheTTLMinutes:   fixedPlaybackWebDAVNegativeTTLMinutes,
+		RangeCompatTTL:                  defaultRangeCompatTTLMinutes,
+		RangeCompatMinFailures:          2,
+		RangeSkipMaxBytes:               defaultRangeSkipMaxBytes,
+		PlayFirstFallback:               true,
+		WebDAVNegativeCacheTTLMinutes:   10,
 		RedirectCacheTTLMinutes:         1440,
 		EnableParallelDecrypt:           true,
-		ParallelDecryptConcurrency:      fixedPlaybackParallelDecryptConcurrency(),
-		StreamBufferKB:                  fixedPlaybackStreamBufferKB,
+		ParallelDecryptConcurrency:      8,
+		StreamBufferKB:                  1024,
 		StreamEngineVersion:             defaultStreamEngineVersion,
 		DebugEnabled:                    false,
 		DebugLevel:                      "info",
@@ -131,6 +131,13 @@ func (m *ConfigManager) Load() error {
 	rawProbeTimeout := config.ProbeTimeoutSeconds
 	rawProbeBudget := config.ProbeBudgetSeconds
 	rawBackoff := config.UpstreamBackoffSeconds
+	rawEnableParallelDecrypt := config.EnableParallelDecrypt
+	rawParallelDecryptConcurrency := config.ParallelDecryptConcurrency
+	rawStreamBufferKB := config.StreamBufferKB
+	rawEnableRangeCompatCache := config.EnableRangeCompatCache
+	rawRangeCompatTTL := config.RangeCompatTTL
+	rawRangeCompatMinFailures := config.RangeCompatMinFailures
+	rawRangeSkipMaxBytes := config.RangeSkipMaxBytes
 	if config.UpstreamTimeoutSeconds <= 0 {
 		config.UpstreamTimeoutSeconds = 15
 	}
@@ -187,8 +194,38 @@ func (m *ConfigManager) Load() error {
 	if config.SizeMapTTL <= 0 {
 		config.SizeMapTTL = defaultSizeMapTTLMinutes
 	}
+	if config.RangeCompatTTL <= 0 {
+		config.RangeCompatTTL = defaultRangeCompatTTLMinutes
+	}
+	if config.RangeCompatMinFailures <= 0 {
+		config.RangeCompatMinFailures = 2
+	}
+	if config.RangeSkipMaxBytes <= 0 {
+		config.RangeSkipMaxBytes = defaultRangeSkipMaxBytes
+	}
+	if config.ParallelDecryptConcurrency <= 0 {
+		config.ParallelDecryptConcurrency = 8
+	}
+	if config.StreamBufferKB <= 0 {
+		config.StreamBufferKB = 1024
+	}
 	if config.StreamEngineVersion <= 0 {
 		config.StreamEngineVersion = defaultStreamEngineVersion
+	}
+	if !config.EnableParallelDecrypt && !rawEnableParallelDecrypt &&
+		rawParallelDecryptConcurrency == 0 && rawStreamBufferKB == 0 {
+		config.EnableParallelDecrypt = true
+	}
+	if !config.EnableRangeCompatCache && !rawEnableRangeCompatCache &&
+		rawRangeCompatTTL == 0 && rawRangeCompatMinFailures == 0 && rawRangeSkipMaxBytes == 0 {
+		config.EnableRangeCompatCache = true
+	}
+	// 旧配置兼容：未配置时启用播放优先兜底
+	if !config.PlayFirstFallback && config.WebDAVNegativeCacheTTLMinutes == 0 {
+		config.PlayFirstFallback = true
+	}
+	if config.WebDAVNegativeCacheTTLMinutes <= 0 {
+		config.WebDAVNegativeCacheTTLMinutes = 10
 	}
 	if config.RedirectCacheTTLMinutes <= 0 {
 		config.RedirectCacheTTLMinutes = 1440
@@ -208,7 +245,6 @@ func (m *ConfigManager) Load() error {
 	if !config.DebugMaskSensitive && !config.DebugEnabled && config.DebugLogBodyBytes == 0 {
 		config.DebugMaskSensitive = true
 	}
-	applyFixedPlaybackProfile(&config)
 
 	m.config = &config
 	log.Info("[" + internal.TagConfig + "] Config loaded successfully")
@@ -375,6 +411,50 @@ func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	if payload.PlayFirstFallback != nil {
+		m.config.PlayFirstFallback = *payload.PlayFirstFallback
+	}
+	if payload.EnableRangeCompatCache != nil {
+		m.config.EnableRangeCompatCache = *payload.EnableRangeCompatCache
+	}
+	if payload.RangeCompatTTLMinutes != nil {
+		if *payload.RangeCompatTTLMinutes <= 0 {
+			m.config.RangeCompatTTL = defaultRangeCompatTTLMinutes
+		} else {
+			m.config.RangeCompatTTL = *payload.RangeCompatTTLMinutes
+		}
+	}
+	if payload.RangeCompatMinFailures != nil {
+		if *payload.RangeCompatMinFailures <= 0 {
+			m.config.RangeCompatMinFailures = 2
+		} else {
+			m.config.RangeCompatMinFailures = *payload.RangeCompatMinFailures
+		}
+	}
+	if payload.RangeSkipMaxBytes != nil {
+		if *payload.RangeSkipMaxBytes <= 0 {
+			m.config.RangeSkipMaxBytes = defaultRangeSkipMaxBytes
+		} else {
+			m.config.RangeSkipMaxBytes = *payload.RangeSkipMaxBytes
+		}
+	}
+	if payload.EnableParallelDecrypt != nil {
+		m.config.EnableParallelDecrypt = *payload.EnableParallelDecrypt
+	}
+	if payload.ParallelDecryptConcurrency != nil {
+		if *payload.ParallelDecryptConcurrency <= 0 {
+			m.config.ParallelDecryptConcurrency = 8
+		} else {
+			m.config.ParallelDecryptConcurrency = *payload.ParallelDecryptConcurrency
+		}
+	}
+	if payload.StreamBufferKB != nil {
+		if *payload.StreamBufferKB <= 0 {
+			m.config.StreamBufferKB = 1024
+		} else {
+			m.config.StreamBufferKB = *payload.StreamBufferKB
+		}
+	}
 	if payload.StreamEngineVersion != nil {
 		if *payload.StreamEngineVersion <= 0 {
 			m.config.StreamEngineVersion = defaultStreamEngineVersion
@@ -382,16 +462,13 @@ func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
 			m.config.StreamEngineVersion = *payload.StreamEngineVersion
 		}
 	}
-	_ = payload.PlayFirstFallback
-	_ = payload.EnableRangeCompatCache
-	_ = payload.RangeCompatTTLMinutes
-	_ = payload.RangeCompatMinFailures
-	_ = payload.RangeSkipMaxBytes
-	_ = payload.EnableParallelDecrypt
-	_ = payload.ParallelDecryptConcurrency
-	_ = payload.StreamBufferKB
-	_ = payload.WebDAVNegativeCacheTTLMinutes
-	applyFixedPlaybackProfile(m.config)
+	if payload.WebDAVNegativeCacheTTLMinutes != nil {
+		if *payload.WebDAVNegativeCacheTTLMinutes <= 0 {
+			m.config.WebDAVNegativeCacheTTLMinutes = 10
+		} else {
+			m.config.WebDAVNegativeCacheTTLMinutes = *payload.WebDAVNegativeCacheTTLMinutes
+		}
+	}
 
 	return m.saveConfigLocked()
 }
