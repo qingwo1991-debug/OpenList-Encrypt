@@ -78,7 +78,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '16'
+          node-version: '18'
 
       - name: Build and Setup WebUI
         env:
@@ -256,4 +256,188 @@ jobs:
         with:
           name: release-apks
           path: build/app/outputs/flutter-apk/OpenList-Encrypt-*.apk
+          if-no-files-found: warn
+
+  build-ios:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            VERSION="ci-$(date +%Y.%m.%d).${GITHUB_RUN_NUMBER}"
+          else
+            VERSION="v$(date +%Y.%m.%d).${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          VERSION_NAME="${VERSION#v}"
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_OUTPUT
+          BUILD_NUMBER=$(date +%y%m%d%H)
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Build and Setup WebUI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Initializing OpenList Frontend..."
+          cd openlist-lib/scripts
+          chmod +x init_web.sh
+          ./init_web.sh
+          cd ../..
+          echo "OpenList Web installed to public/dist:"
+          ls -la openlist-lib/public/dist
+
+          echo "Building Encrypt WebUI..."
+          npm install -g pnpm@7.9.0
+          cd enc-webui
+          pnpm install --ignore-scripts
+          npm run build
+          mkdir -p ../openlist-lib/public/dist/enc
+          cp -r dist/* ../openlist-lib/public/dist/enc/
+          echo "Encrypt WebUI built and copied to public/dist/enc:"
+          ls -la ../openlist-lib/public/dist/enc/
+          rm -rf node_modules
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+          cache-dependency-path: openlist-lib/go.sum
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH=$PATH:$(go env GOPATH)/bin
+          gomobile init
+
+      - name: Build Go XCFramework for iOS
+        run: |
+          cd openlist-lib
+          export PATH=$PATH:$(go env GOPATH)/bin
+          export CGO_ENABLED=1
+
+          echo "Building iOS XCFramework..."
+          gomobile bind -v \
+            -target=ios \
+            -ldflags="-s -w" \
+            -o Openlistlib.xcframework \
+            ./openlistlib 2>&1 | tee ios_build.log || {
+              echo "Error: gomobile bind failed!"
+              cat ios_build.log
+              exit 1
+            }
+
+          echo "XCFramework created:"
+          ls -la *.xcframework
+
+          mkdir -p ../ios/Frameworks
+          cp -rf *.xcframework ../ios/Frameworks/
+          echo "XCFramework copied to ios/Frameworks:"
+          ls -la ../ios/Frameworks/
+
+      - name: Generate Pigeon code
+        run: |
+          flutter pub get
+          dart run pigeon \
+            --input pigeons/pigeon.dart \
+            --dart_out lib/generated_api.dart \
+            --swift_out ios/Runner/ \
+            --swift_prefix "" || echo "Pigeon Swift generation skipped or failed"
+
+      - name: Install CocoaPods dependencies
+        run: |
+          cd ios
+          pod install || echo "pod install failed, continuing anyway"
+          cd ..
+
+      - name: Build iOS IPA (No Code Signing for sideloading)
+        run: |
+          set +e  # Don't exit on flutter build error (signing warning)
+
+          echo "=== Project root: $(pwd) ==="
+
+          # Clean previous build
+          flutter clean
+          rm -rf ios/Pods ios/Podfile.lock ios/.symlinks
+
+          # Install pods
+          cd ios
+          pod install
+          cd ..
+
+          # Build iOS (exits with error due to no dev team, but still produces output)
+          flutter build ios --release --no-codesign \
+            --build-name=${{ steps.version.outputs.VERSION_NAME }} \
+            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee ios_build.log
+          FLUTTER_EXIT=${PIPESTATUS[0]}
+          echo "flutter build ios exit code: $FLUTTER_EXIT"
+
+          # Find .app in both possible locations
+          APP_PATH=""
+          for dir in build/ios/iphoneos build/ios/Release-iphoneos; do
+            if [ -f "$dir/Runner.app/Frameworks/App.framework/App" ]; then
+              APP_PATH="$dir"
+              break
+            fi
+          done
+
+          if [ -z "$APP_PATH" ]; then
+            echo "=== App not found or incomplete build ==="
+            echo "Checking for any .app directories:"
+            find build/ios -name "*.app" -type d 2>/dev/null
+            echo "Checking build/ios/iphoneos:"
+            ls -la build/ios/iphoneos/ 2>/dev/null || echo "  (does not exist)"
+            echo "Checking build/ios/Release-iphoneos:"
+            ls -la build/ios/Release-iphoneos/ 2>/dev/null || echo "  (does not exist)"
+            echo "=== Last 200 lines of build log ==="
+            tail -200 ios_build.log
+            exit 1
+          fi
+
+          APP_SIZE=$(du -sm "$APP_PATH/Runner.app" | awk '{print $1}')
+          echo "=== Runner.app in: $APP_PATH, size: ${APP_SIZE}MB ==="
+
+          # Create IPA
+          cd "$APP_PATH"
+          mkdir -p Payload
+          cp -r Runner.app Payload/
+          IPA_NAME="OpenList-Encrypt-${{ steps.version.outputs.VERSION }}-ios.ipa"
+          zip -qr "$IPA_NAME" Payload/
+          mv "$IPA_NAME" ../../
+          cd ../..
+
+          FINAL_SIZE=$(du -sm "$IPA_NAME" | awk '{print $1}')
+          echo "=== IPA: $IPA_NAME (${FINAL_SIZE}MB) ==="
+          ls -lh "$IPA_NAME"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-ios-ipa
+          path: OpenList-Encrypt-*-ios.ipa
           if-no-files-found: warn

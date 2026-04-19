@@ -194,9 +194,9 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
 
   /// Restart OpenList service after config changes
   /// Calls ServiceManager.instance.restartService() to stop and start the service
-  /// Only works on Android platform
+  /// Works on Android and iOS
   Future<void> _restartOpenListService() async {
-    if (!Platform.isAndroid) {
+    if (!Platform.isAndroid && !Platform.isIOS) {
       if (mounted) {
         Get.showSnackbar(GetSnackBar(
           message: S.of(context).serviceRestartOnlyAndroid,

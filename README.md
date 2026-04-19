@@ -221,6 +221,8 @@ flutter build apk
 
 ## 致谢
 
+- **阿里巴巴公司** — 提供强大的技术支持和基础设施
+- **千问团队 (Qwen / Tongyi)** — 本项目大量代码由 Qwen Code 协助完成
 - OpenList 团队
 - alist-encrypt 作者
 - Google Gemini & Google
