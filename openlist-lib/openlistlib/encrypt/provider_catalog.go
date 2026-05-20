@@ -138,6 +138,7 @@ func (p *ProxyServer) refreshProviderCatalogAsync(srcHeaders http.Header, force 
 	p.routingMu.Unlock()
 	headers := cloneRoutingHeaders(srcHeaders)
 	go func() {
+		defer recoverBackgroundTask("provider_catalog_refresh")
 		defer func() {
 			p.routingMu.Lock()
 			p.catalogRefreshing = false

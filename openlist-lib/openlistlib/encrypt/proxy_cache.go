@@ -27,6 +27,7 @@ type CachedRedirectInfo struct {
 func (p *ProxyServer) startCacheCleanup() {
 	p.cleanupTicker = time.NewTicker(2 * time.Minute)
 	go func() {
+		defer recoverBackgroundTask("cache_cleanup")
 		for {
 			select {
 			case <-p.cleanupTicker.C:

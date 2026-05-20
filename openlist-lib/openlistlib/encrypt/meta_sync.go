@@ -201,6 +201,7 @@ func (p *ProxyServer) startDBExportSyncLoop() {
 	p.metaSyncWG.Add(1)
 	go func() {
 		defer p.metaSyncWG.Done()
+		defer recoverBackgroundTask("db_export_sync_loop")
 		timer := time.NewTimer(3 * time.Second)
 		defer timer.Stop()
 		for {
