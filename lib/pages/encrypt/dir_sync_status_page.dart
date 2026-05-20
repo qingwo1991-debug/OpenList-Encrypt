@@ -6,9 +6,11 @@ class DirSyncStatusPage extends StatefulWidget {
   const DirSyncStatusPage({
     super.key,
     required this.baseUrl,
+    required this.proxyPort,
   });
 
   final String baseUrl;
+  final int proxyPort;
 
   @override
   State<DirSyncStatusPage> createState() => _DirSyncStatusPageState();
@@ -24,9 +26,11 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
   bool _loading = true;
   bool _running = false;
   String? _error;
-  Map<String, dynamic> _overview = const {};
+  Map<String, dynamic> _remoteOverview = const {};
+  Map<String, dynamic> _localOverview = const {};
 
   String get _baseUrl => widget.baseUrl.replaceFirst(RegExp(r'/+$'), '');
+  String get _localBaseUrl => 'http://127.0.0.1:${widget.proxyPort}';
 
   @override
   void initState() {
@@ -40,11 +44,18 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
       _error = null;
     });
     try {
-      final resp = await _dio.get('$_baseUrl/api/encrypt/dir-sync/overview');
-      final root = resp.data is Map<String, dynamic> ? resp.data as Map<String, dynamic> : const <String, dynamic>{};
-      final data = root['data'] is Map<String, dynamic> ? root['data'] as Map<String, dynamic> : const <String, dynamic>{};
+      final localResp = await _dio.get('$_localBaseUrl/api/encrypt/sync/overview');
+      final localRoot = localResp.data is Map<String, dynamic> ? localResp.data as Map<String, dynamic> : const <String, dynamic>{};
+      final localData = localRoot['data'] is Map<String, dynamic> ? localRoot['data'] as Map<String, dynamic> : const <String, dynamic>{};
+      Map<String, dynamic> remoteData = const <String, dynamic>{};
+      if (_baseUrl.isNotEmpty) {
+        final remoteResp = await _dio.get('$_baseUrl/api/encrypt/dir-sync/overview');
+        final remoteRoot = remoteResp.data is Map<String, dynamic> ? remoteResp.data as Map<String, dynamic> : const <String, dynamic>{};
+        remoteData = remoteRoot['data'] is Map<String, dynamic> ? remoteRoot['data'] as Map<String, dynamic> : const <String, dynamic>{};
+      }
       setState(() {
-        _overview = data;
+        _localOverview = localData;
+        _remoteOverview = remoteData;
       });
     } catch (e) {
       setState(() {
@@ -58,6 +69,9 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
   }
 
   Future<void> _runSync() async {
+    if (_baseUrl.isEmpty) {
+      return;
+    }
     setState(() {
       _running = true;
       _error = null;
@@ -77,10 +91,16 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
   }
 
   Map<String, dynamic> get _job =>
-      _overview['current_job'] is Map<String, dynamic> ? _overview['current_job'] as Map<String, dynamic> : const <String, dynamic>{};
+      _remoteOverview['current_job'] is Map<String, dynamic> ? _remoteOverview['current_job'] as Map<String, dynamic> : const <String, dynamic>{};
 
   Map<String, dynamic> get _snapshots =>
-      _overview['snapshot_stats'] is Map<String, dynamic> ? _overview['snapshot_stats'] as Map<String, dynamic> : const <String, dynamic>{};
+      _remoteOverview['snapshot_stats'] is Map<String, dynamic> ? _remoteOverview['snapshot_stats'] as Map<String, dynamic> : const <String, dynamic>{};
+
+  Map<String, dynamic> get _localCounts =>
+      _localOverview['local_counts'] is Map<String, dynamic> ? _localOverview['local_counts'] as Map<String, dynamic> : const <String, dynamic>{};
+
+  List<dynamic> get _recentCycles =>
+      _localOverview['recent_cycles'] is List<dynamic> ? _localOverview['recent_cycles'] as List<dynamic> : const <dynamic>[];
 
   @override
   Widget build(BuildContext context) {
@@ -102,6 +122,8 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
             : ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
+                  _buildLocalSyncCard(context),
+                  const SizedBox(height: 12),
                   _buildHeaderCard(context),
                   const SizedBox(height: 12),
                   _buildMetricGrid(context),
@@ -113,7 +135,7 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
                   _buildErrorCard(context),
                   const SizedBox(height: 12),
                   FilledButton.icon(
-                    onPressed: (_running || !(_overview['scan_configured'] == true)) ? null : _runSync,
+                    onPressed: (_running || _baseUrl.isEmpty || !(_remoteOverview['scan_configured'] == true)) ? null : _runSync,
                     icon: _running
                         ? const SizedBox(
                             width: 16,
@@ -132,9 +154,19 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
 
   Widget _buildHeaderCard(BuildContext context) {
     final theme = Theme.of(context);
+    if (_baseUrl.isEmpty) {
+      return Card(
+        elevation: 0,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: const Padding(
+          padding: EdgeInsets.all(16),
+          child: Text('未配置 Go 服务 API 地址，当前仅展示本机 DB_EXPORT 同步状态。'),
+        ),
+      );
+    }
     final status = (_job['status'] ?? 'idle').toString();
     final progress = (_job['progress_percent'] as num?)?.toDouble() ?? 0;
-    final scanConfigured = _overview['scan_configured'] == true;
+    final scanConfigured = _remoteOverview['scan_configured'] == true;
     Color tone;
     switch (status) {
       case 'running':
@@ -162,7 +194,7 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                   decoration: BoxDecoration(
-                    color: tone.withValues(alpha: 0.12),
+                    color: tone.withOpacity(0.12),
                     borderRadius: BorderRadius.circular(999),
                   ),
                   child: Text(
@@ -187,7 +219,7 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
             ),
             const SizedBox(height: 6),
             Text(
-              '模式：${(_overview['mode'] ?? '-').toString()}',
+              '模式：${(_remoteOverview['mode'] ?? '-').toString()}',
               style: theme.textTheme.bodyMedium,
             ),
             const SizedBox(height: 16),
@@ -201,6 +233,86 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
               '进度 ${progress.toStringAsFixed(0)}%',
               style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLocalSyncCard(BuildContext context) {
+    final theme = Theme.of(context);
+    final enabled = _localOverview['enabled'] == true;
+    final mode = (_localOverview['sync_mode'] ?? '-').toString();
+    final lastSuccess = (_localOverview['last_success_at'] ?? '').toString();
+    final lastImported = (_localOverview['last_cycle_imported'] ?? 0).toString();
+    final totalImported = (_localOverview['total_imported'] ?? 0).toString();
+    final lagSeconds = (_localOverview['lag_seconds'] ?? 0).toString();
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '本机 DB_EXPORT 同步',
+              style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              enabled ? '已启用' : '未启用',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+                color: enabled ? Colors.green : Colors.orange,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text('模式：$mode', style: theme.textTheme.bodyMedium),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                _metricCard(context, '最近导入', lastImported),
+                _metricCard(context, '累计导入', totalImported),
+                _metricCard(context, '同步滞后秒', lagSeconds),
+                _metricCard(context, 'size 条目', '${_localCounts['size_entries'] ?? 0}'),
+                _metricCard(context, 'strategy 条目', '${_localCounts['strategy_entries'] ?? 0}'),
+                _metricCard(context, 'range 条目', '${_localCounts['range_compat_entries'] ?? 0}'),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _timeRow('最近成功', lastSuccess),
+            const SizedBox(height: 8),
+            Text(
+              '最近轮次',
+              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            if (_recentCycles.isEmpty)
+              const Text('暂无同步轮次记录')
+            else
+              ..._recentCycles.take(5).map((cycle) {
+                final item = cycle is Map<String, dynamic> ? cycle : const <String, dynamic>{};
+                final ok = item['ok'] == true;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          (item['cycle_at'] ?? 0).toString(),
+                          style: const TextStyle(fontFeatures: [FontFeature.tabularFigures()]),
+                        ),
+                      ),
+                      Text(ok ? 'OK' : 'FAIL', style: TextStyle(color: ok ? Colors.green : Colors.red)),
+                      const SizedBox(width: 12),
+                      Text('导入 ${item['imported'] ?? 0}'),
+                    ],
+                  ),
+                );
+              }),
           ],
         ),
       ),

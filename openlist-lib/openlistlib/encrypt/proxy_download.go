@@ -102,13 +102,22 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 	convertedURLPath := false
 	noSuffixURLPath := ""
 	convertedNoSuffixURLPath := false
+	mappedRealPath := ""
 
 	// 如果开启了文件名加密，转换为真实加密名
 	if encPath != nil && encPath.EncName {
 		fileName := path.Base(filePath)
 		if fileName != "/" && fileName != "." {
-			realName := convertRealNameByRule(encPath, filePath)
-			newFilePath := path.Join(path.Dir(filePath), realName)
+			if cachedRealName, ok := GetCachedRealName(path.Dir(filePath), fileName); ok {
+				mappedRealPath = path.Join(path.Dir(filePath), cachedRealName)
+				p.debugf("playback", "download mapping hit display=%s real=%s", filePath, mappedRealPath)
+			}
+
+			newFilePath := mappedRealPath
+			if strings.TrimSpace(newFilePath) == "" {
+				realName := convertRealNameByRule(encPath, filePath)
+				newFilePath = path.Join(path.Dir(filePath), realName)
+			}
 			if strings.HasPrefix(originalPath, "/d/") {
 				actualURLPath = "/d" + newFilePath
 			} else {
@@ -137,8 +146,11 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 		log.Debugf("%s handleDownload: got fileSize from cache: %d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
 	}
 	if fileSize == 0 && encPath != nil && encPath.EncName {
-		realName := convertRealNameByRule(encPath, filePath)
-		encPathFull := path.Join(path.Dir(filePath), realName)
+		encPathFull := mappedRealPath
+		if strings.TrimSpace(encPathFull) == "" {
+			realName := convertRealNameByRule(encPath, filePath)
+			encPathFull = path.Join(path.Dir(filePath), realName)
+		}
 		if !strings.HasPrefix(encPathFull, "/") {
 			encPathFull = "/" + encPathFull
 		}

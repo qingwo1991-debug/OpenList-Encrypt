@@ -430,7 +430,6 @@ class OpenListService : Service(), OpenList.Listener {
         }
         
         Log.d(TAG, "Initializing and starting OpenList")
-        isRunning = true
         
         mScope.launch(Dispatchers.IO) {
             try {
@@ -440,6 +439,10 @@ class OpenListService : Service(), OpenList.Listener {
                 
                 // Start OpenList
                 OpenList.startup()
+                if (!OpenList.isRunning()) {
+                    throw IllegalStateException("OpenList backend did not report running after startup")
+                }
+                isRunning = true
                 
                 // Clear cached address to force refresh
                 mLocalAddress = ""

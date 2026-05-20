@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:openlist_encrypt/generated/l10n.dart';
 import 'package:openlist_encrypt/pages/openlist/openlist.dart';
 import 'package:openlist_encrypt/pages/app_update_dialog.dart';
@@ -169,6 +172,29 @@ class _MainController extends GetxController {
     selectedIndex.value = index;
   }
 
+  Future<bool> _waitForLocalHTTPReady(String baseUrl, {int timeoutSeconds = 20}) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+    final deadline = DateTime.now().add(Duration(seconds: timeoutSeconds));
+    try {
+      while (DateTime.now().isBefore(deadline)) {
+        try {
+          final req = await client.getUrl(Uri.parse('$baseUrl/ping'));
+          final resp = await req.close().timeout(const Duration(seconds: 2));
+          await resp.drain<void>();
+          if (resp.statusCode >= 200 && resp.statusCode < 500) {
+            return true;
+          }
+        } catch (_) {
+          // Keep polling until timeout.
+        }
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   @override
   void onInit() async {
     final webPage = await NativeBridge.appConfig.isAutoOpenWebPageEnabled();
@@ -176,17 +202,19 @@ class _MainController extends GetxController {
       setPageIndex(MyHomePage.webPageIndex);
     }
 
-    // 初始化并启动加密代理
+    // 先启动后台服务，再等待 5244 就绪后启动 5344 代理。
+    // 这样前端不会过早把“服务已启动”当成“端口已可用”。
     try {
+      await ServiceManager.instance.startService();
+      await _waitForLocalHTTPReady('http://127.0.0.1:5244');
+
       final dataDir = await NativeBridge.appConfig.getDataDir();
       await NativeBridge.encryptProxy.initEncryptProxy('$dataDir/encrypt_config.json');
       await NativeBridge.encryptProxy.startEncryptProxy();
+      await _waitForLocalHTTPReady('http://127.0.0.1:5344', timeoutSeconds: 10);
     } catch (e) {
       debugPrint('Failed to start encrypt proxy: $e');
     }
-
-    // 自动启动后台服务
-    await ServiceManager.instance.startService();
 
     WidgetsBinding.instance.addPostFrameCallback((timeStamp) async {
       if (await NativeBridge.appConfig.isAutoCheckUpdateEnabled()) {

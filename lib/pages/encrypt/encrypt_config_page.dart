@@ -213,7 +213,22 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   Future<void> _checkProxyStatus() async {
     try {
       final running = await NativeBridge.encryptProxy.isEncryptProxyRunning();
-      setState(() => _proxyRunning = running);
+      final proxyPort = int.tryParse(_proxyPortController.text) ?? 5344;
+      var ready = false;
+      if (running) {
+        final dio = Dio(BaseOptions(
+          connectTimeout: const Duration(seconds: 2),
+          receiveTimeout: const Duration(seconds: 2),
+          sendTimeout: const Duration(seconds: 2),
+        ));
+        try {
+          final resp = await dio.get('http://127.0.0.1:$proxyPort/ping');
+          ready = resp.statusCode != null && resp.statusCode! >= 200 && resp.statusCode! < 500;
+        } catch (_) {
+          ready = false;
+        }
+      }
+      setState(() => _proxyRunning = running && ready);
     } catch (e) {
       debugPrint('Failed to check proxy status: $e');
     }
@@ -927,6 +942,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                                 MaterialPageRoute(
                                   builder: (_) => DirSyncStatusPage(
                                     baseUrl: _dbExportBaseUrlController.text.trim(),
+                                    proxyPort: int.tryParse(_proxyPortController.text) ?? 5344,
                                   ),
                                 ),
                               );
