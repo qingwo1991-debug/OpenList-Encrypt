@@ -99,42 +99,4 @@ jobs:
           path: "${{ github.workspace }}/android/app/libs/*.aar"
           retention-days: 50
 
-  build_ios:
-    name: Build OpenList iOS Framework
-    needs: [version]
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: 1.25.0
-
-      - name: Download OpenList Source Code
-        run: |
-          cd $GITHUB_WORKSPACE/openlist-lib/scripts
-          chmod +x *.sh
-          ./init_openlist.sh
-          ./init_web_ios.sh
-
-      - name: Build OpenList iOS Framework
-        run: |
-          cd $GITHUB_WORKSPACE/openlist-lib/scripts
-          chmod +x *.sh
-          ./init_gomobile.sh
-          ./gobind_ios.sh
-        env:
-          OPENLIST_VERSION: ${{ needs.version.outputs.openlist_version }}
-          OPENLIST_WEB_VERSION: ${{ needs.version.outputs.openlist_web_version }}
-          OPENLIST_BUILT_AT: ${{ needs.version.outputs.openlist_built_at }}
-          OPENLIST_GIT_COMMIT: ${{ needs.version.outputs.openlist_git_commit }}
-          OPENLIST_GIT_AUTHOR: The OpenList Projects Contributors <noreply@openlist.team>
-
-      - name: Upload OpenList iOS Framework
-        uses: actions/upload-artifact@v4
-        with:
-          name: "openlist-ios-xcframework"
-          path: "${{ github.workspace }}/ios/Frameworks/*.xcframework"
-          retention-days: 50
