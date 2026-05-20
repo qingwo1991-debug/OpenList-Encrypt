@@ -234,8 +234,18 @@ func buildRealPathCandidates(ep *EncryptPath, inputPath string) []string {
 	if ep == nil {
 		return candidates
 	}
-	candidates = appendUniquePath(candidates, seen, convertRealNameByRule(ep, inputPath))
-	candidates = appendUniquePath(candidates, seen, ConvertRealNameWithSuffix(ep.Password, ep.EncType, inputPath, ""))
+	joinCandidate := func(sourcePath, candidateName string) string {
+		candidateName = strings.TrimSpace(candidateName)
+		if candidateName == "" {
+			return ""
+		}
+		if strings.HasPrefix(candidateName, "/") {
+			return candidateName
+		}
+		return path.Join(path.Dir(sourcePath), candidateName)
+	}
+	candidates = appendUniquePath(candidates, seen, joinCandidate(inputPath, convertRealNameByRule(ep, inputPath)))
+	candidates = appendUniquePath(candidates, seen, joinCandidate(inputPath, ConvertRealNameWithSuffix(ep.Password, ep.EncType, inputPath, "")))
 
 	dirPath := path.Dir(inputPath)
 	fileName := path.Base(inputPath)
@@ -247,8 +257,8 @@ func buildRealPathCandidates(ep *EncryptPath, inputPath string) []string {
 			cleanBase := base[:idx] + base[idx+endIdx+1:]
 			cleaned := path.Join(dirPath, cleanBase+ext)
 			candidates = appendUniquePath(candidates, seen, cleaned)
-			candidates = appendUniquePath(candidates, seen, convertRealNameByRule(ep, cleaned))
-			candidates = appendUniquePath(candidates, seen, ConvertRealNameWithSuffix(ep.Password, ep.EncType, cleaned, ""))
+			candidates = appendUniquePath(candidates, seen, joinCandidate(cleaned, convertRealNameByRule(ep, cleaned)))
+			candidates = appendUniquePath(candidates, seen, joinCandidate(cleaned, ConvertRealNameWithSuffix(ep.Password, ep.EncType, cleaned, "")))
 		}
 	}
 
@@ -256,8 +266,8 @@ func buildRealPathCandidates(ep *EncryptPath, inputPath string) []string {
 	if suffix != "" && strings.TrimSpace(strippedBase) != "" {
 		stripped := path.Join(dirPath, strippedBase+ext)
 		candidates = appendUniquePath(candidates, seen, stripped)
-		candidates = appendUniquePath(candidates, seen, convertRealNameByRule(ep, stripped))
-		candidates = appendUniquePath(candidates, seen, ConvertRealNameWithSuffix(ep.Password, ep.EncType, stripped, ""))
+		candidates = appendUniquePath(candidates, seen, joinCandidate(stripped, convertRealNameByRule(ep, stripped)))
+		candidates = appendUniquePath(candidates, seen, joinCandidate(stripped, ConvertRealNameWithSuffix(ep.Password, ep.EncType, stripped, "")))
 	}
 	return candidates
 }

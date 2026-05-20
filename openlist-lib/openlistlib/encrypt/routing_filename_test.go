@@ -1,6 +1,9 @@
 package encrypt
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestBuildRealPathCandidatesWithExternalSuffixSamples(t *testing.T) {
 	ep := &EncryptPath{
@@ -21,6 +24,11 @@ func TestBuildRealPathCandidatesWithExternalSuffixSamples(t *testing.T) {
 		candidates := buildRealPathCandidates(ep, sample)
 		if len(candidates) == 0 {
 			t.Fatalf("expected candidates for %s", sample)
+		}
+		for _, candidate := range candidates {
+			if !strings.HasPrefix(candidate, "/enc/") {
+				t.Fatalf("expected candidate to keep parent path, got %q for %s", candidate, sample)
+			}
 		}
 	}
 }

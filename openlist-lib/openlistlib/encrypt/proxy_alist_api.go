@@ -590,8 +590,16 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 
 // handleFsGet 处理获取文件信息
 func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
+	p.handleFsGetOrLink(w, r, "/api/fs/get")
+}
+
+func (p *ProxyServer) handleFsLink(w http.ResponseWriter, r *http.Request) {
+	p.handleFsGetOrLink(w, r, "/api/fs/link")
+}
+
+func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, apiPath string) {
 	ctx := r.Context()
-	log.Infof("%s Proxy handling fs get request", internal.LogPrefix(ctx, internal.TagProxy))
+	log.Infof("%s Proxy handling %s request", internal.LogPrefix(ctx, internal.TagProxy), apiPath)
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -628,7 +636,7 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 转发请求到 Alist
-	req, err := http.NewRequestWithContext(r.Context(), "POST", p.getAlistURL()+"/api/fs/get", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(r.Context(), "POST", p.getAlistURL()+apiPath, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -692,7 +700,7 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 				tryFsGetPath := func(targetPath, stage string) bool {
 					reqData["path"] = targetPath
 					body2, _ := json.Marshal(reqData)
-					req2, err2 := http.NewRequestWithContext(r.Context(), "POST", p.getAlistURL()+"/api/fs/get", bytes.NewReader(body2))
+					req2, err2 := http.NewRequestWithContext(r.Context(), "POST", p.getAlistURL()+apiPath, bytes.NewReader(body2))
 					if err2 != nil {
 						return false
 					}
@@ -722,8 +730,8 @@ func (p *ProxyServer) handleFsGet(w http.ResponseWriter, r *http.Request) {
 					rawURL, _ := data["raw_url"].(string)
 					code, _ := result["code"].(float64)
 					failed := fsGetFailed(respStatusCode, result)
-					p.debugf("filename", "fs/get fallback stage=%s to=%s from=%s http=%d code=%d failed=%v message=%q hasRawURL=%v",
-						stage, targetPath, filePath, respStatusCode, int(code), failed, msg, strings.TrimSpace(rawURL) != "")
+					p.debugf("filename", "%s fallback stage=%s to=%s from=%s http=%d code=%d failed=%v message=%q hasRawURL=%v",
+						apiPath, stage, targetPath, filePath, respStatusCode, int(code), failed, msg, strings.TrimSpace(rawURL) != "")
 					return !failed
 				}
 
@@ -1046,7 +1054,7 @@ func (p *ProxyServer) handleFsRename(w http.ResponseWriter, r *http.Request) {
 	encPath := p.findEncryptPath(filePath)
 	if encPath != nil && encPath.EncName {
 		if cached, ok := p.loadFileCache(filePath); ok && !cached.IsDir {
-			reqData["path"] = convertRealNameByRule(encPath, filePath)
+			reqData["path"] = path.Join(path.Dir(filePath), convertRealNameByRule(encPath, filePath))
 			reqData["name"] = convertRealNameByRule(encPath, name)
 			body, _ = json.Marshal(reqData)
 		}

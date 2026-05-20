@@ -358,6 +358,7 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/redirect/", internal.WrapHandler(p.handleRedirect))
 	mux.HandleFunc("/api/fs/list", internal.WrapHandler(p.handleFsList))
 	mux.HandleFunc("/api/fs/get", internal.WrapHandler(p.handleFsGet))
+	mux.HandleFunc("/api/fs/link", internal.WrapHandler(p.handleFsLink))
 	mux.HandleFunc("/api/fs/put", internal.WrapHandler(p.handleFsPut))
 	mux.HandleFunc("/api/fs/put-back", internal.WrapHandler(p.handleFsPutBack))
 	mux.HandleFunc("/api/fs/remove", internal.WrapHandler(p.handleFsRemove))
