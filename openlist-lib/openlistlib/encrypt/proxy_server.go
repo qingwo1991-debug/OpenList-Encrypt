@@ -228,11 +228,11 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 			},
 		}
 
-		testClient := &http.Client{Timeout: 5 * time.Second, Transport: h2cTransport}
+		testClient := &http.Client{Timeout: 1200 * time.Millisecond, Transport: h2cTransport}
 		testURL := fmt.Sprintf("http://%s:%d/ping", config.AlistHost, config.AlistPort)
 		resp, err := testClient.Get(testURL)
 		if err != nil {
-			log.Warnf("[%s] H2C connection test failed: %v, falling back to HTTP/1.1", internal.TagServer, err)
+			log.Warnf("[%s] H2C connection test failed quickly: %v, falling back to HTTP/1.1", internal.TagServer, err)
 			h2cTransport = nil
 		} else {
 			resp.Body.Close()

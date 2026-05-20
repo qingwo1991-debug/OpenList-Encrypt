@@ -167,6 +167,8 @@ class MyHomePage extends StatelessWidget {
 
 class _MainController extends GetxController {
   final selectedIndex = 1.obs;
+  static const _backendBootTimeoutSeconds = 20;
+  static const _proxyBootTimeoutSeconds = 10;
 
   setPageIndex(int index) {
     selectedIndex.value = index;
@@ -195,6 +197,34 @@ class _MainController extends GetxController {
     }
   }
 
+  Future<void> _warmLocalServiceReadiness() async {
+    final backendReady = await _waitForLocalHTTPReady(
+      'http://127.0.0.1:5244',
+      timeoutSeconds: _backendBootTimeoutSeconds,
+    );
+    if (!backendReady) {
+      debugPrint('OpenList backend not ready within ${_backendBootTimeoutSeconds}s');
+    }
+
+    final proxyReady = await _waitForLocalHTTPReady(
+      'http://127.0.0.1:5344',
+      timeoutSeconds: _proxyBootTimeoutSeconds,
+    );
+    if (!proxyReady) {
+      debugPrint('Encrypt proxy not ready within ${_proxyBootTimeoutSeconds}s');
+    }
+  }
+
+  Future<void> _startLocalServers() async {
+    await ServiceManager.instance.startService();
+
+    final dataDir = await NativeBridge.appConfig.getDataDir();
+    await NativeBridge.encryptProxy.initEncryptProxy('$dataDir/encrypt_config.json');
+    await NativeBridge.encryptProxy.startEncryptProxy();
+
+    unawaited(_warmLocalServiceReadiness());
+  }
+
   @override
   void onInit() async {
     final webPage = await NativeBridge.appConfig.isAutoOpenWebPageEnabled();
@@ -202,18 +232,10 @@ class _MainController extends GetxController {
       setPageIndex(MyHomePage.webPageIndex);
     }
 
-    // 先启动后台服务，再等待 5244 就绪后启动 5344 代理。
-    // 这样前端不会过早把“服务已启动”当成“端口已可用”。
     try {
-      await ServiceManager.instance.startService();
-      await _waitForLocalHTTPReady('http://127.0.0.1:5244');
-
-      final dataDir = await NativeBridge.appConfig.getDataDir();
-      await NativeBridge.encryptProxy.initEncryptProxy('$dataDir/encrypt_config.json');
-      await NativeBridge.encryptProxy.startEncryptProxy();
-      await _waitForLocalHTTPReady('http://127.0.0.1:5344', timeoutSeconds: 10);
+      await _startLocalServers();
     } catch (e) {
-      debugPrint('Failed to start encrypt proxy: $e');
+      debugPrint('Failed to start local servers: $e');
     }
 
     WidgetsBinding.instance.addPostFrameCallback((timeStamp) async {
