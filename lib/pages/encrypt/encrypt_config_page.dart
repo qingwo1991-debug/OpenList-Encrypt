@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import '../../generated/l10n.dart';
 import '../../contant/native_bridge.dart';
 import 'provider_routing_page.dart';
+import 'dir_sync_status_page.dart';
 
 /// 加密配置页面
 class EncryptConfigPage extends StatefulWidget {
@@ -910,6 +911,27 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         labelText: '密码（留空保持不变）',
                       ),
                     ],
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('主动探测 / 数据同步状态'),
+                      subtitle: Text(
+                        _dbExportBaseUrlController.text.trim().isEmpty
+                            ? '先配置 Go 服务 API 地址后查看'
+                            : '查看总量、进度、最近更新时间和下次计划时间',
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: _dbExportBaseUrlController.text.trim().isEmpty
+                          ? null
+                          : () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => DirSyncStatusPage(
+                                    baseUrl: _dbExportBaseUrlController.text.trim(),
+                                  ),
+                                ),
+                              );
+                            },
+                    ),
                     
                     const SizedBox(height: 24),
 
