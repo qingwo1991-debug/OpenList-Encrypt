@@ -3835,6 +3835,13 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	// For GET/HEAD, use /d/ prefix instead of /dav/ — upstream alist serves files via /d/.
+	if (r.Method == "GET" || r.Method == "HEAD") && strings.HasPrefix(targetURLPath, "/dav/") {
+		targetURLPath = "/d" + strings.TrimPrefix(targetURLPath, "/dav")
+	} else if (r.Method == "GET" || r.Method == "HEAD") && targetURLPath == "/dav" {
+		targetURLPath = "/d"
+	}
+
 	targetURL := p.getAlistURL() + targetURLPath
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
