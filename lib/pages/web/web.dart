@@ -36,10 +36,47 @@ class WebScreenState extends State<WebScreen> {
   double _progress = 0;
   String _url = "http://127.0.0.1:5244";
   bool _canGoBack = false;
+  bool _serverReady = false;
+  String _startupStatus = '';
+  int _retryCount = 0;
 
   onClickNavigationBar() {
     log("onClickNavigationBar");
     _webViewController?.reload();
+  }
+
+  Future<void> _waitForServer() async {
+    _retryCount = 0;
+    while (!_serverReady && mounted) {
+      final running = await Android().isRunning();
+      if (running) {
+        // Try a quick HTTP probe to confirm the server is actually accepting connections
+        try {
+          _startupStatus = '正在连接服务...';
+          if (mounted) setState(() {});
+          await Future.delayed(const Duration(seconds: 1));
+        } catch (_) {}
+        if (mounted) {
+          setState(() {
+            _serverReady = true;
+            _startupStatus = '';
+          });
+          _webViewController?.reload();
+        }
+        return;
+      }
+      _retryCount++;
+      final delay = (_retryCount < 10) ? 2000 : 5000;
+      if (_retryCount <= 3) {
+        _startupStatus = '正在启动 OpenList 服务...';
+      } else if (_retryCount <= 30) {
+        _startupStatus = '服务初始化中（${_retryCount}s）...';
+      } else {
+        _startupStatus = '服务启动较慢（${(_retryCount * 2 / 60).toStringAsFixed(1)}分钟），请耐心等待...';
+      }
+      if (mounted) setState(() {});
+      await Future.delayed(Duration(milliseconds: delay));
+    }
   }
 
   @override
@@ -57,9 +94,8 @@ class WebScreenState extends State<WebScreen> {
       }
     });
 
-    // NativeEvent().addServiceStatusListener((isRunning) {
-    //   if (isRunning) _webViewController?.reload();
-    // });
+    // Start background server readiness check
+    _waitForServer();
     super.initState();
   }
 
@@ -81,6 +117,24 @@ class WebScreenState extends State<WebScreen> {
         child: Scaffold(
           body: Column(children: <Widget>[
             SizedBox(height: MediaQuery.of(context).padding.top),
+            if (_startupStatus.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+                color: Colors.orange.shade50,
+                child: Row(
+                  children: [
+                    const SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(_startupStatus,
+                        style: const TextStyle(fontSize: 13, color: Colors.deepOrange)),
+                    ),
+                  ],
+                ),
+              ),
             LinearProgressIndicator(
               value: _progress,
               backgroundColor: Colors.grey[200],
@@ -137,15 +191,9 @@ class WebScreenState extends State<WebScreen> {
                 },
                 onReceivedError: (controller, request, error) async {
                   if (!await Android().isRunning()) {
-                    await Android().startService();
-
-                    for (int i = 0; i < 3; i++) {
-                      await Future.delayed(const Duration(milliseconds: 500));
-                      if (await Android().isRunning()) {
-                        _webViewController?.reload();
-                        break;
-                      }
-                    }
+                    // Server is not running yet, keep waiting
+                    _serverReady = false;
+                    _waitForServer();
                   }
                 },
                 onDownloadStartRequest: (controller, url) async {

@@ -1,4 +1,5 @@
 import 'package:openlist_encrypt/contant/native_bridge.dart';
+import 'package:openlist_encrypt/contant/log_level.dart';
 import 'package:openlist_encrypt/generated_api.dart';
 import 'package:openlist_encrypt/pages/settings/preference_widgets.dart';
 import 'package:openlist_encrypt/pages/settings/troubleshooting_page.dart';
@@ -165,6 +166,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onChanged: (value) {
                 controller.silentJumpApp = value;
               }),
+          // Log level filter
+          BasicPreference(
+            title: '日志级别',
+            subtitle: '当前: ${controller.logLevelName}（低于此级别的日志不显示）',
+            leading: const Icon(Icons.bug_report),
+            onTap: () {
+              _showLogLevelDialog(context, controller);
+            },
+          ),
           
           BasicPreference(
             title: S.of(context).troubleshooting,
@@ -222,6 +232,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Text(S.of(context).cancel),
             ),
           ],
+        );
+      },
+    );
+  }
+
+  void _showLogLevelDialog(BuildContext context, _SettingsController controller) {
+    final levels = ['PANIC', 'FATAL', 'ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'];
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('选择日志级别'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: List.generate(levels.length, (i) {
+              return RadioListTile<int>(
+                title: Text(levels[i]),
+                subtitle: Text(i <= 2 ? '仅严重错误' : i <= 4 ? '常规信息' : '详细调试'),
+                value: i,
+                groupValue: controller.logLevel,
+                onChanged: (value) {
+                  controller.setLogLevel(value!);
+                  Navigator.of(context).pop();
+                },
+              );
+            }),
+          ),
         );
       },
     );
@@ -284,6 +321,28 @@ class _SettingsController extends GetxController {
         _silentJumpApp.value = value,
         NativeBridge.appConfig.setSilentJumpAppEnabled(value)
       };
+
+  final _logLevel = 4.obs; // default INFO
+
+  int get logLevel => _logLevel.value;
+  String get logLevelName => _levelName(_logLevel.value);
+
+  setLogLevel(int level) {
+    _logLevel.value = level;
+  }
+
+  static String _levelName(int level) {
+    switch (level) {
+      case 0: return 'PANIC';
+      case 1: return 'FATAL';
+      case 2: return 'ERROR';
+      case 3: return 'WARN';
+      case 4: return 'INFO';
+      case 5: return 'DEBUG';
+      case 6: return 'TRACE';
+      default: return 'INFO';
+    }
+  }
 
   @override
   void onInit() async {

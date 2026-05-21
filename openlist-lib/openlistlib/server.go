@@ -56,6 +56,24 @@ func Init(event Event, cb LogCallback) error {
 	return nil
 }
 
+// SetLogLevel sets the log level for the main alist service (5244).
+// level should be one of: "panic", "fatal", "error", "warn", "info", "debug", "trace".
+func SetLogLevel(level string) {
+	if utils.Log == nil {
+		return
+	}
+	lvl, err := log.ParseLevel(level)
+	if err != nil {
+		lvl = log.InfoLevel
+	}
+	utils.Log.SetLevel(lvl)
+	// Also propagate to the global encrypt proxy log level if set.
+	encryptLog := log.StandardLogger()
+	if encryptLog != nil {
+		encryptLog.SetLevel(lvl)
+	}
+}
+
 func IsRunning(t string) bool {
 	return bootstrap.IsRunning(t)
 }
