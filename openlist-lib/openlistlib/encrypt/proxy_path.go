@@ -441,6 +441,34 @@ func (p *ProxyServer) findEncryptPath(filePath string) *EncryptPath {
 	return nil
 }
 
+func (p *ProxyServer) isEncryptDirRoot(filePath string) bool {
+	decodedPath, err := url.PathUnescape(filePath)
+	if err != nil {
+		decodedPath = filePath
+	}
+	normalized := strings.TrimRight(path.Clean(strings.TrimSpace(decodedPath)), "/")
+	if normalized == "." || normalized == "" {
+		return false
+	}
+
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+
+	for _, ep := range p.config.EncryptPaths {
+		if ep == nil || !ep.Enable {
+			continue
+		}
+		prefix := strings.TrimRight(path.Clean(strings.TrimSpace(ep.prefix)), "/")
+		if prefix == "." || prefix == "" {
+			continue
+		}
+		if normalized == prefix {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *ProxyServer) applyRoutingHints(req *http.Request, provider, driver string) {
 	if req == nil {
 		return

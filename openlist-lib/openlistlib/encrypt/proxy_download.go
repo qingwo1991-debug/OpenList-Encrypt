@@ -139,10 +139,12 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 
 	// 获取文件大小 - 首先尝试从缓存获取（使用带 TTL 的缓存方法）
 	var fileSize int64 = 0
+	cachedRawURL := ""
 	if cached, ok := p.loadFileCache(filePath); ok {
 		if !cached.IsDir && cached.Size > 0 {
 			fileSize = cached.Size
 		}
+		cachedRawURL = strings.TrimSpace(cached.RawURL)
 		log.Debugf("%s handleDownload: got fileSize from cache: %d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
 	}
 	if fileSize == 0 && encPath != nil && encPath.EncName {
@@ -168,11 +170,16 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 
 	type downloadAttempt struct {
 		urlPath   string
+		fullURL   string
 		sendRange bool
 		stage     string
 	}
-	buildDownloadRequest := func(urlPath string, sendRange bool) (*http.Request, error) {
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, p.getAlistURL()+urlPath, nil)
+	buildDownloadRequest := func(urlPath, fullURL string, sendRange bool) (*http.Request, error) {
+		targetURL := fullURL
+		if strings.TrimSpace(targetURL) == "" {
+			targetURL = p.getAlistURL() + urlPath
+		}
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -214,30 +221,33 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 	}
 
 	attempts := make([]downloadAttempt, 0, 6)
-	addAttempt := func(urlPath string, sendRange bool, stage string) {
+	addAttempt := func(urlPath, fullURL string, sendRange bool, stage string) {
 		for _, a := range attempts {
-			if a.urlPath == urlPath && a.sendRange == sendRange {
+			if a.urlPath == urlPath && a.fullURL == fullURL && a.sendRange == sendRange {
 				return
 			}
 		}
-		attempts = append(attempts, downloadAttempt{urlPath: urlPath, sendRange: sendRange, stage: stage})
+		attempts = append(attempts, downloadAttempt{urlPath: urlPath, fullURL: fullURL, sendRange: sendRange, stage: stage})
 	}
 	initialURLPath := actualURLPath
 	primaryRange := shouldSendRangeForPath(actualURLPath)
-	addAttempt(actualURLPath, primaryRange, "primary")
+	if cachedRawURL != "" {
+		addAttempt(actualURLPath, cachedRawURL, false, "cached-raw-url")
+	}
+	addAttempt(actualURLPath, "", primaryRange, "primary")
 	if convertedNoSuffixURLPath && encPath != nil && encPath.EncName {
-		addAttempt(noSuffixURLPath, shouldSendRangeForPath(noSuffixURLPath), "fallback-encrypted-no-suffix")
+		addAttempt(noSuffixURLPath, "", shouldSendRangeForPath(noSuffixURLPath), "fallback-encrypted-no-suffix")
 	}
 	if convertedURLPath && encPath != nil && encPath.EncName {
-		addAttempt(originalPath, shouldSendRangeForPath(originalPath), "fallback-original-path")
+		addAttempt(originalPath, "", shouldSendRangeForPath(originalPath), "fallback-original-path")
 	}
 	if clientRangeHeader != "" {
-		addAttempt(actualURLPath, !primaryRange, "fallback-toggle-range")
+		addAttempt(actualURLPath, "", !primaryRange, "fallback-toggle-range")
 		if convertedNoSuffixURLPath && encPath != nil && encPath.EncName {
-			addAttempt(noSuffixURLPath, !shouldSendRangeForPath(noSuffixURLPath), "fallback-encrypted-no-suffix-toggle-range")
+			addAttempt(noSuffixURLPath, "", !shouldSendRangeForPath(noSuffixURLPath), "fallback-encrypted-no-suffix-toggle-range")
 		}
 		if convertedURLPath && encPath != nil && encPath.EncName {
-			addAttempt(originalPath, !shouldSendRangeForPath(originalPath), "fallback-original-toggle-range")
+			addAttempt(originalPath, "", !shouldSendRangeForPath(originalPath), "fallback-original-toggle-range")
 		}
 	}
 	p.debugf("playback", "download attempts path=%s range=%q count=%d", filePath, clientRangeHeader, len(attempts))
@@ -257,7 +267,7 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 	var selectedAttempt downloadAttempt
 	for i, attempt := range attempts {
 		p.debugf("playback", "download attempt=%d stage=%s path=%s sendRange=%v", i+1, attempt.stage, attempt.urlPath, attempt.sendRange)
-		req, err = buildDownloadRequest(attempt.urlPath, attempt.sendRange)
+		req, err = buildDownloadRequest(attempt.urlPath, attempt.fullURL, attempt.sendRange)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -388,7 +398,7 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 				log.Infof("%s handleDownload: probed remote fileSize=%d for path: %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
 				// re-request resource to ensure fresh stream with streamClient
 				resp.Body.Close()
-				req2, reqErr := buildDownloadRequest(actualURLPath, selectedAttempt.sendRange)
+				req2, reqErr := buildDownloadRequest(actualURLPath, selectedAttempt.fullURL, selectedAttempt.sendRange)
 				if reqErr != nil {
 					http.Error(w, reqErr.Error(), http.StatusInternalServerError)
 					return

@@ -624,14 +624,16 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 	// 检查是否需要转换文件名
 	encPath := p.findEncryptPath(filePath)
 	if encPath != nil && encPath.EncName {
-		// 尝试将显示名转换为真实加密名（ConvertRealName 会处理 orig_ 前缀）
-		fileName := path.Base(filePath)
-		if fileName != "/" && fileName != "." {
-			realName := convertRealNameByRule(encPath, filePath)
-			filePath = path.Join(path.Dir(filePath), realName)
-			reqData["path"] = filePath
-			body, _ = json.Marshal(reqData)
-			convertedPathForGet = filePath != originalPath
+		if !p.isEncryptDirRoot(filePath) {
+			// 尝试将显示名转换为真实加密名（ConvertRealName 会处理 orig_ 前缀）
+			fileName := path.Base(filePath)
+			if fileName != "/" && fileName != "." {
+				realName := convertRealNameByRule(encPath, filePath)
+				filePath = path.Join(path.Dir(filePath), realName)
+				reqData["path"] = filePath
+				body, _ = json.Marshal(reqData)
+				convertedPathForGet = filePath != originalPath
+			}
 		}
 	}
 
@@ -752,11 +754,22 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 				rawURL, _ := data["raw_url"].(string)
 				size, _ := data["size"].(float64)
 				provider, _ := data["provider"].(string)
+				sign, _ := data["sign"].(string)
+				isDir, _ := data["is_dir"].(bool)
 				driver := p.inferDriverFromPath(ctx, originalPath, r.Header)
 				p.noteProviderCandidate(provider)
 				p.noteDriverCandidate(driver)
 
 				log.Infof("%s handleFsGet: path=%s, size=%v, rawURL=%s", internal.LogPrefix(ctx, internal.TagProxy), originalPath, size, rawURL)
+
+				p.storeFileCache(originalPath, &FileInfo{
+					Name:   path.Base(originalPath),
+					Size:   int64(size),
+					IsDir:  isDir,
+					Path:   originalPath,
+					RawURL: rawURL,
+					Sign:   sign,
+				})
 
 				// 如果开启了文件名加密，将加密名转换为显示名
 				if encPath.EncName {

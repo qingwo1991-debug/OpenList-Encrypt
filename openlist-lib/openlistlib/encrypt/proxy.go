@@ -649,6 +649,8 @@ type FileInfo struct {
 	IsDir    bool   `json:"is_dir"`
 	Modified string `json:"modified"`
 	Path     string `json:"path"`
+	RawURL   string `json:"raw_url"`
+	Sign     string `json:"sign"`
 }
 
 var (
