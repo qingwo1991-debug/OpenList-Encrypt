@@ -4513,8 +4513,20 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	log.Debugf("Proxy response status: %d", resp.StatusCode)
 
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		location := resp.Header.Get("Location")
+		if location != "" {
+			if rewritten := rewriteProxyRedirectLocation(r, p.getAlistURL(), location); rewritten != "" {
+				w.Header().Set("Location", rewritten)
+			}
+		}
+	}
+
 	// 复制响应头
 	for key, values := range resp.Header {
+		if strings.EqualFold(key, "Location") {
+			continue
+		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
@@ -4529,4 +4541,70 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 // generateRedirectKey 生成重定向 key
 func generateRedirectKey() string {
 	return fmt.Sprintf("%d%d", time.Now().UnixNano(), time.Now().UnixNano()%1000000)
+}
+
+func requestOriginFromProxyRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin != "" {
+		return strings.TrimRight(origin, "/")
+	}
+	proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if proto == "" {
+		if r.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = strings.TrimSpace(r.Host)
+	}
+	if host == "" {
+		return ""
+	}
+	return proto + "://" + host
+}
+
+func rewriteProxyRedirectLocation(r *http.Request, upstreamBaseURL, location string) string {
+	location = strings.TrimSpace(location)
+	if location == "" {
+		return ""
+	}
+
+	parsedLoc, err := url.Parse(location)
+	if err != nil {
+		return location
+	}
+	if !parsedLoc.IsAbs() {
+		return location
+	}
+
+	parsedUpstream, err := url.Parse(strings.TrimSpace(upstreamBaseURL))
+	if err != nil || parsedUpstream.Host == "" {
+		return location
+	}
+	if !strings.EqualFold(parsedLoc.Host, parsedUpstream.Host) {
+		return location
+	}
+
+	origin := requestOriginFromProxyRequest(r)
+	if origin == "" {
+		return location
+	}
+
+	rewritten := parsedLoc.Path
+	if rewritten == "" {
+		rewritten = "/"
+	}
+	if parsedLoc.RawQuery != "" {
+		rewritten += "?" + parsedLoc.RawQuery
+	}
+	if parsedLoc.Fragment != "" {
+		rewritten += "#" + parsedLoc.Fragment
+	}
+	return origin + rewritten
 }

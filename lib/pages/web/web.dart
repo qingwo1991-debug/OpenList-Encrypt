@@ -34,7 +34,7 @@ class WebScreenState extends State<WebScreen> {
   );
 
   double _progress = 0;
-  String _url = "http://localhost:5244";
+  String _url = "http://127.0.0.1:5244";
   bool _canGoBack = false;
 
   onClickNavigationBar() {
@@ -44,9 +44,18 @@ class WebScreenState extends State<WebScreen> {
 
   @override
   void initState() {
-    Android()
-        .getOpenListHttpPort()
-        .then((port) => {_url = "http://localhost:$port"});
+    Android().getOpenListHttpPort().then((port) async {
+      final nextUrl = "http://127.0.0.1:$port";
+      if (!mounted) return;
+      setState(() {
+        _url = nextUrl;
+      });
+      if (_webViewController != null) {
+        await _webViewController!.loadUrl(
+          urlRequest: URLRequest(url: WebUri(nextUrl)),
+        );
+      }
+    });
 
     // NativeEvent().addServiceStatusListener((isRunning) {
     //   if (isRunning) _webViewController?.reload();
