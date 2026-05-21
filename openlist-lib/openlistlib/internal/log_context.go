@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // 操作标签常量
@@ -121,5 +124,34 @@ func WrapHandler(handler http.HandlerFunc) http.HandlerFunc {
 		ctx := WithLogContext(r.Context(), lc)
 		handler(w, r.WithContext(ctx))
 	}
+}
+
+// TraceMiddleware wraps an http.Handler to add request tracing to all requests.
+// Logs: [timestamp] [req-xxx] [path] [request] METHOD /path status=200 duration=1ms
+func TraceMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pathTag := ExtractPathTag(r.URL.Path, "")
+		lc := NewLogContext(pathTag)
+		ctx := WithLogContext(r.Context(), lc)
+		start := time.Now()
+
+		// Capture status code
+		wr := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(wr, r.WithContext(ctx))
+
+		dur := time.Since(start)
+		log.Infof("[%s] [%s] [request] %s %s status=%d duration=%s",
+			lc.RequestID, lc.PathTag, r.Method, r.URL.Path, wr.statusCode, dur)
+	})
+}
+
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
 }
 

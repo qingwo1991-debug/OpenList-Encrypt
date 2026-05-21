@@ -377,7 +377,7 @@ func (p *ProxyServer) Start() error {
 
 	p.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", p.config.ProxyPort),
-		Handler:           mux,
+		Handler:           internal.TraceMiddleware(mux),
 		ReadHeaderTimeout: 10 * time.Second, // 防慢连接 header 攻击
 		ReadTimeout:       0,                // 上传/流式场景允许长时间读 body
 		WriteTimeout:      0,                // 下载流允许长连接写出
