@@ -3207,10 +3207,8 @@ func (p *ProxyServer) streamRewriteFsListResponse(w http.ResponseWriter, body io
 					showName := convertShowNameByRule(fileEncPath, name)
 					item["name"] = showName
 					normalizeDecryptedMediaFields(item, showName)
-					if _, ok := item["path"].(string); !ok || item["path"] == "" {
-						item["path"] = path.Join(path.Dir(filePath), showName)
-					}
 				}
+				delete(item, "path")
 
 				if !firstItem {
 					if _, err := bw.WriteString(","); err != nil {
